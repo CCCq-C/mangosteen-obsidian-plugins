@@ -1,4 +1,16 @@
 {
+      "schemaVersion": 1,
+        "version": "5.3.4",
+          "package": "mangosteen-obsidian-plugins-5.3.4.zip",
+            "sha256": "e71d1e79ee4edecbccacb3b9b64febeb8dbd43e5f8602109a2362d4f860354bc",
+              "components": {
+                      "mangosteen-agent": "5.3.4",
+                          "mangosteen-image": "5.3.4",
+                              "mangosteen-video": "5.3.4",
+                                  "mangosteen-workbench": "2.0.0"
+                                    }
+                                    }
+                                    {
   "schemaVersion": 1,
   "version": "5.3.3",
   "package": "mangosteen-obsidian-plugins-5.3.3.zip",
