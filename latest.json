@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "version": "5.3.5",
-  "package": "mangosteen-obsidian-plugins-5.3.5.zip",
-  "sha256": "d27f55c9a5b1bcf90de2d126ec1ae649316ba4ed2e5e686a39e34e628d1eccdd",
+  "version": "5.3.6",
+  "package": "mangosteen-obsidian-plugins-5.3.6.zip",
+  "sha256": "38b939b4775f80c2f7d130489957f8b4dc4ea7503e7308cb0753cbe51dde9e40",
   "components": {
-    "mangosteen-agent": "5.3.5",
-    "mangosteen-image": "5.3.5",
-    "mangosteen-video": "5.3.5",
+    "mangosteen-agent": "5.3.6",
+    "mangosteen-image": "5.3.6",
+    "mangosteen-video": "5.3.6",
     "mangosteen-workbench": "2.0.0"
   }
 }
