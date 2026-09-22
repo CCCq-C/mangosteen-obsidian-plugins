@@ -1,12 +1,17 @@
 {
   "schemaVersion": 1,
-  "version": "5.3.10",
-  "package": "mangosteen-obsidian-plugins-5.3.10.zip",
-  "sha256": "779bd67ef0542278c0f17ddcf7187db610a53fdcd3c1cb6e5c83d82965b27a20",
+  "version": "5.3.11",
+  "package": "mangosteen-obsidian-plugins-5.3.11.zip",
+  "sha256": "c578a81775f4e50a1d833415a10ad46d6269aec0b9a15e4db049b040955ea724",
+  "notes": [
+    "修复：日志无法加载的问题",
+    "修复：首次登录误报失败、必须重启后才生效的问题",
+    "优化：登录后的模型列表自动重试与后台同步"
+  ],
   "components": {
-    "mangosteen-agent": "5.3.10",
-    "mangosteen-image": "5.3.10",
-    "mangosteen-video": "5.3.10",
+    "mangosteen-agent": "5.3.11",
+    "mangosteen-image": "5.3.11",
+    "mangosteen-video": "5.3.11",
     "mangosteen-workbench": "2.0.0"
   }
 }
