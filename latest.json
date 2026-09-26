@@ -1,17 +1,19 @@
 {
   "schemaVersion": 1,
-  "version": "5.3.11",
-  "package": "mangosteen-obsidian-plugins-5.3.11.zip",
-  "sha256": "c578a81775f4e50a1d833415a10ad46d6269aec0b9a15e4db049b040955ea724",
+  "version": "5.3.12",
+  "package": "mangosteen-obsidian-plugins-5.3.12.zip",
+  "sha256": "ad7d97835b65f87af771c5fa9681cf0809a812c1253bb31fe69e4783ed2b9b3d",
   "notes": [
-    "修复：日志无法加载的问题",
-    "修复：首次登录误报失败、必须重启后才生效的问题",
-    "优化：登录后的模型列表自动重试与后台同步"
+    "新增：山竹视频支持上传首尾帧生成视频",
+    "新增：Codex CLI 可清空内置 API，由 CC-Switch 接管",
+    "优化：生图、视频和语言模型登录后动态同步平台分组与模型",
+    "优化：视频分辨率按模型与平台响应自动校准，高级素材界面更简洁",
+    "修复：生图、视频任务状态与平台日志显示不一致的问题"
   ],
   "components": {
-    "mangosteen-agent": "5.3.11",
-    "mangosteen-image": "5.3.11",
-    "mangosteen-video": "5.3.11",
+    "mangosteen-agent": "5.3.12",
+    "mangosteen-image": "5.3.12",
+    "mangosteen-video": "5.3.12",
     "mangosteen-workbench": "2.0.0"
   }
 }
