@@ -1,17 +1,17 @@
 {
   "schemaVersion": 1,
-  "version": "5.3.13",
-  "package": "mangosteen-obsidian-plugins-5.3.13.zip",
-  "sha256": "4c43fe1f17c577bb34793bf66c143040bb396fa14fd8aa9a6fe4298c3d233b6d",
+  "version": "5.3.14",
+  "package": "mangosteen-obsidian-plugins-5.3.14.zip",
+  "sha256": "684623ee03e643b41779c6c5492c2781577fb1b08fe83c5ca1a67b8f77fe8aec",
   "notes": [
-    "新增：设置页增加 Codex 高级接入模式，售后可停用山竹内置 API",
-    "修复：Windows 本地图片类型缺失导致生图或图生视频上传失败的问题",
-    "优化：参考图和视频首尾帧增加 20 MB 上传前检查"
+    "修复：更新弹窗支持展示本次更新项目",
+    "优化：山竹插件更新器从本版本起随插件自动更新"
   ],
   "components": {
-    "mangosteen-agent": "5.3.13",
-    "mangosteen-image": "5.3.13",
-    "mangosteen-video": "5.3.13",
-    "mangosteen-workbench": "2.0.0"
+    "mangosteen-agent": "5.3.14",
+    "mangosteen-image": "5.3.14",
+    "mangosteen-video": "5.3.14",
+    "mangosteen-workbench": "2.0.0",
+    "mangosteen-updater": "5.3.14"
   }
 }
