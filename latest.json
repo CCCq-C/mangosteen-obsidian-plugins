@@ -2,11 +2,11 @@
   "schemaVersion": 1,
   "version": "5.3.15",
   "package": "mangosteen-obsidian-plugins-5.3.15.zip",
-  "sha256": "42d7bd2e9de3302bec34d296c113a670f9a01cb6ef35c79d38e1c9e567139e79",
+  "sha256": "d6bcadfdbe184f9ef2720895071a1cce70a485b91faa6a78bde3fab4a095a83f",
   "notes": [
     "修复：macOS 自动更新因组件清单不兼容导致失败的问题",
     "修复：更新失败诊断文件显示具体原因",
-    "优化：山竹插件更新器随主插件自动同步升级"
+    "修复：山竹插件更新器在智能体完整初始化前自动同步升级"
   ],
   "components": {
     "mangosteen-agent": "5.3.15",
