@@ -1,17 +1,17 @@
 {
   "schemaVersion": 1,
-  "version": "5.3.14",
-  "package": "mangosteen-obsidian-plugins-5.3.14.zip",
-  "sha256": "684623ee03e643b41779c6c5492c2781577fb1b08fe83c5ca1a67b8f77fe8aec",
+  "version": "5.3.15",
+  "package": "mangosteen-obsidian-plugins-5.3.15.zip",
+  "sha256": "42d7bd2e9de3302bec34d296c113a670f9a01cb6ef35c79d38e1c9e567139e79",
   "notes": [
-    "修复：更新弹窗支持展示本次更新项目",
-    "优化：山竹插件更新器从本版本起随插件自动更新"
+    "修复：macOS 自动更新因组件清单不兼容导致失败的问题",
+    "修复：更新失败诊断文件显示具体原因",
+    "优化：山竹插件更新器随主插件自动同步升级"
   ],
   "components": {
-    "mangosteen-agent": "5.3.14",
-    "mangosteen-image": "5.3.14",
-    "mangosteen-video": "5.3.14",
-    "mangosteen-workbench": "2.0.0",
-    "mangosteen-updater": "5.3.14"
+    "mangosteen-agent": "5.3.15",
+    "mangosteen-image": "5.3.15",
+    "mangosteen-video": "5.3.15",
+    "mangosteen-workbench": "2.0.0"
   }
 }
