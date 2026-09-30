@@ -1,15 +1,15 @@
 {
   "schemaVersion": 1,
-  "version": "5.3.16",
-  "package": "mangosteen-obsidian-plugins-5.3.16.zip",
-  "sha256": "ce2976e7388488ad88eb2867deba5bf1534caaa97b63837dbaff454b08fcde5a",
+  "version": "5.3.17",
+  "package": "mangosteen-obsidian-plugins-5.3.17.zip",
+  "sha256": "9e086a18e81c6f61a761d121c3f2a10311d523dd84f03ebb7b5e8fc829e33d70",
   "notes": [
-    "修复：MiniMax-H3 首尾帧生成不再传入冲突的视频比例",
-    "优化：未取得有效任务状态时显示明确提示并继续自动查询",
-    "优化：平台视频下载首次请求直接携带认证，减少保存失败"
+    "优化：普通问候、翻译和实时信息问题不再无意义检索知识库",
+    "优化：自动检索默认最多引用 3 条资料，全面整理类请求最多引用 6 条",
+    "优化：检索判断最长等待降至 3 秒，并显示各阶段耗时"
   ],
   "components": {
-    "mangosteen-agent": "5.3.16",
+    "mangosteen-agent": "5.3.17",
     "mangosteen-image": "5.3.16",
     "mangosteen-video": "5.3.16",
     "mangosteen-workbench": "2.0.0"
