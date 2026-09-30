@@ -3,6 +3,8 @@
   "version": "5.3.18",
   "package": "mangosteen-obsidian-plugins-5.3.18.zip",
   "sha256": "42fa9f710966940406cbfc5886a9b7f926886afb8b3b8f39ff5eb8056996eec7",
+  "compatibilityFix": "mangosteen-update-unlock-5.3.17.zip",
+  "compatibilityFixSha256": "2b39537de41242daa13ca4dd086f6a00da7e9ff9f37c5442989d20c260e65b6d",
   "notes": [
     "修复：更新时自动关闭残留的本地知识库服务，不再卡在 PowerShell 窗口",
     "修复：插件文件被后台服务占用时可继续完成替换并自动重启 Obsidian",
