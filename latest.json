@@ -1,15 +1,15 @@
 {
   "schemaVersion": 1,
-  "version": "5.3.17",
-  "package": "mangosteen-obsidian-plugins-5.3.17.zip",
-  "sha256": "9e086a18e81c6f61a761d121c3f2a10311d523dd84f03ebb7b5e8fc829e33d70",
+  "version": "5.3.18",
+  "package": "mangosteen-obsidian-plugins-5.3.18.zip",
+  "sha256": "42fa9f710966940406cbfc5886a9b7f926886afb8b3b8f39ff5eb8056996eec7",
   "notes": [
-    "优化：普通问候、翻译和实时信息问题不再无意义检索知识库",
-    "优化：自动检索默认最多引用 3 条资料，全面整理类请求最多引用 6 条",
-    "优化：检索判断最长等待降至 3 秒，并显示各阶段耗时"
+    "修复：更新时自动关闭残留的本地知识库服务，不再卡在 PowerShell 窗口",
+    "修复：插件文件被后台服务占用时可继续完成替换并自动重启 Obsidian",
+    "保留：5.3.17 的知识库检索速度优化"
   ],
   "components": {
-    "mangosteen-agent": "5.3.17",
+    "mangosteen-agent": "5.3.18",
     "mangosteen-image": "5.3.16",
     "mangosteen-video": "5.3.16",
     "mangosteen-workbench": "2.0.0"
