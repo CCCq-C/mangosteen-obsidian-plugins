@@ -1,19 +1,19 @@
 {
   "schemaVersion": 1,
-  "version": "5.3.18",
-  "package": "mangosteen-obsidian-plugins-5.3.18.zip",
-  "sha256": "42fa9f710966940406cbfc5886a9b7f926886afb8b3b8f39ff5eb8056996eec7",
+  "version": "5.3.19",
+  "package": "mangosteen-obsidian-plugins-5.3.19.zip",
+  "sha256": "5f0c0f97d09d50ffa23bc6837484a012c90f027a21e55cf00dd60533d54cc9ac",
   "compatibilityFix": "mangosteen-update-unlock-5.3.17.zip",
   "compatibilityFixSha256": "2b39537de41242daa13ca4dd086f6a00da7e9ff9f37c5442989d20c260e65b6d",
   "notes": [
-    "修复：更新时自动关闭残留的本地知识库服务，不再卡在 PowerShell 窗口",
-    "修复：插件文件被后台服务占用时可继续完成替换并自动重启 Obsidian",
-    "保留：5.3.17 的知识库检索速度优化"
+    "修复：视频生成成功后保存失败，并保留长文件名的 .mp4 后缀",
+    "新增：生图和视频根据最近一次实际消费显示下次价格预估",
+    "优化：多图按单张计价，视频按时长和数量换算；新日志会自动覆盖旧预估"
   ],
   "components": {
     "mangosteen-agent": "5.3.18",
-    "mangosteen-image": "5.3.16",
-    "mangosteen-video": "5.3.16",
+    "mangosteen-image": "5.3.19",
+    "mangosteen-video": "5.3.19",
     "mangosteen-workbench": "2.0.0"
   }
 }
