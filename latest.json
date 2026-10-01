@@ -1,17 +1,17 @@
 {
   "schemaVersion": 1,
-  "version": "5.3.19",
-  "package": "mangosteen-obsidian-plugins-5.3.19.zip",
-  "sha256": "5f0c0f97d09d50ffa23bc6837484a012c90f027a21e55cf00dd60533d54cc9ac",
+  "version": "5.3.20",
+  "package": "mangosteen-obsidian-plugins-5.3.20.zip",
+  "sha256": "9207bce94b52df7ac7609a373ef0675cd8d06dbc2627c24a0a687a204ce4bcbf",
   "compatibilityFix": "mangosteen-update-unlock-5.3.17.zip",
   "compatibilityFixSha256": "2b39537de41242daa13ca4dd086f6a00da7e9ff9f37c5442989d20c260e65b6d",
   "notes": [
-    "修复：视频生成成功后保存失败，并保留长文件名的 .mp4 后缀",
-    "新增：生图和视频根据最近一次实际消费显示下次价格预估",
-    "优化：多图按单张计价，视频按时长和数量换算；新日志会自动覆盖旧预估"
+    "修复：点击更新后仍反复提示同一版本",
+    "修复：版本判断改为读取四个山竹插件中的最高版本",
+    "保留：用户设置、账号配置和知识库数据不会被覆盖"
   ],
   "components": {
-    "mangosteen-agent": "5.3.18",
+    "mangosteen-agent": "5.3.20",
     "mangosteen-image": "5.3.19",
     "mangosteen-video": "5.3.19",
     "mangosteen-workbench": "2.0.0"
