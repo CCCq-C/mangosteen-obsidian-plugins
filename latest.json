@@ -1,17 +1,17 @@
 {
   "schemaVersion": 1,
-  "version": "5.3.20",
-  "package": "mangosteen-obsidian-plugins-5.3.20.zip",
-  "sha256": "9207bce94b52df7ac7609a373ef0675cd8d06dbc2627c24a0a687a204ce4bcbf",
+  "version": "5.3.21",
+  "package": "mangosteen-obsidian-plugins-5.3.21.zip",
+  "sha256": "86b4af96cd34c974a1f845f8358fde1dd00b1b79b721c707e80b21809d3fed1a",
   "compatibilityFix": "mangosteen-update-unlock-5.3.17.zip",
   "compatibilityFixSha256": "2b39537de41242daa13ca4dd086f6a00da7e9ff9f37c5442989d20c260e65b6d",
   "notes": [
-    "修复：点击更新后仍反复提示同一版本",
-    "修复：版本判断改为读取四个山竹插件中的最高版本",
-    "保留：用户设置、账号配置和知识库数据不会被覆盖"
+    "修复：山竹内置 API 不再发送上游不支持的联网搜索工具",
+    "优化：联网搜索不兼容时显示明确中文原因和处理方法",
+    "保留：售后接入模式继续使用用户自己的 Codex 配置"
   ],
   "components": {
-    "mangosteen-agent": "5.3.20",
+    "mangosteen-agent": "5.3.21",
     "mangosteen-image": "5.3.19",
     "mangosteen-video": "5.3.19",
     "mangosteen-workbench": "2.0.0"
