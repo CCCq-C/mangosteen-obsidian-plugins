@@ -1,19 +1,19 @@
 {
   "schemaVersion": 1,
-  "version": "5.3.22",
-  "package": "mangosteen-obsidian-plugins-5.3.22.zip",
-  "sha256": "338e7509df78f24322313749efa55a0075792a3199fe9e5cc56180ab459fb211",
+  "version": "5.3.23",
+  "package": "mangosteen-obsidian-plugins-5.3.23.zip",
+  "sha256": "5b6629b48094d7a69d54839b16782e89a6fba6208e8f5ca37cc21da9789cda02",
   "compatibilityFix": "mangosteen-update-unlock-5.3.17.zip",
   "compatibilityFixSha256": "2b39537de41242daa13ca4dd086f6a00da7e9ff9f37c5442989d20c260e65b6d",
   "notes": [
-    "新增：文生图与图生图支持一次生成 1–7 张，图生图部分失败时保留成功结果",
-    "优化：图片模型直接显示本账号最近一次真实单张参考费用",
-    "优化：视频时长显示当前模型上限，充值页支持复制账号编号并获取充值码"
+    "修复：山竹账号切换模型时不再错误沿用全局高强度推理",
+    "优化：首次升级自动采用当前模型推荐推理强度，明显减少无意义等待",
+    "保留：用户之后手动选择的推理强度不会被后台刷新覆盖"
   ],
   "components": {
-    "mangosteen-agent": "5.3.22",
-    "mangosteen-image": "5.3.22",
-    "mangosteen-video": "5.3.22",
+    "mangosteen-agent": "5.3.23",
+    "mangosteen-image": "5.3.23",
+    "mangosteen-video": "5.3.23",
     "mangosteen-workbench": "2.0.0"
   }
 }
