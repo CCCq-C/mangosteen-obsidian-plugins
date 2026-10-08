@@ -1,17 +1,17 @@
 {
   "schemaVersion": 1,
-  "version": "5.3.24",
-  "package": "mangosteen-obsidian-plugins-5.3.24.zip",
-  "sha256": "6e643c5b11d657e9eb2030c0010948d57b05bea3cef5b3c6aaa1a1cf49478ac0",
+  "version": "5.3.25",
+  "package": "mangosteen-obsidian-plugins-5.3.25.zip",
+  "sha256": "15e70c70822de513a9c43a548fc679062f144d133ffdcf2182b4d84b99ea1cb6",
   "compatibilityFix": "mangosteen-update-unlock-5.3.17.zip",
   "compatibilityFixSha256": "2b39537de41242daa13ca4dd086f6a00da7e9ff9f37c5442989d20c260e65b6d",
   "notes": [
-    "修复：后台服务恰好提前退出时不再误报更新失败",
-    "优化：更新脚本在后台隐藏运行，只显示中文进度窗口",
-    "修复：安装包与插件包始终携带同一份最新更新器"
+    "优化：产品、品牌、公司介绍类请求会先检索本地知识库，有资料时自动引用",
+    "优化：知识库没有匹配资料时继续使用快速回答，不再切换到慢速流程",
+    "修复：联网新闻类请求交给工具处理，快速回答同步显示真实额度消耗"
   ],
   "components": {
-    "mangosteen-agent": "5.3.24",
+    "mangosteen-agent": "5.3.25",
     "mangosteen-image": "5.3.24",
     "mangosteen-video": "5.3.24",
     "mangosteen-workbench": "2.0.0"
