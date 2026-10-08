@@ -1,19 +1,19 @@
 {
   "schemaVersion": 1,
-  "version": "5.3.21",
-  "package": "mangosteen-obsidian-plugins-5.3.21.zip",
-  "sha256": "86b4af96cd34c974a1f845f8358fde1dd00b1b79b721c707e80b21809d3fed1a",
+  "version": "5.3.22",
+  "package": "mangosteen-obsidian-plugins-5.3.22.zip",
+  "sha256": "338e7509df78f24322313749efa55a0075792a3199fe9e5cc56180ab459fb211",
   "compatibilityFix": "mangosteen-update-unlock-5.3.17.zip",
   "compatibilityFixSha256": "2b39537de41242daa13ca4dd086f6a00da7e9ff9f37c5442989d20c260e65b6d",
   "notes": [
-    "修复：山竹内置 API 不再发送上游不支持的联网搜索工具",
-    "优化：联网搜索不兼容时显示明确中文原因和处理方法",
-    "保留：售后接入模式继续使用用户自己的 Codex 配置"
+    "新增：文生图与图生图支持一次生成 1–7 张，图生图部分失败时保留成功结果",
+    "优化：图片模型直接显示本账号最近一次真实单张参考费用",
+    "优化：视频时长显示当前模型上限，充值页支持复制账号编号并获取充值码"
   ],
   "components": {
-    "mangosteen-agent": "5.3.21",
-    "mangosteen-image": "5.3.19",
-    "mangosteen-video": "5.3.19",
+    "mangosteen-agent": "5.3.22",
+    "mangosteen-image": "5.3.22",
+    "mangosteen-video": "5.3.22",
     "mangosteen-workbench": "2.0.0"
   }
 }
