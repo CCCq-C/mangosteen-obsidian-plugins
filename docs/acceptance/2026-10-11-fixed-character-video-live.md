@@ -21,10 +21,10 @@ Shared asset IDs:
 
 ## Sanitized input evidence
 
-- H3 deterministic replay of the exact installed adapter and saved local keyframes produced `first_image` and `last_image`, omitted `ratio`, and did not produce `referenceImages`.
-- The H3 live task store intentionally removes signed frame URLs after submission. The acceptance evidence records field presence only.
+- The completed H3 live task store proves the selected model, duration, resolution, terminal state, and that its retained payload contains neither `ratio` nor `referenceImages`. The saved project also contains the exact local first/last keyframes used by the workflow.
+- Retroactive on-wire presence of H3 `first_image` and `last_image` cannot be proved: the then-installed task store intentionally removed those signed fields and did not yet persist a sanitized request shape. Exact adapter replay shows the expected mapping, but is supporting inference rather than live transport proof.
 - Seedance's completed live task store contained `referenceImages` with two entries and contained neither `first_image` nor `last_image`.
-- Evidence files contain no API key, Authorization header, signed URL, account identifier, or task identifier.
+- Future accepted requests persist only sanitized request-shape metadata: field names, field-presence booleans, and reference counts. Media URLs, API keys, Authorization headers, account identifiers, and task identifiers are excluded from acceptance evidence.
 
 ## Visual inspection
 
@@ -36,13 +36,15 @@ Shared asset IDs:
 ## Live defects fixed during acceptance
 
 1. `mangosteen-image/main.js`: a valid platform image task exceeded the old 180-second wait and was marked failed locally. The wait is now 15 minutes with a regression test. The already accepted task was polled to completion instead of resubmitted.
-2. `mangosteen-video-replica/main.js`: unchanged retries now reuse deterministic saved keyframes and completed videos. Tests prove retries do not create duplicate image or video work.
+2. `mangosteen-video-replica/main.js`: unchanged retries now reuse fingerprint-matched saved keyframes and completed videos. The fingerprint covers character, scene, prompts, model, duration, effective ratio/resolution, and reference mode; missing mandatory keyframes force bounded regeneration instead of stale video reuse.
 3. `mangosteen-video/main.js`: temporary-upload failures now include a safe machine code without exposing credentials or URLs.
+4. `mangosteen-video/main.js`: future accepted tasks persist a sanitized transport request shape and remove all temporary media URL arrays from retained payloads.
 
 One extra first-frame image task was accepted before a full Obsidian restart loaded the retry-safe code. It cost $0.02835. No duplicate H3 or Seedance video submission occurred.
 
 ## Remaining limits
 
 - H3 frame mode returned 768×768 because the API requires ratio omission with first/last frames.
+- The already-completed H3 call predates request-shape persistence, so its exact on-wire first/last-field presence remains unavailable rather than retroactively claimed.
 - Two short, single-character shots do not establish long-form or multi-character identity locking.
 - Two completed image tasks had not yet received matched usage cost at inspection time; they are recorded as unknown, not zero.

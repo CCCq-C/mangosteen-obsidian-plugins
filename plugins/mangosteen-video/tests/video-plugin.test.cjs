@@ -68,7 +68,7 @@ const baseOptions = {
     return { status: 200, json: { id: "video-task-1" } };
   };
 
-  await plugin.submitVideo({ ...baseOptions, referenceImageFiles: files });
+  const submittedTask = await plugin.submitVideo({ ...baseOptions, referenceImageFiles: files });
 
   assert.deepStrictEqual(uploads.map((upload) => upload.name), files.map((file) => file.name));
   assert.strictEqual(uploads.length, 2);
@@ -79,6 +79,17 @@ const baseOptions = {
   ]);
   assert.strictEqual(Object.hasOwn(sentPayloads[0], "referenceImageFiles"), false);
   assert.strictEqual(sentPayloads[0].referenceImages.some((item) => typeof item !== "string"), false);
+  assert.deepStrictEqual(submittedTask.requestShape, {
+    version: 1,
+    fields: ["duration", "model", "prompt", "ratio", "referenceImages", "resolution"],
+    hasFirstImage: false,
+    hasLastImage: false,
+    hasRatio: true,
+    hasGenerateAudio: false,
+    referenceImageCount: 2,
+    referenceVideoCount: 0,
+    referenceAudioCount: 0,
+  });
 
   const mixedReferenceUploads = [];
   const mixedReferencePayloads = [];
@@ -158,6 +169,43 @@ const baseOptions = {
     /参考图片上传失败.*NETWORK_UNAVAILABLE/
   );
   assert.strictEqual(paidRequests, 0);
+
+  const persistencePlugin = new VideoPlugin();
+  persistencePlugin.api = videoApi;
+  persistencePlugin.videoAccess = { accountUserId: "user-1" };
+  persistencePlugin.settings = { videoTasks: [] };
+  persistencePlugin.saveSettings = async () => {};
+  const persisted = await persistencePlugin.rememberVideoTask({
+    id: "persisted-task",
+    payload: {
+      model: "seedance-2.5",
+      prompt: "safe prompt",
+      duration: 4,
+      ratio: "9:16",
+      resolution: "720p",
+      first_image: "https://signed.example/first.png?secret=one",
+      last_image: "https://signed.example/last.png?secret=two",
+      referenceImages: ["https://signed.example/reference.png?secret=three"],
+      referenceVideos: ["https://signed.example/reference.mp4?secret=four"],
+      referenceAudios: ["https://signed.example/reference.mp3?secret=five"],
+    },
+    requestShape: {
+      version: 1,
+      fields: ["first_image", "last_image", "referenceImages", "referenceVideos", "referenceAudios"],
+      hasFirstImage: true,
+      hasLastImage: true,
+      hasRatio: true,
+      hasGenerateAudio: false,
+      referenceImageCount: 1,
+      referenceVideoCount: 1,
+      referenceAudioCount: 1,
+    },
+  });
+  for (const field of ["first_image", "last_image", "referenceImages", "referenceVideos", "referenceAudios"]) {
+    assert.strictEqual(Object.hasOwn(persisted.payload, field), false, `${field} must not persist signed media URLs`);
+  }
+  assert.strictEqual(persisted.requestShape.referenceImageCount, 1);
+  assert.strictEqual(JSON.stringify(persisted).includes("signed.example"), false);
 
   console.log("video-plugin: ok");
 })().catch((error) => {

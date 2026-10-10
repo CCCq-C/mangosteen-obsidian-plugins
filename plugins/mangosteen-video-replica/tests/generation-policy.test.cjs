@@ -2,7 +2,9 @@ const assert = require("assert");
 const {
   buildVideoOptions,
   classifyModel,
+  createGenerationFingerprint,
   eligibleModels,
+  referenceRequirements,
 } = require("../generation-policy.cjs");
 
 assert.deepStrictEqual(
@@ -82,9 +84,59 @@ for (const model of ["KlingO3", "wan3.0-r2v-k1", "future-video-model"]) {
   );
 }
 
+const fingerprintInput = {
+  character: { id: "hero-v1", prompt: "短发女性，蓝色工装" },
+  scene: { id: "harbor-v1", prompt: "海边集装箱码头" },
+  shot: {
+    imagePrompt: "人物站在红色集装箱前",
+    lastImagePrompt: "人物转身看海",
+    videoPrompt: "人物转身，镜头缓慢推进",
+    duration: 4,
+  },
+  model: "seedance-2.5",
+  ratio: "9:16",
+  resolution: "720p",
+};
+const baselineFingerprint = createGenerationFingerprint(fingerprintInput);
+assert.match(baselineFingerprint, /^sha256:[a-f0-9]{64}$/);
+for (const changed of [
+  { character: { ...fingerprintInput.character, id: "hero-v2" } },
+  { character: { ...fingerprintInput.character, prompt: "长发女性，白色外套" } },
+  { scene: { ...fingerprintInput.scene, id: "studio-v1" } },
+  { scene: { ...fingerprintInput.scene, prompt: "白色摄影棚" } },
+  { shot: { ...fingerprintInput.shot, imagePrompt: "人物坐在集装箱前" } },
+  { shot: { ...fingerprintInput.shot, lastImagePrompt: "" } },
+  { shot: { ...fingerprintInput.shot, videoPrompt: "人物快步跑向镜头" } },
+  { shot: { ...fingerprintInput.shot, duration: 5 } },
+  { model: "MiniMax-H3", resolution: "768p" },
+  { ratio: "16:9" },
+  { resolution: "1080p" },
+]) {
+  assert.notStrictEqual(
+    createGenerationFingerprint({ ...fingerprintInput, ...changed }),
+    baselineFingerprint,
+    `fingerprint must invalidate for ${JSON.stringify(changed)}`,
+  );
+}
+assert.strictEqual(
+  createGenerationFingerprint({ ...fingerprintInput, model: "MiniMax-H3", resolution: "768p", ratio: "9:16" }),
+  createGenerationFingerprint({ ...fingerprintInput, model: "MiniMax-H3", resolution: "768p", ratio: "16:9" }),
+  "MiniMax-H3 ratio is not effective when mandatory frame fields are used",
+);
+assert.deepStrictEqual(referenceRequirements("MiniMax-H3", ""), {
+  mode: "frame-fields",
+  firstImage: true,
+  lastImage: false,
+});
+assert.deepStrictEqual(referenceRequirements("seedance-2.5", "人物停下"), {
+  mode: "reference-images",
+  firstImage: true,
+  lastImage: true,
+});
+
 assert.deepStrictEqual(
   Object.keys(require("../generation-policy.cjs")).sort(),
-  ["buildVideoOptions", "classifyModel", "eligibleModels"],
+  ["buildVideoOptions", "classifyModel", "createGenerationFingerprint", "eligibleModels", "referenceRequirements"],
 );
 
 console.log("generation-policy: ok");

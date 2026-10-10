@@ -387,7 +387,8 @@ module.exports = class MangosteenVideoPlugin extends Plugin {
     const task = (this.settings.videoTasks || []).find((item) => {
       const owner = String(item.accountUserId || item.usageAccountUserId || "");
       const payload = item.payload || {};
-      const usedReferenceVideo = Array.isArray(payload.referenceVideos) && payload.referenceVideos.length > 0;
+      const usedReferenceVideo = Number(item.requestShape?.referenceVideoCount || 0) > 0
+        || (Array.isArray(payload.referenceVideos) && payload.referenceVideos.length > 0);
       return item.status === "completed" && item.usageLogMatched && item.cost != null && item.cost !== "" && Number.isFinite(Number(item.cost))
         && owner === accountUserId
         && item.model === model && String(payload.resolution || "") === String(resolution || "")
@@ -451,6 +452,9 @@ module.exports = class MangosteenVideoPlugin extends Plugin {
     const payload = Object.assign({}, task.payload);
     delete payload.first_image;
     delete payload.last_image;
+    delete payload.referenceImages;
+    delete payload.referenceVideos;
+    delete payload.referenceAudios;
     const saved = Object.assign({
       accountUserId: String(this.videoAccess?.accountUserId || ""),
       createdAt: new Date().toISOString(),
@@ -546,6 +550,7 @@ module.exports = class MangosteenVideoPlugin extends Plugin {
       model: payload.model,
       prompt: payload.prompt,
       payload,
+      requestShape: this.api.createVideoRequestShape(payload),
       group: response.__mangosteenGroup,
       beforeQuota,
     });

@@ -278,8 +278,9 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
   async runAssetGeneration(projectFolder, request, requestMtimeMs, { image, video, model }) {
     const projectPath = path.join(this.absolute(projectFolder), "project.json");
     const project = this.readJson(projectPath);
-    const previousModel = String(project.videoModel || "");
     const previousShots = new Map((Array.isArray(project.shots) ? project.shots : []).map((shot) => [String(shot.id), shot]));
+    const sceneRequestsById = new Map((request.scenes || []).map((scene) => [String(scene.id), scene]));
+    const effectiveResolution = String(request.settings.resolution || video.settings.resolution || "").trim();
     const state = { status: "processing", requestMtimeMs, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), currentStep: "人物资产" };
     this.writeState(projectFolder, state);
     project.status = "generating";
@@ -289,11 +290,16 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     project.sceneAssets = [];
     project.shots = request.shots.map((shot) => {
       const previous = previousShots.get(String(shot.id));
-      const sameKeyframes = previous
-        && previous.title === shot.title
-        && previous.sceneId === shot.sceneId
-        && previous.imagePrompt === shot.imagePrompt
-        && String(previous.lastImagePrompt || "") === String(shot.lastImagePrompt || "");
+      const requirements = generationPolicy.referenceRequirements(model, shot.lastImagePrompt);
+      const generationFingerprint = generationPolicy.createGenerationFingerprint({
+        character: request.character,
+        scene: sceneRequestsById.get(String(shot.sceneId)) || { id: shot.sceneId, prompt: "" },
+        shot,
+        model,
+        ratio: request.settings.ratio,
+        resolution: effectiveResolution,
+      });
+      const sameGeneration = previous?.generationFingerprint === generationFingerprint;
       const firstImagePath = `${projectFolder}/02-分镜脚本/镜头-${shot.id}-${core.safeSegment(shot.title)}-首帧.png`;
       const lastImagePath = shot.lastImagePrompt
         ? `${projectFolder}/02-分镜脚本/镜头-${shot.id}-${core.safeSegment(shot.title)}-尾帧.png`
@@ -304,15 +310,14 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         && candidate === expected
         && fs.statSync(this.absolute(expected), { throwIfNoEntry: false })?.isFile()
       );
-      const reusableFirst = sameKeyframes && reusable(previous.firstImagePath || previous.imagePath, firstImagePath) ? firstImagePath : "";
-      const reusableLast = sameKeyframes && reusable(previous.lastImagePath, lastImagePath) ? lastImagePath : "";
-      const sameVideo = sameKeyframes
-        && previous.videoPrompt === shot.videoPrompt
-        && Number(previous.duration) === Number(shot.duration)
-        && previousModel === model;
-      const reusableVideo = sameVideo && reusable(previous.videoPath, videoPath) ? videoPath : "";
+      const reusableFirst = sameGeneration && reusable(previous.firstImagePath || previous.imagePath, firstImagePath) ? firstImagePath : "";
+      const reusableLast = sameGeneration && reusable(previous.lastImagePath, lastImagePath) ? lastImagePath : "";
+      const mandatoryArtifactsExist = (!requirements.firstImage || Boolean(reusableFirst))
+        && (!requirements.lastImage || Boolean(reusableLast));
+      const reusableVideo = sameGeneration && mandatoryArtifactsExist && reusable(previous.videoPath, videoPath) ? videoPath : "";
       return {
         ...shot,
+        generationFingerprint,
         status: reusableVideo ? "已完成" : "等待生成",
         imagePath: reusableFirst,
         firstImagePath: reusableFirst,
@@ -399,7 +404,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
           prompt: shot.videoPrompt,
           duration: shot.duration,
           ratio: request.settings.ratio,
-          resolution: request.settings.resolution || video.settings.resolution,
+          resolution: effectiveResolution,
           firstImageFile: this.localImage(shot.firstImagePath),
           lastImageFile: shot.lastImagePath ? this.localImage(shot.lastImagePath) : null,
         }));

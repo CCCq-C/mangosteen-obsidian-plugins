@@ -68,4 +68,29 @@ assert.deepStrictEqual(api.createVideoPayload({
   referenceImages: ["https://x/person.png"], first_image: "https://x/first.png"
 });
 
+const h3RequestShape = api.createVideoRequestShape(api.createVideoPayload({
+  model: "MiniMax-H3", prompt: "move", duration: 4,
+  ratio: "9:16", resolution: "768p",
+  firstImage: "https://signed.example/first.png?secret=one",
+  lastImage: "https://signed.example/last.png?secret=two",
+}));
+assert.deepStrictEqual(h3RequestShape, {
+  version: 1,
+  fields: ["duration", "first_image", "last_image", "model", "prompt", "resolution"],
+  hasFirstImage: true,
+  hasLastImage: true,
+  hasRatio: false,
+  hasGenerateAudio: false,
+  referenceImageCount: 0,
+  referenceVideoCount: 0,
+  referenceAudioCount: 0,
+});
+assert.strictEqual(JSON.stringify(h3RequestShape).includes("signed.example"), false);
+
+const seedanceRequestShape = api.createVideoRequestShape(seedance25Payload);
+assert.strictEqual(seedanceRequestShape.hasFirstImage, false);
+assert.strictEqual(seedanceRequestShape.hasLastImage, false);
+assert.strictEqual(seedanceRequestShape.hasRatio, true);
+assert.strictEqual(seedanceRequestShape.referenceImageCount, 30);
+
 console.log("video-api: ok");

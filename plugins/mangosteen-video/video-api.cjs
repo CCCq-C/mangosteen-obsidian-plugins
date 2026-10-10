@@ -99,6 +99,21 @@ function createVideoPayload(options = {}) {
   return payload;
 }
 
+function createVideoRequestShape(payload = {}) {
+  const has = (field) => Object.prototype.hasOwnProperty.call(payload, field);
+  return {
+    version: 1,
+    fields: Object.keys(payload).sort(),
+    hasFirstImage: has("first_image"),
+    hasLastImage: has("last_image"),
+    hasRatio: has("ratio"),
+    hasGenerateAudio: has("generate_audio"),
+    referenceImageCount: Array.isArray(payload.referenceImages) ? payload.referenceImages.length : 0,
+    referenceVideoCount: Array.isArray(payload.referenceVideos) ? payload.referenceVideos.length : 0,
+    referenceAudioCount: Array.isArray(payload.referenceAudios) ? payload.referenceAudios.length : 0,
+  };
+}
+
 function extractVideoTaskId(response) {
   return clean(response?.task_id || response?.id || response?.data?.task_id || response?.data?.id);
 }
@@ -268,6 +283,7 @@ module.exports = {
   createBalanceRequest,
   createVideoKeyPayload,
   createVideoPayload,
+  createVideoRequestShape,
   extractVideoTaskId,
   isRetryableVideoError,
   localImageMimeType,

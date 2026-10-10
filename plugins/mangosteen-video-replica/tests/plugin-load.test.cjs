@@ -359,6 +359,47 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   assert.strictEqual(editCalls.length, 3, "retrying an unchanged project must reuse saved keyframes");
   assert.strictEqual(submittedV2Options.length, 2, "retrying a completed unchanged project must not submit duplicate videos");
 
+  const reusableV2 = JSON.parse(fs.readFileSync(path.join(generatedV2, "project.json"), "utf8"));
+  const deletedFirstImage = reusableV2.shots[1].firstImagePath;
+  fs.unlinkSync(path.join(vault, ...deletedFirstImage.split("/")));
+  await plugin.runGeneration(generatedV2Folder, requestV2, 458);
+  assert.strictEqual(editCalls.length, 4, "a missing mandatory first keyframe must be regenerated");
+  assert.strictEqual(submittedV2Options.length, 3, "a video must not be reused when a mandatory keyframe is missing");
+  assert(fs.existsSync(path.join(vault, ...deletedFirstImage.split("/"))), "the missing mandatory keyframe must be restored");
+
+  const beforeResolutionChange = JSON.parse(fs.readFileSync(path.join(generatedV2, "project.json"), "utf8"));
+  const previousFingerprints = beforeResolutionChange.shots.map((shot) => shot.generationFingerprint);
+  await plugin.runGeneration(generatedV2Folder, {
+    ...requestV2,
+    settings: { ...requestV2.settings, resolution: "1080p" },
+  }, 459);
+  const afterResolutionChange = JSON.parse(fs.readFileSync(path.join(generatedV2, "project.json"), "utf8"));
+  assert.strictEqual(editCalls.length, 7, "an effective resolution change must invalidate all saved keyframes");
+  assert.strictEqual(submittedV2Options.length, 5, "an effective resolution change must invalidate both saved videos");
+  assert(afterResolutionChange.shots.every((shot, index) => shot.generationFingerprint !== previousFingerprints[index]), "resolution changes must persist new deterministic fingerprints");
+
+  const resolutionFingerprints = afterResolutionChange.shots.map((shot) => shot.generationFingerprint);
+  await plugin.runGeneration(generatedV2Folder, {
+    ...requestV2,
+    character: { ...requestV2.character, id: "hero-v2" },
+    settings: { ...requestV2.settings, resolution: "1080p" },
+  }, 460);
+  const afterCharacterChange = JSON.parse(fs.readFileSync(path.join(generatedV2, "project.json"), "utf8"));
+  assert.strictEqual(editCalls.length, 10, "a character ID change must invalidate all saved keyframes");
+  assert.strictEqual(submittedV2Options.length, 7, "a character ID change must invalidate both saved videos");
+  assert(afterCharacterChange.shots.every((shot, index) => shot.generationFingerprint !== resolutionFingerprints[index]), "character changes must persist new deterministic fingerprints");
+
+  const characterFingerprints = afterCharacterChange.shots.map((shot) => shot.generationFingerprint);
+  await plugin.runGeneration(generatedV2Folder, {
+    ...requestV2,
+    character: { ...requestV2.character, id: "hero-v2" },
+    settings: { ...requestV2.settings, ratio: "16:9", resolution: "1080p" },
+  }, 461);
+  const afterRatioChange = JSON.parse(fs.readFileSync(path.join(generatedV2, "project.json"), "utf8"));
+  assert.strictEqual(editCalls.length, 13, "a Seedance effective ratio change must invalidate all saved keyframes");
+  assert.strictEqual(submittedV2Options.length, 9, "a Seedance effective ratio change must invalidate both saved videos");
+  assert(afterRatioChange.shots.every((shot, index) => shot.generationFingerprint !== characterFingerprints[index]), "ratio changes must persist new deterministic fingerprints");
+
   const concurrentFolders = ["山竹视频复刻/并发任务一", "山竹视频复刻/并发任务二"];
   for (const folder of concurrentFolders) {
     const absoluteFolder = path.join(vault, ...folder.split("/"));

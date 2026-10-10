@@ -34,6 +34,14 @@
 
 ## Request-field evidence
 
-- H3: exact adapter replay used `first_image` and `last_image`, omitted `ratio`, and excluded `referenceImages`; live storage redacts signed frame URLs by design.
+- H3: the completed live task proves model/duration/resolution/terminal state and retained absence of `ratio`/`referenceImages`; exact adapter replay maps the saved keyframes to `first_image`/`last_image`. Because the old live task store stripped signed frame fields and had no request-shape record, exact on-wire first/last presence is not retroactively provable.
 - Seedance: completed live payload stored two `referenceImages` and no first/last frame fields.
 - Sanitized evidence contains no credentials, account data, task identifiers, or temporary URLs.
+
+## Task 8 fix round 1/5 — review-requested changes
+
+- Added future transport-layer `requestShape` persistence containing field names, field-presence booleans, and reference counts only. Retained payloads now remove first/last-frame and all reference-media URLs.
+- Replaced loose checkpoint comparisons with a SHA-256 generation fingerprint covering character ID/prompt, scene ID/prompt, image/last-image/video prompts, model, duration, effective ratio, effective resolution, and mandatory-reference mode. Legacy checkpoints without a fingerprint regenerate once rather than reuse stale output.
+- A completed video is reusable only while every model-required keyframe still exists. The regression deletes a mandatory first keyframe and verifies that the keyframe and its video are regenerated.
+- Source suite and installed-vault suite both pass 9/9 test files; eight changed allow-listed files have matching SHA-256 hashes after deployment.
+- No paid image or video request was submitted in this fix round. Existing live videos and reusable assets were not modified; their pre/post SHA-256 hashes match.
