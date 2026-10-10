@@ -558,6 +558,8 @@ function createView(plugin) {
   assert.match(fallbackCss, /--replica-gap:\s*14px/);
   assert.match(fallbackCss, /--replica-pad:\s*18px/);
   assert.match(fallbackCss, /@media \(max-width: 1099px\)/);
+  assert.match(fallbackCss, /\.mangosteen-replica-page-header \{ align-items: stretch; flex-direction: column; \}/);
+  assert.match(fallbackCss, /\.mangosteen-replica-inline-actions \{ flex-wrap: wrap; justify-content: flex-start; \}/);
   assert.match(fallbackCss, /@media \(max-width: 759px\)/);
   assert.match(fallbackCss, /@media \(max-width: 519px\)/);
   assert.match(fallbackCss, /\.mangosteen-replica-summary-grid/);

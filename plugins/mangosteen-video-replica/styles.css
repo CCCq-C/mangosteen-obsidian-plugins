@@ -143,9 +143,14 @@
   margin-bottom: var(--replica-gap);
 }
 
+.mangosteen-replica-page-header > :first-child {
+  min-width: 0;
+}
+
 .mangosteen-replica-page-header h2,
 .mangosteen-replica-card h3 {
   margin: 0 0 6px;
+  overflow-wrap: anywhere;
 }
 
 .mangosteen-replica-page-header p,
@@ -325,6 +330,8 @@
 }
 
 @container (max-width: 1099px) {
+  .mangosteen-replica-page-header { align-items: stretch; flex-direction: column; }
+  .mangosteen-replica-inline-actions { flex-wrap: wrap; justify-content: flex-start; }
   .mangosteen-replica-shot-grid,
   .mangosteen-replica-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .mangosteen-replica-asset-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -363,6 +370,8 @@
   .mangosteen-replica-empty { margin: 48px auto; }
 
   @media (max-width: 1099px) {
+    .mangosteen-replica-page-header { align-items: stretch; flex-direction: column; }
+    .mangosteen-replica-inline-actions { flex-wrap: wrap; justify-content: flex-start; }
     .mangosteen-replica-shot-grid,
     .mangosteen-replica-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .mangosteen-replica-asset-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
