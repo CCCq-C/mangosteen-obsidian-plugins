@@ -38,3 +38,5 @@ Task 8: fix round 1/5 (image task wait extended to 15 minutes; accepted task res
 Task 8: fix round 2/5 (unchanged retries reuse saved keyframes/videos; safe upload diagnostic codes added; full Obsidian restart verified)
 Task 8: complete (source and installed Node suites 9/9 pass; live MiniMax-H3 and seedance-2.5 tasks completed; sanitized acceptance evidence recorded)
 Task 8: fix round 1/5 (review-requested: future sanitized transport request-shape persistence, deterministic generation fingerprints, and mandatory-keyframe recovery; source/installed suites 9/9 pass; no paid calls)
+Task 8: fix round 1/5 (3 addressed, 0 open; commits 8858d5b..7f21a35)
+Task 8: complete (commits 151082a..7f21a35, review clean)
