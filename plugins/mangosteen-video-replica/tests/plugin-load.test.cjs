@@ -3,6 +3,14 @@ const fs = require("fs");
 const Module = require("module");
 const os = require("os");
 const path = require("path");
+const { createReplicaLogicApi } = require("../replica-logic-api.cjs");
+
+assert.strictEqual(typeof createReplicaLogicApi, "function");
+assert.doesNotMatch(
+  fs.readFileSync(path.resolve(__dirname, "../replica-logic-api.cjs"), "utf8"),
+  /require\(["']obsidian["']\)/,
+  "the logic API must stay reusable outside Obsidian UI code",
+);
 
 const originalLoad = Module._load;
 Module._load = function patchedLoad(request, parent, isMain) {
