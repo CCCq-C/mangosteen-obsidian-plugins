@@ -44,5 +44,34 @@ for (const unsafeId of ["", ".", "..", "../hero", "hero/side", "hero\\side", "CO
   assert.throws(() => assets.resolveCharacterAsset(vault, unsafeId), /资产 ID 不安全/, unsafeId);
 }
 
+const escapedRootVault = fs.mkdtempSync(path.join(os.tmpdir(), "mangosteen-escaped-root-vault-"));
+const escapedRootOutside = fs.mkdtempSync(path.join(os.tmpdir(), "mangosteen-escaped-root-outside-"));
+const escapedRootAsset = path.join(escapedRootOutside, "人物", "escaped-root");
+fs.mkdirSync(escapedRootAsset, { recursive: true });
+fs.writeFileSync(path.join(escapedRootAsset, "人物参考板.png"), "outside-image");
+fs.writeFileSync(path.join(escapedRootAsset, "metadata.json"), JSON.stringify({ secret: "outside-metadata" }));
+fs.symlinkSync(escapedRootOutside, path.join(escapedRootVault, "山竹视频资产库"), "dir");
+assert.throws(
+  () => assets.resolveCharacterAsset(escapedRootVault, "escaped-root"),
+  /资产路径.*知识库范围/,
+  "asset root symlink must not expose outside image or metadata",
+);
+
+const escapedParentVault = fs.mkdtempSync(path.join(os.tmpdir(), "mangosteen-escaped-parent-vault-"));
+const escapedParentOutside = fs.mkdtempSync(path.join(os.tmpdir(), "mangosteen-escaped-parent-outside-"));
+const escapedParent = path.join(escapedParentVault, "山竹视频资产库", "人物");
+fs.mkdirSync(escapedParent, { recursive: true });
+fs.symlinkSync(escapedParentOutside, path.join(escapedParent, "escaped-parent"), "dir");
+assert.throws(
+  () => assets.writeAssetMetadata(escapedParentVault, { kind: "character", id: "escaped-parent" }, { prompt: "must not escape" }),
+  /资产路径.*知识库范围/,
+  "existing parent symlink must not receive metadata writes",
+);
+assert.strictEqual(fs.existsSync(path.join(escapedParentOutside, "metadata.json")), false);
+
 fs.rmSync(vault, { recursive: true, force: true });
+fs.rmSync(escapedRootVault, { recursive: true, force: true });
+fs.rmSync(escapedRootOutside, { recursive: true, force: true });
+fs.rmSync(escapedParentVault, { recursive: true, force: true });
+fs.rmSync(escapedParentOutside, { recursive: true, force: true });
 console.log("reference-assets: ok");

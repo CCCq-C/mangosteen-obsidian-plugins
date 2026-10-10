@@ -70,6 +70,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     workflow = require(path.join(pluginRoot, "replica-cli.cjs"));
     this.pluginRoot = pluginRoot;
     this.processing = new Set();
+    this.referenceAssetPromises = new Map();
     this.addRibbonIcon("clapperboard", "山竹视频复刻", () => new PrepareModal(this).open());
     this.addCommand({ id: "prepare-local-video", name: "从本地视频新建复刻项目", callback: () => new PrepareModal(this).open() });
     this.addCommand({ id: "scan-generation-requests", name: "检查已确认的视频复刻任务", callback: () => void this.scanRequests(true) });
@@ -86,7 +87,11 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     return base;
   }
 
-  absolute(vaultPath) { return path.join(this.vaultPath(), ...String(vaultPath).replace(/\\/g, "/").split("/")); }
+  absolute(vaultPath) {
+    const normalized = String(vaultPath).replace(/\\/g, "/");
+    if (normalized.startsWith("山竹视频资产库/")) return referenceAssets.checkedAssetPath(this.vaultPath(), normalized);
+    return path.join(this.vaultPath(), ...normalized.split("/"));
+  }
 
   async prepareVideo(sourcePath) {
     return workflow.prepareProject({ sourcePath, vaultPath: this.vaultPath(), pluginRoot: this.pluginRoot });
@@ -221,17 +226,33 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
   }
 
   async ensureReferenceAsset(imagePlugin, asset, prompt) {
-    if (asset.exists) return { ...asset, reused: true };
-    const candidate = await this.generateImage(imagePlugin, prompt);
-    await this.saveImageCandidate(imagePlugin, candidate, asset.imagePath);
-    referenceAssets.writeAssetMetadata(this.vaultPath(), asset, {
-      prompt,
-      createdAt: new Date().toISOString(),
-    });
-    const refreshed = asset.kind === "character"
-      ? referenceAssets.resolveCharacterAsset(this.vaultPath(), asset.id)
-      : referenceAssets.resolveSceneAsset(this.vaultPath(), asset.id);
-    return { ...refreshed, reused: false };
+    this.referenceAssetPromises ||= new Map();
+    const key = `${asset.kind}:${asset.id}`;
+    const pending = this.referenceAssetPromises.get(key);
+    if (pending) return pending;
+
+    const promise = (async () => {
+      const current = asset.kind === "character"
+        ? referenceAssets.resolveCharacterAsset(this.vaultPath(), asset.id)
+        : referenceAssets.resolveSceneAsset(this.vaultPath(), asset.id);
+      if (current.exists) return { ...current, reused: true };
+      const candidate = await this.generateImage(imagePlugin, prompt);
+      await this.saveImageCandidate(imagePlugin, candidate, current.imagePath);
+      referenceAssets.writeAssetMetadata(this.vaultPath(), current, {
+        prompt,
+        createdAt: new Date().toISOString(),
+      });
+      const refreshed = current.kind === "character"
+        ? referenceAssets.resolveCharacterAsset(this.vaultPath(), current.id)
+        : referenceAssets.resolveSceneAsset(this.vaultPath(), current.id);
+      return { ...refreshed, reused: false };
+    })();
+    this.referenceAssetPromises.set(key, promise);
+    try {
+      return await promise;
+    } finally {
+      if (this.referenceAssetPromises.get(key) === promise) this.referenceAssetPromises.delete(key);
+    }
   }
 
   async waitForVideo(videoPlugin, taskId, timeoutMs = 45 * 60 * 1000) {

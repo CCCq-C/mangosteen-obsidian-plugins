@@ -225,7 +225,119 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   await plugin.runGeneration(generatedV2Folder, requestV2, 457);
   assert.deepStrictEqual(generatedTextPrompts, ["固定人物参考板", "摄影棚场景"], "existing assets must be reused");
 
+  const concurrentFolders = ["山竹视频复刻/并发任务一", "山竹视频复刻/并发任务二"];
+  for (const folder of concurrentFolders) {
+    const absoluteFolder = path.join(vault, ...folder.split("/"));
+    fs.mkdirSync(absoluteFolder, { recursive: true });
+    fs.writeFileSync(path.join(absoluteFolder, "project.json"), JSON.stringify({ folder, title: folder.split("/").pop(), frames: [], shots: [] }));
+  }
+  const concurrentPrompts = { "并发人物参考板": 0, "并发场景参考图": 0 };
+  let releaseCharacter;
+  let releaseScene;
+  let markCharacterStarted;
+  let markSceneStarted;
+  const characterGate = new Promise((resolve) => { releaseCharacter = resolve; });
+  const sceneGate = new Promise((resolve) => { releaseScene = resolve; });
+  const characterStarted = new Promise((resolve) => { markCharacterStarted = resolve; });
+  const sceneStarted = new Promise((resolve) => { markSceneStarted = resolve; });
+  const concurrentImage = {
+    generateText: async (prompt) => {
+      concurrentPrompts[prompt] += 1;
+      const count = concurrentPrompts[prompt];
+      if (prompt === "并发人物参考板" && count === 1) {
+        markCharacterStarted();
+        await characterGate;
+      }
+      if (prompt === "并发场景参考图" && count === 1) {
+        markSceneStarted();
+        await sceneGate;
+      }
+      return { candidate: { kind: "base64", value: Buffer.from(`concurrent:${prompt}`).toString("base64") } };
+    },
+    generateEdit: async () => { throw new Error("version 2 must use generateEditMulti"); },
+    generateEditMulti: async (prompt) => ({ candidate: { kind: "base64", value: Buffer.from(`frame:${prompt}`).toString("base64") } }),
+    extractResults: (response) => response?.candidate ? [response.candidate] : [],
+  };
+  const concurrentVideo = {
+    settings: { model: "seedance-2.5", resolution: "720p" },
+    refreshAgentAccess: async () => ({ videoModelKeys: { "seedance-2.5": "secret-not-read-by-replica" } }),
+    submitVideo: async () => ({ id: "concurrent-video" }),
+  };
+  const concurrentRequest = {
+    version: 2,
+    confirmed: true,
+    character: { id: "concurrent-hero", prompt: "并发人物参考板" },
+    scenes: [{ id: "concurrent-scene", prompt: "并发场景参考图" }],
+    settings: { ratio: "9:16", resolution: "720p", videoModel: "seedance-2.5" },
+    shots: [{ id: "001", title: "并发镜头", sceneId: "concurrent-scene", duration: 4, imagePrompt: "并发首帧", videoPrompt: "并发视频" }],
+  };
+  plugin.getGenerationPlugins = () => ({ image: concurrentImage, video: concurrentVideo });
+  const firstConcurrentRun = plugin.runGeneration(concurrentFolders[0], concurrentRequest, 501);
+  await characterStarted;
+  const secondConcurrentRun = plugin.runGeneration(concurrentFolders[1], concurrentRequest, 502);
+  await new Promise((resolve) => setImmediate(resolve));
+  releaseCharacter();
+  await sceneStarted;
+  await new Promise((resolve) => setImmediate(resolve));
+  releaseScene();
+  await Promise.all([firstConcurrentRun, secondConcurrentRun]);
+  assert.deepStrictEqual(concurrentPrompts, {
+    "并发人物参考板": 1,
+    "并发场景参考图": 1,
+  }, "concurrent requests must share one paid generation per missing asset");
+
+  const escapedMediaOutside = fs.mkdtempSync(path.join(os.tmpdir(), "mangosteen-escaped-media-"));
+  const escapedMediaFolder = path.join(vault, "山竹视频资产库", "人物", "escaped-media");
+  fs.symlinkSync(escapedMediaOutside, escapedMediaFolder, "dir");
+  const escapedMediaVaultPath = "山竹视频资产库/人物/escaped-media/人物参考板.png";
+  const escapedMediaOutsidePath = path.join(escapedMediaOutside, "人物参考板.png");
+  fs.writeFileSync(escapedMediaOutsidePath, "outside-image-must-stay");
+  assert.throws(
+    () => plugin.localImage(escapedMediaVaultPath),
+    /资产路径.*知识库范围/,
+    "asset image reads must reject symlink escape",
+  );
+  await assert.rejects(
+    () => plugin.saveImageCandidate(imageV2, { kind: "base64", value: Buffer.from("overwrite").toString("base64") }, escapedMediaVaultPath),
+    /资产路径.*知识库范围/,
+    "asset image writes must reject symlink escape",
+  );
+  assert.strictEqual(fs.readFileSync(escapedMediaOutsidePath, "utf8"), "outside-image-must-stay");
+
+  const failedV2Folder = "山竹视频复刻/版本2失败持久化";
+  const failedV2 = path.join(vault, ...failedV2Folder.split("/"));
+  fs.mkdirSync(failedV2, { recursive: true });
+  fs.writeFileSync(path.join(failedV2, "project.json"), JSON.stringify({ folder: failedV2Folder, title: "版本2失败持久化", frames: [], shots: [] }));
+  const failedV2RequestPath = path.join(failedV2, "generation-request.json");
+  fs.writeFileSync(failedV2RequestPath, JSON.stringify({
+    version: 2,
+    confirmed: true,
+    character: { id: "failure-hero", prompt: "失败人物" },
+    scenes: [{ id: "failure-scene", prompt: "失败场景" }],
+    settings: { ratio: "9:16", resolution: "720p", videoModel: "seedance-2.5" },
+    shots: [{ title: "失败镜头", sceneId: "failure-scene", duration: 4, imagePrompt: "失败首帧", videoPrompt: "失败视频" }],
+  }));
+  plugin.getGenerationPlugins = () => ({
+    image: {
+      generateText: async () => { throw new Error("v2 paid image failed"); },
+      generateEdit: async () => ({}),
+      generateEditMulti: async () => ({}),
+      extractResults: () => [],
+    },
+    video: concurrentVideo,
+  });
+  await plugin.processRequest(failedV2RequestPath);
+  const failedV2State = JSON.parse(fs.readFileSync(path.join(failedV2, ".work/generation-state.json"), "utf8"));
+  const failedV2Project = JSON.parse(fs.readFileSync(path.join(failedV2, "project.json"), "utf8"));
+  assert.strictEqual(failedV2State.status, "failed");
+  assert.strictEqual(failedV2State.requestMtimeMs, fs.statSync(failedV2RequestPath).mtimeMs);
+  assert.match(failedV2State.error, /v2 paid image failed/);
+  assert.strictEqual(failedV2Project.status, "failed");
+  assert.match(failedV2Project.statusText, /v2 paid image failed/);
+  assert.strictEqual(plugin.requestAlreadyHandled(failedV2Folder, failedV2State.requestMtimeMs), true);
+
   fs.rmSync(vault, { recursive: true, force: true });
+  fs.rmSync(escapedMediaOutside, { recursive: true, force: true });
   delete global.window;
   Module._load = originalLoad;
   console.log("plugin-load: ok");

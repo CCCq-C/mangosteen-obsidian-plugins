@@ -13,10 +13,38 @@ function assertAssetId(value) {
   return id;
 }
 
-function absoluteVaultPath(vaultRoot, vaultPath) {
+function isInside(root, target) {
+  const relative = path.relative(root, target);
+  return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+}
+
+function checkedAssetPath(vaultRoot, vaultPath) {
   const root = path.resolve(String(vaultRoot || ""));
-  const target = path.resolve(root, ...String(vaultPath).split("/"));
-  if (target !== root && !target.startsWith(`${root}${path.sep}`)) throw new Error("资产路径超出知识库范围。");
+  const rootStat = fs.statSync(root, { throwIfNoEntry: false });
+  if (!rootStat?.isDirectory()) throw new Error("资产路径无法定位真实知识库范围。");
+  const normalized = String(vaultPath || "").replace(/\\/g, "/");
+  const parts = normalized.split("/");
+  if (parts[0] !== ROOT || parts.some((part) => !part || part === "." || part === "..")) {
+    throw new Error("资产路径不安全，已拒绝访问知识库范围外的文件。");
+  }
+  const target = path.resolve(root, ...parts);
+  if (!isInside(root, target)) throw new Error("资产路径不安全，已拒绝访问知识库范围外的文件。");
+
+  const realRoot = fs.realpathSync(root);
+  let current = root;
+  for (const part of parts) {
+    current = path.join(current, part);
+    if (!fs.lstatSync(current, { throwIfNoEntry: false })) break;
+    let realCurrent;
+    try {
+      realCurrent = fs.realpathSync(current);
+    } catch (_) {
+      throw new Error("资产路径包含无法解析的符号链接，已拒绝访问知识库范围外的文件。");
+    }
+    if (!isInside(realRoot, realCurrent)) {
+      throw new Error("资产路径通过符号链接超出知识库范围，已拒绝访问。");
+    }
+  }
   return target;
 }
 
@@ -27,8 +55,8 @@ function resolveAsset(vaultRoot, kind, value) {
   const folderPath = `${ROOT}/${typeFolder}/${id}`;
   const imagePath = `${folderPath}/${imageName}`;
   const metadataPath = `${folderPath}/metadata.json`;
-  const imageAbsolutePath = absoluteVaultPath(vaultRoot, imagePath);
-  const metadataAbsolutePath = absoluteVaultPath(vaultRoot, metadataPath);
+  const imageAbsolutePath = checkedAssetPath(vaultRoot, imagePath);
+  const metadataAbsolutePath = checkedAssetPath(vaultRoot, metadataPath);
   const exists = Boolean(fs.statSync(imageAbsolutePath, { throwIfNoEntry: false })?.isFile());
   let metadata = null;
   if (fs.statSync(metadataAbsolutePath, { throwIfNoEntry: false })?.isFile()) {
@@ -56,16 +84,20 @@ function writeAssetMetadata(vaultRoot, asset, metadata = {}) {
     id: canonical.id,
     imagePath: canonical.imagePath,
   };
-  const metadataPath = absoluteVaultPath(vaultRoot, canonical.metadataPath);
+  let metadataPath = checkedAssetPath(vaultRoot, canonical.metadataPath);
   fs.mkdirSync(path.dirname(metadataPath), { recursive: true });
-  const temporary = `${metadataPath}.tmp-${process.pid}`;
+  metadataPath = checkedAssetPath(vaultRoot, canonical.metadataPath);
+  const temporaryVaultPath = `${canonical.metadataPath}.tmp-${process.pid}`;
+  const temporary = checkedAssetPath(vaultRoot, temporaryVaultPath);
   fs.writeFileSync(temporary, `${JSON.stringify(payload, null, 2)}\n`);
+  metadataPath = checkedAssetPath(vaultRoot, canonical.metadataPath);
   fs.renameSync(temporary, metadataPath);
   return payload;
 }
 
 module.exports = {
   assertAssetId,
+  checkedAssetPath,
   resolveCharacterAsset,
   resolveSceneAsset,
   writeAssetMetadata,
