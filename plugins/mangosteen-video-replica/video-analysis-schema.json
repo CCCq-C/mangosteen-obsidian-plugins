@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["character", "scenes", "shots"],
+  "properties": {
+    "character": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "prompt"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$" },
+        "prompt": { "type": "string", "minLength": 20 }
+      }
+    },
+    "scenes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 12,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "prompt"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$" },
+          "prompt": { "type": "string", "minLength": 20 }
+        }
+      }
+    },
+    "shots": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 12,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["title", "sceneId", "startTime", "endTime", "dialogue", "plot", "environment", "camera", "imagePrompt", "lastImagePrompt", "videoPrompt"],
+        "properties": {
+          "title": { "type": "string", "minLength": 1 },
+          "sceneId": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$" },
+          "startTime": { "type": "number", "minimum": 0 },
+          "endTime": { "type": "number", "exclusiveMinimum": 0 },
+          "dialogue": { "type": "string" },
+          "plot": { "type": "string", "minLength": 1 },
+          "environment": { "type": "string", "minLength": 1 },
+          "camera": { "type": "string", "minLength": 1 },
+          "imagePrompt": { "type": "string", "minLength": 10 },
+          "lastImagePrompt": { "type": "string" },
+          "videoPrompt": { "type": "string", "minLength": 10 }
+        }
+      }
+    }
+  }
+}

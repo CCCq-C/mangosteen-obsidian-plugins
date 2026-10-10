@@ -160,6 +160,66 @@ function normalizeGenerationRequest(input) {
   };
 }
 
+function buildGenerationDraft(project, analysis, settings = {}) {
+  if (!analysis || typeof analysis !== "object" || Array.isArray(analysis)) throw new Error("AI 分析结果格式错误。");
+  const characterId = assertAssetId(analysis.character?.id || "main-character");
+  const scenes = (Array.isArray(analysis.scenes) ? analysis.scenes : []).map((scene) => ({
+    id: assertAssetId(scene?.id),
+    prompt: cleanText(scene?.prompt),
+  }));
+  if (!scenes.length || scenes.some((scene) => !scene.prompt)) throw new Error("AI 分析没有生成有效场景资产。");
+  const rawShots = Array.isArray(analysis.shots) ? analysis.shots.slice(0, 12) : [];
+  const draft = {
+    version: 2,
+    confirmed: true,
+    character: {
+      id: characterId,
+      prompt: cleanText(analysis.character?.prompt),
+    },
+    scenes,
+    settings: {
+      videoModel: cleanText(settings.videoModel) || "MiniMax-H3",
+      ratio: cleanText(settings.ratio) || (Number(project?.height) > Number(project?.width) ? "9:16" : "16:9"),
+      resolution: cleanText(settings.resolution) || "720p",
+    },
+    shots: rawShots.map((shot) => ({
+      title: cleanText(shot?.title),
+      sceneId: cleanText(shot?.sceneId),
+      duration: Math.max(2, Math.min(15, Number(shot?.endTime) - Number(shot?.startTime) || Number(shot?.duration) || 4)),
+      dialogue: cleanText(shot?.dialogue),
+      plot: cleanText(shot?.plot),
+      environment: cleanText(shot?.environment),
+      camera: cleanText(shot?.camera),
+      imagePrompt: cleanText(shot?.imagePrompt),
+      lastImagePrompt: cleanText(shot?.lastImagePrompt),
+      videoPrompt: cleanText(shot?.videoPrompt),
+    })),
+  };
+  const normalized = normalizeGenerationRequest(draft);
+  return { ...normalized, confirmed: false };
+}
+
+function analysisStoryboardMarkdown(project, request) {
+  const lines = [
+    `# AI 分镜分析｜${safeSegment(project?.title || "视频复刻项目")}`,
+    "",
+    "> 已根据原片画面和台词生成复刻草案。原片截图只用于分析，不会作为生图或视频参考图。",
+    "",
+    "| 镜头 | 时长 | 剧情/动作 | 台词 | 环境 | 镜头语言 |",
+    "|---|---:|---|---|---|---|",
+  ];
+  for (const shot of request.shots || []) {
+    lines.push(`| ${shot.id}｜${safeSegment(shot.title)} | ${Number(shot.duration).toFixed(1)} 秒 | ${cleanText(shot.plot).replace(/\|/g, "\\|")} | ${cleanText(shot.dialogue).replace(/\|/g, "\\|")} | ${cleanText(shot.environment).replace(/\|/g, "\\|")} | ${cleanText(shot.camera).replace(/\|/g, "\\|")} |`);
+  }
+  lines.push("", "## 人物参考提示词", "", request.character.prompt, "", "## 场景参考提示词", "");
+  for (const scene of request.scenes || []) lines.push(`### ${scene.id}`, "", scene.prompt, "");
+  lines.push("## 分镜生成提示词", "");
+  for (const shot of request.shots || []) {
+    lines.push(`### ${shot.id}｜${safeSegment(shot.title)}`, "", `- 首帧：${shot.imagePrompt}`, `- 尾帧：${shot.lastImagePrompt || "不单独生成"}`, `- 视频：${shot.videoPrompt}`, "");
+  }
+  return lines.join("\n");
+}
+
 function dashboardMarkdown(project) {
   const folder = normalizeVaultPath(project.folder);
   const status = cleanText(project.statusText || project.status || "准备中");
@@ -227,11 +287,15 @@ function dashboardMarkdown(project) {
     if (shot.error) lines.push(`> [!warning] ${cleanText(shot.error)}`, "");
   }
   lines.push(`<!-- project-folder: ${folder} -->`, "");
+  if (project.finalVideoPath) lines.splice(lines.length - 2, 0, "## 最终成片", "", `![[${project.finalVideoPath}]]`, "");
+  else if (project.concatError) lines.splice(lines.length - 2, 0, "## 最终成片", "", `> [!warning] 自动拼接失败：${cleanText(project.concatError)}`, "");
   return lines.join("\n");
 }
 
 module.exports = {
   ALLOWED_VIDEO_EXTENSIONS,
+  analysisStoryboardMarkdown,
+  buildGenerationDraft,
   createProjectFolder,
   dashboardMarkdown,
   dateStamp,

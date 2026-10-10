@@ -51,9 +51,16 @@ class PrepareModal extends Modal {
       status.setText("正在抽取画面并识别台词，请不要关闭 Obsidian…");
       try {
         const project = await this.plugin.prepareVideo(this.sourcePath);
-        status.setText("本地拆解完成，正在打开项目总览。");
+        status.setText("本地拆解完成，AI 正在分析人物、场景和分镜…");
+        try {
+          await this.plugin.analyzeProject(project.folder);
+          status.setText("AI 分析完成，正在打开项目总览。");
+          new Notice("分镜草案已生成。检查后运行“确认并开始付费生成最近项目”。", 9000);
+        } catch (error) {
+          status.setText("本地拆解已完成，但 AI 分析失败。");
+          new Notice(`AI 分析失败：${String(error?.message || error)}。可运行“分析最近的视频复刻项目”重试。`, 12000);
+        }
         await this.plugin.openVaultPath(`${project.folder}/00-项目总览.md`);
-        new Notice("视频拆解完成。请在山竹对话中继续分析分镜。", 7000);
         this.close();
       } catch (error) {
         status.setText(`失败：${String(error?.message || error)}`);
@@ -76,6 +83,9 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     this.referenceAssetPromises = new Map();
     this.addRibbonIcon("clapperboard", "山竹视频复刻", () => new PrepareModal(this).open());
     this.addCommand({ id: "prepare-local-video", name: "从本地视频新建复刻项目", callback: () => new PrepareModal(this).open() });
+    this.addCommand({ id: "analyze-latest-project", name: "分析最近的视频复刻项目", callback: () => void this.analyzeLatestProject() });
+    this.addCommand({ id: "confirm-latest-generation", name: "确认并开始付费生成最近项目", callback: () => void this.confirmLatestGeneration() });
+    this.addCommand({ id: "concat-latest-project", name: "拼接最近已完成项目", callback: () => void this.concatLatestProject() });
     this.addCommand({ id: "scan-generation-requests", name: "检查已确认的视频复刻任务", callback: () => void this.scanRequests(true) });
     this.registerInterval(window.setInterval(() => void this.scanRequests(false), 5000));
     this.registerEvent(this.app.vault.on("create", (file) => { if (file?.name === REQUEST_FILE) void this.processRequestByVaultPath(file.path, true); }));
@@ -98,6 +108,103 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
 
   async prepareVideo(sourcePath) {
     return workflow.prepareProject({ sourcePath, vaultPath: this.vaultPath(), pluginRoot: this.pluginRoot });
+  }
+
+  projectRecords() {
+    const root = this.absolute(ROOT);
+    if (!fs.existsSync(root)) return [];
+    const records = [];
+    for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const projectPath = path.join(root, entry.name, "project.json");
+      if (!fs.existsSync(projectPath)) continue;
+      try {
+        records.push({ project: this.readJson(projectPath), projectPath, mtimeMs: fs.statSync(projectPath).mtimeMs });
+      } catch (_) { /* skip incomplete folders */ }
+    }
+    return records.sort((left, right) => right.mtimeMs - left.mtimeMs);
+  }
+
+  latestProject(predicate = () => true) {
+    return this.projectRecords().find((record) => predicate(record.project));
+  }
+
+  analysisSettings() {
+    const video = this.app.plugins?.getPlugin?.("mangosteen-video");
+    const currentModel = String(video?.settings?.model || "").trim();
+    const videoModel = generationPolicy.classifyModel(currentModel) ? currentModel : "MiniMax-H3";
+    const family = generationPolicy.classifyModel(videoModel);
+    let resolution = String(video?.settings?.resolution || "720p").trim() || "720p";
+    if (family === "minimax-h3" && !["768p", "2k"].includes(resolution.toLowerCase())) resolution = "768p";
+    if (family === "seedance" && !["480p", "720p", "1080p"].includes(resolution.toLowerCase())) resolution = "720p";
+    return {
+      videoModel,
+      resolution,
+    };
+  }
+
+  async analyzeProject(projectFolder) {
+    const result = await workflow.analyzeProject({
+      projectFolder,
+      vaultPath: this.vaultPath(),
+      pluginRoot: this.pluginRoot,
+      settings: this.analysisSettings(),
+    });
+    await this.openVaultPath(`${projectFolder}/00-项目总览.md`);
+    return result;
+  }
+
+  async analyzeLatestProject() {
+    const record = this.latestProject((project) => ["prepared", "analysis_failed", "analysis_ready"].includes(project.status));
+    if (!record) { new Notice("没有找到可分析的视频复刻项目。", 6000); return; }
+    try {
+      new Notice("AI 正在分析最近项目，通常需要 2–8 分钟。", 6000);
+      await this.analyzeProject(record.project.folder);
+      new Notice("分镜草案已生成，等待确认付费生成。", 8000);
+    } catch (error) {
+      new Notice(`AI 分析失败：${String(error?.message || error)}`, 10000);
+    }
+  }
+
+  async confirmLatestGeneration() {
+    const record = this.projectRecords().find((item) => {
+      const candidate = path.join(path.dirname(item.projectPath), REQUEST_FILE);
+      if (!fs.existsSync(candidate)) return false;
+      try { return this.readJson(candidate).confirmed !== true; } catch (_) { return false; }
+    }) || this.projectRecords().find((item) => fs.existsSync(path.join(path.dirname(item.projectPath), REQUEST_FILE)));
+    if (!record) { new Notice("没有找到等待确认的分镜草案。", 6000); return; }
+    const requestPath = path.join(path.dirname(record.projectPath), REQUEST_FILE);
+    if (!fs.existsSync(requestPath)) { new Notice("最近项目还没有生成分镜草案。", 6000); return; }
+    const request = this.readJson(requestPath);
+    if (request.confirmed === true) { new Notice("这个项目已经确认，正在检查生成状态。", 6000); await this.processRequest(requestPath, true); return; }
+    request.confirmed = true;
+    writeJson(requestPath, request);
+    new Notice("已确认，开始调用生图和视频算力。", 7000);
+    await this.processRequest(requestPath, true);
+  }
+
+  async concatProject(project) {
+    return workflow.concatProjectVideos({ project, vaultPath: this.vaultPath(), pluginRoot: this.pluginRoot });
+  }
+
+  async concatLatestProject() {
+    const record = this.latestProject((project) => Array.isArray(project.shots) && project.shots.length > 0 && project.shots.every((shot) => shot.videoPath));
+    if (!record) { new Notice("没有找到已完成全部分镜的项目。", 6000); return; }
+    try {
+      record.project.finalVideoPath = await this.concatProject(record.project);
+      delete record.project.concatError;
+      record.project.status = "completed";
+      record.project.statusText = "视频片段已拼接为最终成片";
+      this.saveProject(record.project.folder, record.project);
+      await this.openVaultPath(`${record.project.folder}/00-项目总览.md`);
+      new Notice("最终成片已生成。", 7000);
+    } catch (error) {
+      record.project.concatError = String(error?.message || error);
+      record.project.status = "completed_with_errors";
+      record.project.statusText = `视频片段已完成，但拼接失败：${record.project.concatError}`;
+      this.saveProject(record.project.folder, record.project);
+      new Notice(record.project.statusText, 10000);
+    }
   }
 
   async openVaultPath(vaultPath) {
@@ -172,7 +279,9 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       const stat = fs.statSync(requestPath);
       requestMtimeMs = stat.mtimeMs;
       if (this.requestAlreadyHandled(projectFolder, requestMtimeMs)) return;
-      const request = core.normalizeGenerationRequest(this.readJson(requestPath));
+      const rawRequest = this.readJson(requestPath);
+      if (rawRequest.confirmed !== true) return;
+      const request = core.normalizeGenerationRequest(rawRequest);
       this.processing.add(requestPath);
       leaseTimer = setInterval(() => {
         try {
@@ -309,6 +418,26 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     return targetVaultPath;
   }
 
+  async finalizeProject(projectFolder, project, failed) {
+    delete project.concatError;
+    project.finalVideoPath = "";
+    if (failed) {
+      project.status = "completed_with_errors";
+      project.statusText = `已完成，${failed} 个镜头需要重试`;
+    } else {
+      try {
+        project.finalVideoPath = await this.concatProject(project);
+        project.status = "completed";
+        project.statusText = "全部镜头已生成并拼接为最终成片";
+      } catch (error) {
+        project.concatError = String(error?.message || error);
+        project.status = "completed_with_errors";
+        project.statusText = `视频片段已完成，但拼接失败：${project.concatError}`;
+      }
+    }
+    this.saveProject(projectFolder, project);
+  }
+
   async runAssetGeneration(projectFolder, request, requestMtimeMs, { image, video, model }) {
     const projectPath = path.join(this.absolute(projectFolder), "project.json");
     const project = this.readJson(projectPath);
@@ -320,6 +449,8 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     project.status = "generating";
     project.statusText = "正在准备人物和场景资产";
     project.videoModel = model;
+    project.finalVideoPath = "";
+    delete project.concatError;
     project.characterAsset = null;
     project.sceneAssets = [];
     this.saveProject(projectFolder, project);
@@ -458,9 +589,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     }
 
     const failed = project.shots.filter((shot) => shot.status === "失败").length;
-    project.status = failed ? "completed_with_errors" : "completed";
-    project.statusText = failed ? `已完成，${failed} 个镜头需要重试` : "人物、场景、关键帧和视频片段已全部生成";
-    this.saveProject(projectFolder, project);
+    await this.finalizeProject(projectFolder, project, failed);
     Object.assign(state, { status: project.status, currentStep: "完成", updatedAt: new Date().toISOString(), completedAt: new Date().toISOString(), failedShots: failed });
     this.writeState(projectFolder, state);
     await this.openVaultPath(`${projectFolder}/00-项目总览.md`);
@@ -485,6 +614,8 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     project.status = "generating";
     project.statusText = "正在生成人物三视图";
     project.videoModel = model;
+    project.finalVideoPath = "";
+    delete project.concatError;
     project.shots = request.shots.map((shot) => ({ ...shot, status: "等待生成", imagePath: "", videoPath: "", error: "" }));
     this.saveProject(projectFolder, project);
 
@@ -524,9 +655,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     }
 
     const failed = project.shots.filter((shot) => shot.status === "失败").length;
-    project.status = failed ? "completed_with_errors" : "completed";
-    project.statusText = failed ? `已完成，${failed} 个镜头需要重试` : "人物、分镜图和视频片段已全部生成";
-    this.saveProject(projectFolder, project);
+    await this.finalizeProject(projectFolder, project, failed);
     Object.assign(state, { status: project.status, currentStep: "完成", updatedAt: new Date().toISOString(), completedAt: new Date().toISOString(), failedShots: failed });
     this.writeState(projectFolder, state);
     await this.openVaultPath(`${projectFolder}/00-项目总览.md`);

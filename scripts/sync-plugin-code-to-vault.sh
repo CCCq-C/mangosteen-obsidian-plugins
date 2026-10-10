@@ -43,7 +43,7 @@ copy_plugin_files mangosteen-video \
   tests/video-api.test.cjs tests/video-plugin.test.cjs
 
 copy_plugin_files mangosteen-video-replica \
-  main.js generation-policy.cjs reference-assets.cjs replica-core.cjs replica-cli.cjs manifest.json styles.css \
+  main.js generation-policy.cjs reference-assets.cjs replica-core.cjs replica-cli.cjs video-analysis-schema.json manifest.json styles.css \
   tests/generation-policy.test.cjs tests/plugin-load.test.cjs tests/reference-assets.test.cjs \
   tests/replica-cli.test.cjs tests/replica-core.test.cjs
 

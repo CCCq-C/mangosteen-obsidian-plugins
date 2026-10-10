@@ -64,6 +64,20 @@ assert.throws(
   /最多只能包含 12 个分镜/,
 );
 
+const analysisDraft = core.buildGenerationDraft({ width: 1080, height: 1920 }, {
+  character: { id: "main-hero", prompt: "固定人物三视图，短黑发、米白夹克、深蓝工装裤，保持五官和服装一致。" },
+  scenes: [{ id: "harbor", prompt: "傍晚海边集装箱码头，左侧蓝色集装箱，右侧海面，远处白色灯塔。" }],
+  shots: [{
+    title: "走向集装箱", sceneId: "harbor", startTime: 0, endTime: 4,
+    dialogue: "", plot: "人物向前走两步", environment: "海边码头", camera: "中景缓慢推进",
+    imagePrompt: "同一人物站在码头通道起点。", lastImagePrompt: "同一人物向前两步后停下。", videoPrompt: "人物自然向前走两步，镜头缓慢推进。",
+  }],
+}, { videoModel: "MiniMax-H3", resolution: "768p" });
+assert.strictEqual(analysisDraft.confirmed, false);
+assert.strictEqual(analysisDraft.settings.ratio, "9:16");
+assert.strictEqual(analysisDraft.shots[0].duration, 4);
+assert.match(core.analysisStoryboardMarkdown({ title: "测试" }, analysisDraft), /原片截图只用于分析/);
+
 const markdown = core.dashboardMarkdown({
   folder: "山竹视频复刻/测试项目",
   title: "测试项目",

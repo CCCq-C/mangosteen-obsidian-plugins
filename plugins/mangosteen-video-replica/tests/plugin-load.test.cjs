@@ -21,6 +21,9 @@ const ReplicaPlugin = require("../main.js");
 const plugin = new ReplicaPlugin();
 assert.strictEqual(typeof ReplicaPlugin, "function");
 assert.strictEqual(typeof plugin.prepareVideo, "function");
+assert.strictEqual(typeof plugin.analyzeLatestProject, "function");
+assert.strictEqual(typeof plugin.confirmLatestGeneration, "function");
+assert.strictEqual(typeof plugin.concatProject, "function");
 assert.strictEqual(typeof plugin.runGeneration, "function");
 assert.strictEqual(typeof plugin.waitForVideo, "function");
 
@@ -28,9 +31,16 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   const realVault = path.resolve(__dirname, "../../..");
   plugin.app = { vault: { adapter: { getBasePath: () => realVault }, on: () => ({}) } };
   plugin.manifest = { dir: "plugins/mangosteen-video-replica" };
-  plugin.addRibbonIcon = plugin.addCommand = plugin.registerInterval = plugin.registerEvent = () => {};
+  const commandIds = [];
+  plugin.addRibbonIcon = plugin.registerInterval = plugin.registerEvent = () => {};
+  plugin.addCommand = (command) => { commandIds.push(command.id); };
   global.window = { setInterval: () => 1, setTimeout: () => 1 };
   await plugin.onload();
+  assert(commandIds.includes("analyze-latest-project"));
+  assert(commandIds.includes("confirm-latest-generation"));
+  assert(commandIds.includes("concat-latest-project"));
+  plugin.app.plugins = { getPlugin: () => ({ settings: { model: "MiniMax-H3", resolution: "720p" } }) };
+  assert.deepStrictEqual(plugin.analysisSettings(), { videoModel: "MiniMax-H3", resolution: "768p" });
 
   const vault = fs.mkdtempSync(path.join(os.tmpdir(), "mangosteen-replica-plugin-"));
   const project = path.join(vault, "山竹视频复刻", "失败任务");
@@ -39,6 +49,14 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   fs.writeFileSync(path.join(project, "project.json"), JSON.stringify({ folder: "山竹视频复刻/失败任务", shots: [] }));
   plugin.app = { vault: { adapter: { getBasePath: () => vault } } };
   plugin.processing = new Set();
+
+  plugin.concatProject = async (value) => {
+    const output = `${value.folder}/04-最终成片/最终成片.mp4`;
+    const absolute = path.join(plugin.vaultPath(), ...output.split("/"));
+    fs.mkdirSync(path.dirname(absolute), { recursive: true });
+    fs.writeFileSync(absolute, "joined-video");
+    return output;
+  };
 
   const blockedFolder = "山竹视频复刻/模型预检";
   const blockedProject = path.join(vault, ...blockedFolder.split("/"));
@@ -81,10 +99,7 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
 
   const requestPath = path.join(project, "generation-request.json");
   await plugin.processRequest(requestPath);
-  const state = JSON.parse(fs.readFileSync(path.join(project, ".work/generation-state.json"), "utf8"));
-  assert.strictEqual(state.status, "failed");
-  assert.strictEqual(state.requestMtimeMs, fs.statSync(requestPath).mtimeMs);
-  assert.strictEqual(plugin.requestAlreadyHandled("山竹视频复刻/失败任务", state.requestMtimeMs), true);
+  assert.strictEqual(fs.existsSync(path.join(project, ".work/generation-state.json")), false, "an unconfirmed draft must stay idle and must not be marked failed");
 
   const leaseFolder = "山竹视频复刻/租约恢复";
   const leaseRoot = path.join(vault, ...leaseFolder.split("/"));
@@ -171,6 +186,7 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
       const completedState = JSON.parse(fs.readFileSync(path.join(projectRoot, ".work/generation-state.json"), "utf8"));
       assert.strictEqual(completedState.status, "completed", `${family}: mock workflow must complete`);
       assert.strictEqual(completed.status, "completed", `${family}: project must be retained as completed`);
+      assert.strictEqual(completed.finalVideoPath, `${projectFolder}/04-最终成片/最终成片.mp4`, `${family}: completed clips must be joined automatically`);
       assert.strictEqual(completed.characterAsset.id, "hero", `${family}: one character asset must be retained`);
       assert(fs.existsSync(path.join(caseVault, ...completed.characterAsset.imagePath.split("/"))), `${family}: character asset file must exist`);
       assert.strictEqual(completed.sceneAssets.length, 1, `${family}: one scene asset must be retained`);

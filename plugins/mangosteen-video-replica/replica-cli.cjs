@@ -44,23 +44,32 @@ function resolveRuntimes(pluginRoot = __dirname) {
     ffprobe: resolveRuntime(pluginRoot, "ffprobe", "MANGOSTEEN_FFPROBE", ["/opt/homebrew/bin/ffprobe", "/usr/local/bin/ffprobe"]),
     whisper: resolveRuntime(pluginRoot, "whisper-cli", "MANGOSTEEN_WHISPER", ["/opt/homebrew/bin/whisper-cli", "/usr/local/bin/whisper-cli"]),
     whisperModel: resolveWhisperModel(pluginRoot),
+    codex: resolveRuntime(pluginRoot, "codex", "MANGOSTEEN_CODEX_CLI", [path.join(os.homedir(), ".local", "bin", "codex"), "/opt/homebrew/bin/codex", "/usr/local/bin/codex"]),
   };
 }
 
-function run(command, args, { allowFailure = false, maxOutput = 12 * 1024 * 1024 } = {}) {
+function run(command, args, { allowFailure = false, maxOutput = 12 * 1024 * 1024, cwd, timeoutMs = 0 } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = Buffer.alloc(0);
     let stderr = Buffer.alloc(0);
+    let timedOut = false;
+    const timer = timeoutMs > 0 ? setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+    }, timeoutMs) : null;
+    timer?.unref?.();
     const append = (current, chunk) => {
       if (current.length >= maxOutput) return current;
       return Buffer.concat([current, Buffer.from(chunk).subarray(0, maxOutput - current.length)]);
     };
     child.stdout.on("data", (chunk) => { stdout = append(stdout, chunk); });
     child.stderr.on("data", (chunk) => { stderr = append(stderr, chunk); });
-    child.on("error", reject);
+    child.on("error", (error) => { if (timer) clearTimeout(timer); reject(error); });
     child.on("close", (code) => {
+      if (timer) clearTimeout(timer);
       const result = { code, stdout: stdout.toString("utf8"), stderr: stderr.toString("utf8") };
+      if (timedOut) return reject(new Error(`${path.basename(command)} 执行超过 ${Math.ceil(timeoutMs / 60000)} 分钟，已停止本次分析。`));
       if (code === 0 || allowFailure) resolve(result);
       else reject(new Error(`${path.basename(command)} 执行失败：${result.stderr.trim().split("\n").slice(-4).join(" ") || `退出码 ${code}`}`));
     });
@@ -279,6 +288,113 @@ async function prepareProject({ sourcePath, vaultPath, projectFolder = "", plugi
   }
 }
 
+function sampleFrames(frames, limit = 12) {
+  const values = Array.isArray(frames) ? frames : [];
+  const count = Math.max(1, Math.min(Number(limit) || 12, values.length));
+  if (values.length <= count) return values.slice();
+  return Array.from({ length: count }, (_, index) => values[Math.round(index * (values.length - 1) / (count - 1))]);
+}
+
+function parseAnalysisOutput(text) {
+  const cleaned = String(text || "").trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+  try { return JSON.parse(cleaned); } catch (_) { throw new Error("AI 已返回结果，但分镜 JSON 无法读取。请重新运行“分析最近的视频复刻项目”。"); }
+}
+
+function analysisPrompt(project) {
+  const transcript = project.transcriptPath || `${project.folder}/02-分镜脚本/台词转写.md`;
+  return [
+    "你是视频复刻分镜分析器。只分析本次提供的项目资料，不搜索网络，不修改任何文件。",
+    `项目：${project.folder}`,
+    `时长：${Number(project.duration || 0).toFixed(1)} 秒；尺寸：${Number(project.width || 0)}x${Number(project.height || 0)}`,
+    `先读取台词转写：${transcript}，再结合附带的按时间顺序截图。`,
+    "输出最多 12 个连续分镜，覆盖主要剧情。每个分镜写清人物动作、台词、环境、镜头语言、首帧提示词、可选尾帧提示词和视频提示词。",
+    "人物提示词必须描述稳定的五官、发型、年龄、服装和正面/侧面/背面三视图。场景提示词必须保留地标、空间关系、光线、天气和关键物件。",
+    "所有镜头复用同一人物资产；同一地点复用同一 sceneId。ID 只用英文、数字、下划线或短横线。",
+    "原片截图只用于理解，不要要求把原片截图作为生成参考图。严格按给定 JSON Schema 输出。",
+  ].join("\n");
+}
+
+async function analyzeProject({ projectFolder, vaultPath, pluginRoot = __dirname, settings = {} } = {}) {
+  const vault = path.resolve(String(vaultPath || ""));
+  if (!fs.statSync(vault, { throwIfNoEntry: false })?.isDirectory()) throw new Error("找不到 Obsidian 知识库目录。");
+  const folder = core.normalizeVaultPath(projectFolder);
+  const absoluteFolder = path.join(vault, ...folder.split("/"));
+  const projectPath = path.join(absoluteFolder, "project.json");
+  if (!fs.statSync(projectPath, { throwIfNoEntry: false })?.isFile()) throw new Error("找不到视频复刻项目的 project.json。");
+  const project = JSON.parse(fs.readFileSync(projectPath, "utf8"));
+  const runtime = resolveRuntimes(pluginRoot);
+  if (!runtime.codex) throw new Error("缺少 Codex CLI。请先完成山竹智能体基础安装，再重新分析。");
+  const frames = sampleFrames(project.frames, 12);
+  if (!frames.length) throw new Error("项目还没有提取画面，请先完成本地拆解。");
+  const imagePaths = frames.map((frame) => path.join(vault, ...core.normalizeVaultPath(frame.path).split("/")));
+  if (imagePaths.some((filePath) => !fs.statSync(filePath, { throwIfNoEntry: false })?.isFile())) throw new Error("部分原片画面丢失，请重新执行本地拆解。");
+  const schemaPath = path.join(pluginRoot, "video-analysis-schema.json");
+  if (!fs.statSync(schemaPath, { throwIfNoEntry: false })?.isFile()) throw new Error("缺少视频分析规则文件，请重新安装山竹视频复刻插件。");
+  const workFolder = path.join(absoluteFolder, ".work");
+  const outputPath = path.join(workFolder, "ai-analysis.json");
+  fs.mkdirSync(workFolder, { recursive: true });
+  fs.rmSync(outputPath, { force: true });
+  project.status = "analyzing";
+  project.statusText = "AI 正在分析人物、场景和分镜";
+  writeJson(projectPath, project);
+  atomicWrite(path.join(absoluteFolder, "00-项目总览.md"), core.dashboardMarkdown(project));
+  try {
+    const args = [
+      "exec", "--ephemeral", "--ignore-rules", "--skip-git-repo-check", "--sandbox", "read-only",
+      "-C", vault, "--output-schema", schemaPath, "--output-last-message", outputPath,
+    ];
+    for (const imagePath of imagePaths) args.push("--image", imagePath);
+    args.push("--", analysisPrompt(project));
+    await run(runtime.codex, args, { cwd: vault, timeoutMs: 20 * 60 * 1000, maxOutput: 2 * 1024 * 1024 });
+    if (!fs.statSync(outputPath, { throwIfNoEntry: false })?.isFile()) throw new Error("AI 分析完成，但没有输出分镜文件。");
+    const analysis = parseAnalysisOutput(fs.readFileSync(outputPath, "utf8"));
+    const request = core.buildGenerationDraft(project, analysis, settings);
+    project.status = "analysis_ready";
+    project.statusText = "AI 分析完成，等待确认生成";
+    project.videoModel = request.settings.videoModel;
+    project.analysisProvider = "codex-cli";
+    project.shots = request.shots.map((shot) => ({ ...shot, status: "等待确认", imagePath: "", videoPath: "", error: "" }));
+    writeJson(projectPath, project);
+    writeJson(path.join(absoluteFolder, "generation-request.json"), request);
+    atomicWrite(path.join(absoluteFolder, "02-分镜脚本", "分镜脚本.md"), core.analysisStoryboardMarkdown(project, request));
+    atomicWrite(path.join(absoluteFolder, "00-项目总览.md"), core.dashboardMarkdown(project));
+    return { project, request, outputPath };
+  } catch (error) {
+    project.status = "analysis_failed";
+    project.statusText = `AI 分析失败：${String(error?.message || error)}`;
+    writeJson(projectPath, project);
+    atomicWrite(path.join(absoluteFolder, "00-项目总览.md"), core.dashboardMarkdown(project));
+    throw error;
+  }
+}
+
+function concatFileLine(filePath) {
+  return `file '${String(filePath).replace(/'/g, "'\\''")}'`;
+}
+
+async function concatProjectVideos({ project, vaultPath, pluginRoot = __dirname } = {}) {
+  const vault = path.resolve(String(vaultPath || ""));
+  const folder = core.normalizeVaultPath(project?.folder);
+  const shots = Array.isArray(project?.shots) ? project.shots : [];
+  if (!shots.length || shots.some((shot) => !shot.videoPath)) throw new Error("分镜视频尚未全部生成，暂时不能拼接。");
+  const clips = shots.map((shot) => path.join(vault, ...core.normalizeVaultPath(shot.videoPath).split("/")));
+  const missing = clips.find((filePath) => !fs.statSync(filePath, { throwIfNoEntry: false })?.isFile());
+  if (missing) throw new Error(`找不到视频片段：${path.basename(missing)}`);
+  const ffmpeg = resolveRuntimes(pluginRoot).ffmpeg;
+  if (!ffmpeg) throw new Error("缺少 FFmpeg，无法拼接最终成片。请重新安装山竹视频复刻组件。");
+  const absoluteFolder = path.join(vault, ...folder.split("/"));
+  const workFolder = path.join(absoluteFolder, ".work");
+  const outputFolder = path.join(absoluteFolder, "04-最终成片");
+  const listPath = path.join(workFolder, "concat.txt");
+  const outputPath = path.join(outputFolder, "最终成片.mp4");
+  fs.mkdirSync(workFolder, { recursive: true });
+  fs.mkdirSync(outputFolder, { recursive: true });
+  atomicWrite(listPath, `${clips.map(concatFileLine).join("\n")}\n`);
+  await run(ffmpeg, ["-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", "-movflags", "+faststart", "-y", outputPath], { timeoutMs: 10 * 60 * 1000 });
+  if (!fs.statSync(outputPath, { throwIfNoEntry: false })?.isFile()) throw new Error("FFmpeg 已结束，但没有生成最终成片。");
+  return `${folder}/04-最终成片/最终成片.mp4`;
+}
+
 function parseArgs(argv) {
   const output = { command: argv[2] || "", json: false };
   for (let index = 3; index < argv.length; index += 1) {
@@ -301,4 +417,14 @@ async function main() {
 
 if (require.main === module) main().catch((error) => { process.stderr.write(`${String(error?.message || error)}\n`); process.exitCode = 1; });
 
-module.exports = { prepareProject, resolveRuntimes, transcriptSegments, hasFrameCoverage };
+module.exports = {
+  analysisPrompt,
+  analyzeProject,
+  concatProjectVideos,
+  hasFrameCoverage,
+  parseAnalysisOutput,
+  prepareProject,
+  resolveRuntimes,
+  sampleFrames,
+  transcriptSegments,
+};
