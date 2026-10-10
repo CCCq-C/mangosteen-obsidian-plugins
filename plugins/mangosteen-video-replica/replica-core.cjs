@@ -10,6 +10,21 @@ function cleanText(value) {
   return String(value ?? "").trim();
 }
 
+function validationError(message, path) {
+  const error = new Error(message);
+  error.path = path;
+  return error;
+}
+
+function withValidationPath(path, operation) {
+  try {
+    return operation();
+  } catch (error) {
+    if (error && (typeof error === "object" || typeof error === "function")) error.path = path;
+    throw error;
+  }
+}
+
 function safeSegment(value, fallback = "未命名") {
   let output = cleanText(value)
     .normalize("NFKC")
@@ -65,43 +80,43 @@ function formatTime(seconds) {
 }
 
 function normalizeGenerationRequest(input) {
-  if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("生成任务格式错误。");
-  if (input.confirmed !== true) throw new Error("生成任务尚未确认，不会调用付费算力。");
+  if (!input || typeof input !== "object" || Array.isArray(input)) throw validationError("生成任务格式错误。", "request");
+  if (input.confirmed !== true) throw validationError("生成任务尚未确认，不会调用付费算力。", "confirmed");
   const version = input.version === undefined ? 1 : Number(input.version);
-  if (![1, 2, 3].includes(version)) throw new Error(`不支持生成任务版本：${String(input.version)}`);
+  if (![1, 2, 3].includes(version)) throw validationError(`不支持生成任务版本：${String(input.version)}`, "version");
   const characterPrompt = cleanText(input.character?.prompt);
-  if (!characterPrompt) throw new Error("缺少人物参考图提示词。");
+  if (!characterPrompt) throw validationError("缺少人物参考图提示词。", "character.prompt");
   const inputShots = Array.isArray(input.shots) ? input.shots : [];
-  if (version >= 2 && inputShots.length > 12) throw new Error("一个任务最多只能包含 12 个分镜。");
+  if (version >= 2 && inputShots.length > 12) throw validationError("一个任务最多只能包含 12 个分镜。", "shots");
   const shots = version === 1 ? inputShots.slice(0, 12) : inputShots;
-  if (!shots.length) throw new Error("至少需要一个分镜。");
+  if (!shots.length) throw validationError("至少需要一个分镜。", "shots");
 
   if (version >= 2) {
-    const characterId = assertAssetId(input.character?.id);
+    const characterId = withValidationPath("character.id", () => assertAssetId(input.character?.id));
     const model = cleanText(input.settings?.videoModel);
-    if (!classifyModel(model)) throw new Error(`视频复刻不支持模型：${model || "未选择"}`);
+    if (!classifyModel(model)) throw validationError(`视频复刻不支持模型：${model || "未选择"}`, "settings.videoModel");
     const inputScenes = Array.isArray(input.scenes) ? input.scenes : [];
-    if (!inputScenes.length) throw new Error("至少需要一个场景资产。");
-    const scenes = inputScenes.map((scene) => {
-      const id = assertAssetId(scene?.id);
+    if (!inputScenes.length) throw validationError("至少需要一个场景资产。", "scenes");
+    const scenes = inputScenes.map((scene, index) => {
+      const id = withValidationPath(`scenes.${index}.id`, () => assertAssetId(scene?.id));
       const prompt = cleanText(scene?.prompt);
-      if (!prompt) throw new Error(`场景 ${id} 缺少参考图提示词。`);
+      if (!prompt) throw validationError(`场景 ${id} 缺少参考图提示词。`, `scenes.${index}.prompt`);
       return { id, prompt };
     });
     const sceneIds = new Set();
-    for (const scene of scenes) {
-      if (sceneIds.has(scene.id)) throw new Error(`场景 ID 重复：${scene.id}`);
+    for (const [index, scene] of scenes.entries()) {
+      if (sceneIds.has(scene.id)) throw validationError(`场景 ID 重复：${scene.id}`, `scenes.${index}.id`);
       sceneIds.add(scene.id);
     }
-    const products = version >= 3 ? (Array.isArray(input.products) ? input.products : []).map((product) => {
-      const id = assertAssetId(product?.id);
+    const products = version >= 3 ? (Array.isArray(input.products) ? input.products : []).map((product, index) => {
+      const id = withValidationPath(`products.${index}.id`, () => assertAssetId(product?.id));
       const prompt = cleanText(product?.prompt);
-      if (!prompt) throw new Error(`产品 ${id} 缺少参考图提示词。`);
+      if (!prompt) throw validationError(`产品 ${id} 缺少参考图提示词。`, `products.${index}.prompt`);
       return { id, prompt };
     }) : [];
     const productIds = new Set();
-    for (const product of products) {
-      if (productIds.has(product.id)) throw new Error(`产品 ID 重复：${product.id}`);
+    for (const [index, product] of products.entries()) {
+      if (productIds.has(product.id)) throw validationError(`产品 ID 重复：${product.id}`, `products.${index}.id`);
       productIds.add(product.id);
     }
     return {
@@ -119,20 +134,29 @@ function normalizeGenerationRequest(input) {
       shots: shots.map((shot, index) => {
         const id = String(index + 1).padStart(3, "0");
         const sceneId = cleanText(shot?.sceneId);
-        if (!sceneId) throw new Error(`镜头 ${id} 缺少场景 ID。`);
-        assertAssetId(sceneId);
-        if (!sceneIds.has(sceneId)) throw new Error(`镜头 ${id} 找不到场景 ID：${sceneId}`);
+        if (!sceneId) throw validationError(`镜头 ${id} 缺少场景 ID。`, `shots.${index}.sceneId`);
+        withValidationPath(`shots.${index}.sceneId`, () => assertAssetId(sceneId));
+        if (!sceneIds.has(sceneId)) throw validationError(`镜头 ${id} 找不到场景 ID：${sceneId}`, `shots.${index}.sceneId`);
         const shotProductIds = version >= 3
-          ? (Array.isArray(shot?.productIds) ? shot.productIds : []).map((productId) => assertAssetId(productId))
+          ? (Array.isArray(shot?.productIds) ? shot.productIds : []).map((productId, productIndex) => (
+            withValidationPath(`shots.${index}.productIds.${productIndex}`, () => assertAssetId(productId))
+          ))
           : [];
-        if (shotProductIds.length > 2) throw new Error(`镜头 ${id} 最多引用 2 个产品。`);
-        for (const productId of shotProductIds) {
-          if (!productIds.has(productId)) throw new Error(`镜头 ${id} 找不到产品 ID：${productId}`);
+        if (shotProductIds.length > 2) throw validationError(`镜头 ${id} 最多引用 2 个产品。`, `shots.${index}.productIds`);
+        for (const [productIndex, productId] of shotProductIds.entries()) {
+          if (!productIds.has(productId)) {
+            throw validationError(`镜头 ${id} 找不到产品 ID：${productId}`, `shots.${index}.productIds.${productIndex}`);
+          }
         }
         const title = safeSegment(shot?.title, `镜头-${id}`);
         const imagePrompt = cleanText(shot?.imagePrompt || shot?.prompt);
         const videoPrompt = cleanText(shot?.videoPrompt || shot?.prompt);
-        if (!imagePrompt || !videoPrompt) throw new Error(`镜头 ${id} 缺少图片或视频提示词。`);
+        if (!imagePrompt || !videoPrompt) {
+          throw validationError(
+            `镜头 ${id} 缺少图片或视频提示词。`,
+            `shots.${index}.${!imagePrompt ? "imagePrompt" : "videoPrompt"}`,
+          );
+        }
         return {
           id,
           title,
@@ -166,7 +190,12 @@ function normalizeGenerationRequest(input) {
       const title = safeSegment(shot?.title, `镜头-${id}`);
       const imagePrompt = cleanText(shot?.imagePrompt || shot?.prompt);
       const videoPrompt = cleanText(shot?.videoPrompt || shot?.prompt);
-      if (!imagePrompt || !videoPrompt) throw new Error(`镜头 ${id} 缺少图片或视频提示词。`);
+      if (!imagePrompt || !videoPrompt) {
+        throw validationError(
+          `镜头 ${id} 缺少图片或视频提示词。`,
+          `shots.${index}.${!imagePrompt ? "imagePrompt" : "videoPrompt"}`,
+        );
+      }
       return {
         id,
         title,

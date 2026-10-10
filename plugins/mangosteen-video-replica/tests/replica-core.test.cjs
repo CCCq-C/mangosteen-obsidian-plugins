@@ -51,6 +51,14 @@ assert.throws(
   () => core.normalizeGenerationRequest({ ...requestV2Input, shots: [{ ...requestV2Input.shots[0], sceneId: "missing" }] }),
   /找不到场景 ID.*missing/,
 );
+let missingSceneError;
+try {
+  core.normalizeGenerationRequest({ ...requestV2Input, shots: [{ ...requestV2Input.shots[0], sceneId: "missing" }] });
+} catch (error) {
+  missingSceneError = error;
+}
+assert.strictEqual(missingSceneError.path, "shots.0.sceneId");
+assert.strictEqual(missingSceneError.message, "镜头 001 找不到场景 ID：missing");
 assert.throws(
   () => core.normalizeGenerationRequest({ ...requestV2Input, character: { ...requestV2Input.character, id: "../hero" } }),
   /资产 ID 不安全/,
