@@ -52,6 +52,7 @@ const supportedEdits = [
   [{ section: "shot", index: 0, field: "imagePrompt" }, "新首帧", (value) => value.shots[0].imagePrompt],
   [{ section: "shot", index: 0, field: "lastImagePrompt" }, "新尾帧", (value) => value.shots[0].lastImagePrompt],
   [{ section: "shot", index: 0, field: "videoPrompt" }, "新视频", (value) => value.shots[0].videoPrompt],
+  [{ section: "shot", index: 0, field: "videoPromptOverride" }, "用户编辑后的完整提示词", (value) => value.shots[0].videoPromptOverride],
   [{ section: "settings", field: "imageModel" }, "gpt-image-3", (value) => value.settings.imageModel],
   [{ section: "settings", field: "ratio" }, "16:9", (value) => value.settings.ratio],
   [{ section: "settings", field: "resolution" }, "1080p", (value) => value.settings.resolution],

@@ -37,10 +37,15 @@ function composeVideoPrompt({ videoPrompt, dialogue, voiceProfile, voiceDirectio
   ].filter(Boolean).join("\n");
 }
 
+function resolveVideoPrompt({ videoPromptOverride, ...parts } = {}) {
+  const override = clean(videoPromptOverride);
+  return override || composeVideoPrompt(parts);
+}
+
 function createGenerationFingerprint({ character = {}, scene = {}, products = [], shot = {}, model, ratio, resolution } = {}) {
   const requirements = referenceRequirements(model, shot.lastImagePrompt);
   const canonical = {
-    version: 2,
+    version: 3,
     character: { id: clean(character.id), prompt: clean(character.prompt), contentHash: clean(character.contentHash) },
     scene: { id: clean(scene.id), prompt: clean(scene.prompt), contentHash: clean(scene.contentHash) },
     products: (Array.isArray(products) ? products : []).map((product) => ({
@@ -50,10 +55,13 @@ function createGenerationFingerprint({ character = {}, scene = {}, products = []
     })),
     imagePrompt: clean(shot.imagePrompt),
     lastImagePrompt: clean(shot.lastImagePrompt),
-    videoPrompt: clean(shot.videoPrompt),
-    dialogue: clean(shot.dialogue),
-    voiceProfile: clean(character.voiceProfile),
-    voiceDirection: clean(shot.voiceDirection),
+    effectiveVideoPrompt: resolveVideoPrompt({
+      videoPrompt: shot.videoPrompt,
+      videoPromptOverride: shot.videoPromptOverride,
+      dialogue: shot.dialogue,
+      voiceProfile: character.voiceProfile,
+      voiceDirection: shot.voiceDirection,
+    }),
     model: clean(model),
     duration: Number(shot.duration),
     ratio: requirements.mode === "frame-fields" ? "omitted-with-frames" : clean(ratio),
@@ -93,4 +101,5 @@ module.exports = {
   createGenerationFingerprint,
   eligibleModels,
   referenceRequirements,
+  resolveVideoPrompt,
 };

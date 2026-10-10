@@ -16,6 +16,7 @@ const COLLECTIONS = {
       "imagePrompt",
       "lastImagePrompt",
       "videoPrompt",
+      "videoPromptOverride",
     ]),
   },
 };

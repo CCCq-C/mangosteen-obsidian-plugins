@@ -80,12 +80,17 @@ const requestV3Input = {
   ...requestV2Input,
   version: 3,
   products: [{ id: "headphones", prompt: "白色头戴式耳机与白色包装盒，外观、比例、材质和品牌位置固定。" }],
-  shots: [{ ...requestV2Input.shots[0], productIds: ["headphones"] }],
+  shots: [{
+    ...requestV2Input.shots[0],
+    productIds: ["headphones"],
+    videoPromptOverride: "用户确认后的完整视频生成提示词。",
+  }],
 };
 const requestV3 = core.normalizeGenerationRequest(requestV3Input);
 assert.strictEqual(requestV3.version, 3);
 assert.deepStrictEqual(requestV3.products, requestV3Input.products);
 assert.deepStrictEqual(requestV3.shots[0].productIds, ["headphones"]);
+assert.strictEqual(requestV3.shots[0].videoPromptOverride, "用户确认后的完整视频生成提示词。");
 assert.throws(
   () => core.normalizeGenerationRequest({ ...requestV3Input, shots: [{ ...requestV3Input.shots[0], productIds: ["missing"] }] }),
   /找不到产品 ID.*missing/,

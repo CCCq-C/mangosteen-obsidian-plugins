@@ -171,6 +171,7 @@ function normalizeGenerationRequest(input) {
           imagePrompt,
           lastImagePrompt: cleanText(shot?.lastImagePrompt),
           videoPrompt,
+          videoPromptOverride: cleanText(shot?.videoPromptOverride),
         };
       }),
     };
@@ -208,6 +209,7 @@ function normalizeGenerationRequest(input) {
         camera: cleanText(shot?.camera),
         imagePrompt,
         videoPrompt,
+        videoPromptOverride: cleanText(shot?.videoPromptOverride),
       };
     }),
   };

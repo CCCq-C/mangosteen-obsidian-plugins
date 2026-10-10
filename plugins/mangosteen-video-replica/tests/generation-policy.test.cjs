@@ -6,6 +6,7 @@ const {
   createGenerationFingerprint,
   eligibleModels,
   referenceRequirements,
+  resolveVideoPrompt,
 } = require("../generation-policy.cjs");
 
 const spokenPrompt = composeVideoPrompt({
@@ -28,6 +29,21 @@ assert.strictEqual(composeVideoPrompt({
   voiceProfile: "年轻女声",
   voiceDirection: "兴奋",
 }), "港口空镜，海浪轻拍岸边。", "silent shots must not invent speech");
+
+assert.strictEqual(resolveVideoPrompt({
+  videoPrompt: "自动视觉描述",
+  dialogue: "自动台词",
+  voiceProfile: "自动声音",
+  voiceDirection: "自动语气",
+  videoPromptOverride: "用户编辑后的完整提示词",
+}), "用户编辑后的完整提示词", "explicit complete prompt must bypass automatic composition");
+assert.match(resolveVideoPrompt({
+  videoPrompt: "自动视觉描述",
+  dialogue: "自动台词",
+  voiceProfile: "自动声音",
+  voiceDirection: "自动语气",
+  videoPromptOverride: "   ",
+}), /自动台词/, "blank override must restore automatic composition");
 
 assert.deepStrictEqual(
   eligibleModels([
@@ -145,6 +161,28 @@ for (const changed of [
     `fingerprint must invalidate for ${JSON.stringify(changed)}`,
   );
 }
+const overriddenFingerprint = createGenerationFingerprint({
+  ...fingerprintInput,
+  shot: { ...fingerprintInput.shot, videoPromptOverride: "用户最终提示词 A" },
+});
+assert.notStrictEqual(overriddenFingerprint, baselineFingerprint);
+assert.notStrictEqual(
+  createGenerationFingerprint({
+    ...fingerprintInput,
+    shot: { ...fingerprintInput.shot, videoPromptOverride: "用户最终提示词 B" },
+  }),
+  overriddenFingerprint,
+  "changing the complete prompt override must invalidate generated output",
+);
+assert.strictEqual(
+  createGenerationFingerprint({
+    ...fingerprintInput,
+    character: { ...fingerprintInput.character, voiceProfile: "另一种声音" },
+    shot: { ...fingerprintInput.shot, dialogue: "另一句台词", videoPromptOverride: "用户最终提示词 A" },
+  }),
+  overriddenFingerprint,
+  "fields bypassed by an explicit complete prompt must not invalidate generated output",
+);
 assert.strictEqual(
   createGenerationFingerprint({ ...fingerprintInput, model: "MiniMax-H3", resolution: "768p", ratio: "9:16" }),
   createGenerationFingerprint({ ...fingerprintInput, model: "MiniMax-H3", resolution: "768p", ratio: "16:9" }),
@@ -163,7 +201,7 @@ assert.deepStrictEqual(referenceRequirements("seedance-2.5", "人物停下"), {
 
 assert.deepStrictEqual(
   Object.keys(require("../generation-policy.cjs")).sort(),
-  ["buildVideoOptions", "classifyModel", "composeVideoPrompt", "createGenerationFingerprint", "eligibleModels", "referenceRequirements"],
+  ["buildVideoOptions", "classifyModel", "composeVideoPrompt", "createGenerationFingerprint", "eligibleModels", "referenceRequirements", "resolveVideoPrompt"],
 );
 
 console.log("generation-policy: ok");
