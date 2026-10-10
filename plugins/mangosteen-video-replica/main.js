@@ -959,7 +959,12 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         try {
           task = await video.submitVideo(generationPolicy.buildVideoOptions({
             model,
-            prompt: shot.videoPrompt,
+            prompt: generationPolicy.composeVideoPrompt({
+              videoPrompt: shot.videoPrompt,
+              dialogue: shot.dialogue,
+              voiceProfile: request.character.voiceProfile,
+              voiceDirection: shot.voiceDirection,
+            }),
             duration: shot.duration,
             ratio: request.settings.ratio,
             resolution: effectiveResolution,
@@ -1038,7 +1043,12 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         try {
           task = await video.submitVideo(generationPolicy.buildVideoOptions({
             model,
-            prompt: shot.videoPrompt,
+            prompt: generationPolicy.composeVideoPrompt({
+              videoPrompt: shot.videoPrompt,
+              dialogue: shot.dialogue,
+              voiceProfile: request.character.voiceProfile,
+              voiceDirection: shot.voiceDirection,
+            }),
             duration: shot.duration,
             ratio: request.settings.ratio,
             resolution: request.settings.resolution || video.settings.resolution,

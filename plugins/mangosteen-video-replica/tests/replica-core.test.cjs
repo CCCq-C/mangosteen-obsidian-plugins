@@ -28,7 +28,7 @@ assert.strictEqual(request.shots[0].id, "001");
 const requestV2Input = {
   version: 2,
   confirmed: true,
-  character: { id: "hero", prompt: "固定人物参考板" },
+  character: { id: "hero", prompt: "固定人物参考板", voiceProfile: "年轻清亮的中文女声，轻微四川口音。" },
   scenes: [{ id: "harbor", prompt: "海边集装箱场景" }],
   settings: { videoModel: "MiniMax-H3", ratio: "9:16", resolution: "768p" },
   shots: [{
@@ -37,15 +37,19 @@ const requestV2Input = {
     imagePrompt: "人物全身中景",
     lastImagePrompt: "人物停在集装箱前",
     videoPrompt: "人物向前走，镜头缓慢推进",
+    dialogue: "今天带大家看看这款耳机。",
+    voiceDirection: "自然介绍，语速中等，句尾轻微上扬。",
     duration: 4,
   }],
 };
 const requestV2 = core.normalizeGenerationRequest(requestV2Input);
 assert.strictEqual(requestV2.version, 2);
-assert.deepStrictEqual(requestV2.character, { id: "hero", prompt: "固定人物参考板" });
+assert.deepStrictEqual(requestV2.character, { id: "hero", prompt: "固定人物参考板", voiceProfile: "年轻清亮的中文女声，轻微四川口音。" });
+assert.strictEqual(requestV2.character.voiceProfile, "年轻清亮的中文女声，轻微四川口音。");
 assert.deepStrictEqual(requestV2.scenes, [{ id: "harbor", prompt: "海边集装箱场景" }]);
 assert.strictEqual(requestV2.shots[0].sceneId, "harbor");
 assert.strictEqual(requestV2.shots[0].lastImagePrompt, "人物停在集装箱前");
+assert.strictEqual(requestV2.shots[0].voiceDirection, "自然介绍，语速中等，句尾轻微上扬。");
 
 assert.throws(
   () => core.normalizeGenerationRequest({ ...requestV2Input, shots: [{ ...requestV2Input.shots[0], sceneId: "missing" }] }),
@@ -100,13 +104,17 @@ assert.throws(
 );
 
 const analysisDraft = core.buildGenerationDraft({ width: 1080, height: 1920 }, {
-  character: { id: "main-hero", prompt: "固定人物三视图，短黑发、米白夹克、深蓝工装裤，保持五官和服装一致。" },
+  character: {
+    id: "main-hero",
+    prompt: "固定人物三视图，短黑发、米白夹克、深蓝工装裤，保持五官和服装一致。",
+    voiceProfile: "年轻清亮的中文女声，普通话，声音有亲和力。",
+  },
   products: [{ id: "headphones", prompt: "白色头戴式耳机与白色包装盒，外观、比例、材质和品牌位置固定。" }],
   scenes: [{ id: "harbor", prompt: "傍晚海边集装箱码头，左侧蓝色集装箱，右侧海面，远处白色灯塔。" }],
   shots: [{
     title: "走向集装箱", sceneId: "harbor", startTime: 0, endTime: 4,
     productIds: ["headphones"],
-    dialogue: "", plot: "人物向前走两步", environment: "海边码头", camera: "中景缓慢推进",
+    dialogue: "你好呀", voiceDirection: "轻松打招呼，语速中等，尾音自然上扬。", plot: "人物向前走两步", environment: "海边码头", camera: "中景缓慢推进",
     imagePrompt: "同一人物站在码头通道起点。", lastImagePrompt: "同一人物向前两步后停下。", videoPrompt: "人物自然向前走两步，镜头缓慢推进。",
   }],
 }, { videoModel: "MiniMax-H3", resolution: "768p" });
@@ -115,10 +123,14 @@ assert.strictEqual(analysisDraft.version, 3);
 assert.strictEqual(analysisDraft.settings.ratio, "9:16");
 assert.strictEqual(analysisDraft.shots[0].duration, 4);
 assert.deepStrictEqual(analysisDraft.shots[0].productIds, ["headphones"]);
+assert.strictEqual(analysisDraft.character.voiceProfile, "年轻清亮的中文女声，普通话，声音有亲和力。");
+assert.strictEqual(analysisDraft.shots[0].voiceDirection, "轻松打招呼，语速中等，尾音自然上扬。");
 const storyboard = core.analysisStoryboardMarkdown({ title: "测试" }, analysisDraft);
 assert.match(storyboard, /原片截图只用于分析/);
 assert.match(storyboard, /产品参考提示词/);
 assert.match(storyboard, /headphones/);
+assert.match(storyboard, /人物声音设定/);
+assert.match(storyboard, /轻松打招呼/);
 
 const markdown = core.dashboardMarkdown({
   folder: "山竹视频复刻/测试项目",

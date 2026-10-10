@@ -7,10 +7,11 @@
     "character": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "prompt"],
+      "required": ["id", "prompt", "voiceProfile"],
       "properties": {
         "id": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$" },
-        "prompt": { "type": "string", "minLength": 20 }
+        "prompt": { "type": "string", "minLength": 20 },
+        "voiceProfile": { "type": "string" }
       }
     },
     "products": {
@@ -47,7 +48,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["title", "sceneId", "productIds", "startTime", "endTime", "dialogue", "plot", "environment", "camera", "imagePrompt", "lastImagePrompt", "videoPrompt"],
+        "required": ["title", "sceneId", "productIds", "startTime", "endTime", "dialogue", "voiceDirection", "plot", "environment", "camera", "imagePrompt", "lastImagePrompt", "videoPrompt"],
         "properties": {
           "title": { "type": "string", "minLength": 1 },
           "sceneId": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$" },
@@ -59,6 +60,7 @@
           "startTime": { "type": "number", "minimum": 0 },
           "endTime": { "type": "number", "exclusiveMinimum": 0 },
           "dialogue": { "type": "string" },
+          "voiceDirection": { "type": "string" },
           "plot": { "type": "string", "minLength": 1 },
           "environment": { "type": "string", "minLength": 1 },
           "camera": { "type": "string", "minLength": 1 },

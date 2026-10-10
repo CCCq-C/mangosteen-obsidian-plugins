@@ -226,11 +226,11 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
     const request = {
       version: 2,
       confirmed: true,
-      character: { id: "hero", prompt: "固定人物参考板" },
+      character: { id: "hero", prompt: "固定人物参考板", voiceProfile: "年轻清亮的中文女声，轻微四川口音。" },
       scenes: [{ id: "studio", prompt: "固定摄影棚场景" }],
       settings: { ratio: "9:16", resolution, videoModel: model },
       shots: [
-        { title: "入场", sceneId: "studio", duration: 4, imagePrompt: "人物走入摄影棚", videoPrompt: "人物向前走" },
+        { title: "入场", sceneId: "studio", duration: 4, dialogue: "你们好呀", voiceDirection: "亲切，语速中等，句尾上扬。", imagePrompt: "人物走入摄影棚", videoPrompt: "人物向前走" },
         { title: "定格", sceneId: "studio", duration: 4, imagePrompt: "人物转身", lastImagePrompt: "人物停在灯光下", videoPrompt: "镜头缓慢推进" },
       ],
     };
@@ -299,6 +299,10 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
       ], `${family}: retained videos must match both mock tasks`);
 
       assert.strictEqual(submittedOptions.length, 2, `${family}: both shots must submit video calls`);
+      assert.match(submittedOptions[0].prompt, /你们好呀/, `${family}: dialogue must reach the video prompt`);
+      assert.match(submittedOptions[0].prompt, /轻微四川口音/, `${family}: stable voice profile must reach the video prompt`);
+      assert.match(submittedOptions[0].prompt, /亲切，语速中等/, `${family}: per-shot delivery must reach the video prompt`);
+      assert.strictEqual(submittedOptions[1].prompt, "镜头缓慢推进", `${family}: silent shots must not invent dialogue instructions`);
       const expectedResolution = family === "minimax-h3" ? "768p" : "720p";
       assert.deepStrictEqual(submittedOptions.map((options) => options.resolution), [
         expectedResolution,

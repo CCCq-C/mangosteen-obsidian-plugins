@@ -19,6 +19,24 @@ function referenceRequirements(model, lastImagePrompt = "") {
   };
 }
 
+function composeVideoPrompt({ videoPrompt, dialogue, voiceProfile, voiceDirection } = {}) {
+  const visualPrompt = clean(videoPrompt);
+  const spokenText = clean(dialogue);
+  if (!spokenText) return visualPrompt;
+  const stableVoice = clean(voiceProfile) || "中文普通话，声音自然清晰，符合人物年龄与形象。";
+  const delivery = clean(voiceDirection) || "根据当前剧情自然表达，语速适中，停顿自然。";
+  return [
+    visualPrompt,
+    "",
+    "【角色对白】",
+    `画面中的角色完整说出：“${spokenText}”`,
+    "【声音要求】",
+    `固定声音设定：${stableVoice}`,
+    `本镜头情绪与语调：${delivery}`,
+    "对白语言和口音严格遵循固定声音设定，并与人物口型同步，吐字清楚；不得添加、删减或改写台词；背景音乐和环境音不得盖过对白。",
+  ].filter(Boolean).join("\n");
+}
+
 function createGenerationFingerprint({ character = {}, scene = {}, products = [], shot = {}, model, ratio, resolution } = {}) {
   const requirements = referenceRequirements(model, shot.lastImagePrompt);
   const canonical = {
@@ -33,6 +51,9 @@ function createGenerationFingerprint({ character = {}, scene = {}, products = []
     imagePrompt: clean(shot.imagePrompt),
     lastImagePrompt: clean(shot.lastImagePrompt),
     videoPrompt: clean(shot.videoPrompt),
+    dialogue: clean(shot.dialogue),
+    voiceProfile: clean(character.voiceProfile),
+    voiceDirection: clean(shot.voiceDirection),
     model: clean(model),
     duration: Number(shot.duration),
     ratio: requirements.mode === "frame-fields" ? "omitted-with-frames" : clean(ratio),
@@ -68,6 +89,7 @@ function buildVideoOptions({ model, prompt, duration, ratio, resolution, firstIm
 module.exports = {
   buildVideoOptions,
   classifyModel,
+  composeVideoPrompt,
   createGenerationFingerprint,
   eligibleModels,
   referenceRequirements,

@@ -3,6 +3,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const {
+  analysisPrompt,
   applyAnalysis,
   concatProjectVideos,
   hasFrameCoverage,
@@ -10,6 +11,18 @@ const {
   sampleFrames,
   transcriptSegments,
 } = require("../replica-cli.cjs");
+
+const promptForVoiceAnalysis = analysisPrompt({
+  folder: "山竹视频复刻/测试",
+  duration: 8,
+  width: 1080,
+  height: 1920,
+  transcriptPath: "山竹视频复刻/测试/02-分镜脚本/台词转写.md",
+}, "四川话：你莫急嘛。");
+assert.match(promptForVoiceAnalysis, /voiceProfile/);
+assert.match(promptForVoiceAnalysis, /voiceDirection/);
+assert.match(promptForVoiceAnalysis, /无法实际听到原声音频/);
+assert.match(promptForVoiceAnalysis, /口音/);
 
 assert.deepStrictEqual(transcriptSegments({
   transcription: [{ timestamps: { from: "00:00:00,000", to: "00:00:07,000" }, text: "(字幕製作:貝爾)" }],
@@ -54,11 +67,11 @@ assert.strictEqual(Object.hasOwn(resolveRuntimes(path.resolve(__dirname, "..")),
   }));
 
   const analysis = {
-  character: { id: "hero", prompt: "短黑发人物三视图，固定五官和服装。" },
+  character: { id: "hero", prompt: "短黑发人物三视图，固定五官和服装。", voiceProfile: "年轻清亮的中文女声，普通话。" },
   scenes: [{ id: "studio", prompt: "明亮摄影棚，固定白色背景和柔光灯。" }],
   shots: [{
     title: "打招呼", sceneId: "studio", startTime: 0, endTime: 4,
-    dialogue: "你好", plot: "人物抬手打招呼", environment: "摄影棚", camera: "中景固定",
+    dialogue: "你好", voiceDirection: "亲切，语速中等，句尾上扬。", plot: "人物抬手打招呼", environment: "摄影棚", camera: "中景固定",
     imagePrompt: "人物面对镜头抬手。", lastImagePrompt: "人物放下手。", videoPrompt: "人物自然挥手后放下。"
   }],
   };
@@ -78,6 +91,8 @@ fs.writeFileSync(output, "joined-video");
     assert.strictEqual(analyzed.request.confirmed, false);
     assert.strictEqual(analyzed.project.status, "analysis_ready");
     assert.strictEqual(analyzed.project.shots[0].status, "等待确认");
+    assert.strictEqual(analyzed.request.character.voiceProfile, "年轻清亮的中文女声，普通话。");
+    assert.strictEqual(analyzed.request.shots[0].voiceDirection, "亲切，语速中等，句尾上扬。");
     assert.match(fs.readFileSync(path.join(storyboardRoot, "分镜脚本.md"), "utf8"), /人物自然挥手后放下/);
 
     const clipOne = `${projectFolder}/03-视频片段/镜头-001.mp4`;

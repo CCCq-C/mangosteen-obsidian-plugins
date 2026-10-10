@@ -10,7 +10,7 @@ const {
 const draft = {
   version: 3,
   confirmed: false,
-  character: { id: "hero", prompt: "原人物" },
+  character: { id: "hero", prompt: "原人物", voiceProfile: "原声音" },
   products: [],
   scenes: [{ id: "room", prompt: "原场景" }],
   settings: { imageModel: "gpt-image-2", videoModel: "MiniMax-H3", ratio: "9:16", resolution: "768p" },
@@ -38,6 +38,7 @@ assert.strictEqual(draft.settings.videoModel, "MiniMax-H3");
 const draftWithProduct = { ...draft, products: [{ id: "phone", prompt: "原产品" }] };
 const supportedEdits = [
   [{ section: "character", field: "prompt" }, "新人物", (value) => value.character.prompt],
+  [{ section: "character", field: "voiceProfile" }, "年轻女声，四川口音", (value) => value.character.voiceProfile],
   [{ section: "product", index: 0, field: "prompt" }, "新产品", (value) => value.products[0].prompt],
   [{ section: "scene", index: 0, field: "prompt" }, "新场景", (value) => value.scenes[0].prompt],
   [{ section: "shot", index: 0, field: "title" }, "新标题", (value) => value.shots[0].title],
@@ -45,6 +46,7 @@ const supportedEdits = [
   [{ section: "shot", index: 0, field: "sceneId" }, "room-2", (value) => value.shots[0].sceneId],
   [{ section: "shot", index: 0, field: "productIds" }, ["phone"], (value) => value.shots[0].productIds],
   [{ section: "shot", index: 0, field: "plot" }, "新剧情", (value) => value.shots[0].plot],
+  [{ section: "shot", index: 0, field: "voiceDirection" }, "惊喜，语速略快", (value) => value.shots[0].voiceDirection],
   [{ section: "shot", index: 0, field: "environment" }, "新环境", (value) => value.shots[0].environment],
   [{ section: "shot", index: 0, field: "camera" }, "新镜头语言", (value) => value.shots[0].camera],
   [{ section: "shot", index: 0, field: "imagePrompt" }, "新首帧", (value) => value.shots[0].imagePrompt],

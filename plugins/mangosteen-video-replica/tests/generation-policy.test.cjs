@@ -2,10 +2,32 @@ const assert = require("assert");
 const {
   buildVideoOptions,
   classifyModel,
+  composeVideoPrompt,
   createGenerationFingerprint,
   eligibleModels,
   referenceRequirements,
 } = require("../generation-policy.cjs");
+
+const spokenPrompt = composeVideoPrompt({
+  videoPrompt: "女孩举起白色耳机盒，镜头缓慢推进。",
+  dialogue: "你们看，这次我们准备了一百台索尼耳机！",
+  voiceProfile: "年轻清亮的中文女声，轻微四川口音，中高音色。",
+  voiceDirection: "惊喜、兴奋，语速略快，句尾上扬。",
+});
+assert.match(spokenPrompt, /女孩举起白色耳机盒/);
+assert.match(spokenPrompt, /你们看，这次我们准备了一百台索尼耳机/);
+assert.match(spokenPrompt, /轻微四川口音/);
+assert.match(spokenPrompt, /惊喜、兴奋/);
+assert.match(spokenPrompt, /口型同步/);
+assert.match(spokenPrompt, /不得添加.*改写台词/);
+assert.match(spokenPrompt, /对白语言和口音严格遵循固定声音设定/);
+assert.doesNotMatch(spokenPrompt, /对白使用中文/);
+assert.strictEqual(composeVideoPrompt({
+  videoPrompt: "港口空镜，海浪轻拍岸边。",
+  dialogue: "",
+  voiceProfile: "年轻女声",
+  voiceDirection: "兴奋",
+}), "港口空镜，海浪轻拍岸边。", "silent shots must not invent speech");
 
 assert.deepStrictEqual(
   eligibleModels([
@@ -141,7 +163,7 @@ assert.deepStrictEqual(referenceRequirements("seedance-2.5", "人物停下"), {
 
 assert.deepStrictEqual(
   Object.keys(require("../generation-policy.cjs")).sort(),
-  ["buildVideoOptions", "classifyModel", "createGenerationFingerprint", "eligibleModels", "referenceRequirements"],
+  ["buildVideoOptions", "classifyModel", "composeVideoPrompt", "createGenerationFingerprint", "eligibleModels", "referenceRequirements"],
 );
 
 console.log("generation-policy: ok");

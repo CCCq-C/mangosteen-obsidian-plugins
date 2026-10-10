@@ -9,6 +9,7 @@ const COLLECTIONS = {
       "sceneId",
       "productIds",
       "dialogue",
+      "voiceDirection",
       "plot",
       "environment",
       "camera",
@@ -20,7 +21,7 @@ const COLLECTIONS = {
 };
 
 const DIRECT_FIELDS = {
-  character: new Set(["prompt"]),
+  character: new Set(["prompt", "voiceProfile"]),
   settings: new Set(["imageModel", "videoModel", "ratio", "resolution"]),
 };
 

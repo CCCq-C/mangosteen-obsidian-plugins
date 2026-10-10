@@ -122,7 +122,7 @@ function normalizeGenerationRequest(input) {
     return {
       version,
       confirmed: true,
-      character: { id: characterId, prompt: characterPrompt },
+      character: { id: characterId, prompt: characterPrompt, voiceProfile: cleanText(input.character?.voiceProfile) },
       ...(version >= 3 ? { products } : {}),
       scenes,
       settings: {
@@ -164,6 +164,7 @@ function normalizeGenerationRequest(input) {
           ...(version >= 3 ? { productIds: shotProductIds } : {}),
           duration: Math.max(2, Math.min(15, Number(shot?.duration) || 5)),
           dialogue: cleanText(shot?.dialogue),
+          voiceDirection: cleanText(shot?.voiceDirection),
           plot: cleanText(shot?.plot),
           environment: cleanText(shot?.environment),
           camera: cleanText(shot?.camera),
@@ -178,7 +179,7 @@ function normalizeGenerationRequest(input) {
   return {
     version: 1,
     confirmed: true,
-    character: { prompt: characterPrompt },
+    character: { prompt: characterPrompt, voiceProfile: cleanText(input.character?.voiceProfile) },
     settings: {
       imageModel: cleanText(input.settings?.imageModel),
       ratio: cleanText(input.settings?.ratio) || "9:16",
@@ -201,6 +202,7 @@ function normalizeGenerationRequest(input) {
         title,
         duration: Math.max(2, Math.min(15, Number(shot?.duration) || 5)),
         dialogue: cleanText(shot?.dialogue),
+        voiceDirection: cleanText(shot?.voiceDirection),
         plot: cleanText(shot?.plot),
         environment: cleanText(shot?.environment),
         camera: cleanText(shot?.camera),
@@ -231,6 +233,7 @@ function buildGenerationDraft(project, analysis, settings = {}) {
     character: {
       id: characterId,
       prompt: cleanText(analysis.character?.prompt),
+      voiceProfile: cleanText(analysis.character?.voiceProfile),
     },
     products,
     scenes,
@@ -246,6 +249,7 @@ function buildGenerationDraft(project, analysis, settings = {}) {
       productIds: Array.isArray(shot?.productIds) ? shot.productIds.map((id) => cleanText(id)).filter(Boolean) : [],
       duration: Math.max(2, Math.min(15, Number(shot?.endTime) - Number(shot?.startTime) || Number(shot?.duration) || 4)),
       dialogue: cleanText(shot?.dialogue),
+      voiceDirection: cleanText(shot?.voiceDirection),
       plot: cleanText(shot?.plot),
       environment: cleanText(shot?.environment),
       camera: cleanText(shot?.camera),
@@ -264,20 +268,20 @@ function analysisStoryboardMarkdown(project, request) {
     "",
     "> 已根据原片画面和台词生成复刻草案。原片截图只用于分析，不会作为生图或视频参考图。",
     "",
-    "| 镜头 | 时长 | 剧情/动作 | 台词 | 环境 | 镜头语言 |",
-    "|---|---:|---|---|---|---|",
+    "| 镜头 | 时长 | 剧情/动作 | 台词 | 声音表演 | 环境 | 镜头语言 |",
+    "|---|---:|---|---|---|---|---|",
   ];
   for (const shot of request.shots || []) {
-    lines.push(`| ${shot.id}｜${safeSegment(shot.title)} | ${Number(shot.duration).toFixed(1)} 秒 | ${cleanText(shot.plot).replace(/\|/g, "\\|")} | ${cleanText(shot.dialogue).replace(/\|/g, "\\|")} | ${cleanText(shot.environment).replace(/\|/g, "\\|")} | ${cleanText(shot.camera).replace(/\|/g, "\\|")} |`);
+    lines.push(`| ${shot.id}｜${safeSegment(shot.title)} | ${Number(shot.duration).toFixed(1)} 秒 | ${cleanText(shot.plot).replace(/\|/g, "\\|")} | ${cleanText(shot.dialogue).replace(/\|/g, "\\|")} | ${cleanText(shot.voiceDirection).replace(/\|/g, "\\|")} | ${cleanText(shot.environment).replace(/\|/g, "\\|")} | ${cleanText(shot.camera).replace(/\|/g, "\\|")} |`);
   }
-  lines.push("", "## 人物参考提示词", "", request.character.prompt, "", "## 产品参考提示词", "");
+  lines.push("", "## 人物参考提示词", "", request.character.prompt, "", "## 人物声音设定", "", request.character.voiceProfile || "未指定，由视频模型根据人物和剧情自然生成。", "", "## 产品参考提示词", "");
   if (!(request.products || []).length) lines.push("本项目没有需要固定外观的核心产品。", "");
   for (const product of request.products || []) lines.push(`### ${product.id}`, "", product.prompt, "");
   lines.push("## 场景参考提示词", "");
   for (const scene of request.scenes || []) lines.push(`### ${scene.id}`, "", scene.prompt, "");
   lines.push("## 分镜生成提示词", "");
   for (const shot of request.shots || []) {
-    lines.push(`### ${shot.id}｜${safeSegment(shot.title)}`, "", `- 首帧：${shot.imagePrompt}`, `- 尾帧：${shot.lastImagePrompt || "不单独生成"}`, `- 视频：${shot.videoPrompt}`, "");
+    lines.push(`### ${shot.id}｜${safeSegment(shot.title)}`, "", `- 首帧：${shot.imagePrompt}`, `- 尾帧：${shot.lastImagePrompt || "不单独生成"}`, `- 视频：${shot.videoPrompt}`, `- 台词：${shot.dialogue || "无"}`, `- 情绪与语调：${shot.voiceDirection || "无"}`, "");
   }
   return lines.join("\n");
 }
