@@ -705,7 +705,9 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
 
   async ensureReferenceAsset(imagePlugin, asset, prompt, imageModel = "") {
     this.referenceAssetPromises ||= new Map();
-    const key = `${asset.kind}:${asset.id}`;
+    const generationSpec = referenceAssets.createGenerationSpec(asset, prompt);
+    const promptFingerprint = crypto.createHash("sha256").update(JSON.stringify(generationSpec)).digest("hex");
+    const key = `${asset.kind}:${asset.id}:${promptFingerprint}`;
     const pending = this.referenceAssetPromises.get(key);
     if (pending) return pending;
 
@@ -713,11 +715,14 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       const current = asset.kind === "character"
         ? referenceAssets.resolveCharacterAsset(this.vaultPath(), asset.id)
         : referenceAssets.resolveSceneAsset(this.vaultPath(), asset.id);
-      if (current.exists) return { ...current, reused: true };
-      const candidate = await this.generateImage(imagePlugin, prompt, "", imageModel);
+      if (referenceAssets.assetMatchesGenerationSpec(current, generationSpec)) return { ...current, reused: true };
+      const candidate = await this.generateImage(imagePlugin, generationSpec.generationPrompt, "", imageModel);
       await this.saveImageCandidate(imagePlugin, candidate, current.imagePath);
       referenceAssets.writeAssetMetadata(this.vaultPath(), current, {
-        prompt,
+        prompt: generationSpec.sourcePrompt,
+        sourcePrompt: generationSpec.sourcePrompt,
+        generationPrompt: generationSpec.generationPrompt,
+        generationPolicyVersion: generationSpec.policyVersion,
         createdAt: new Date().toISOString(),
       });
       const refreshed = current.kind === "character"
@@ -882,7 +887,11 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         const sceneAsset = sceneAssetsById.get(shot.sceneId);
         if (!sceneAsset) throw new Error(`镜头 ${shot.id} 找不到场景资产：${shot.sceneId}`);
         const referencePaths = [project.characterAsset.imagePath, sceneAsset.imagePath];
-        const continuity = "保持参考人物的脸部、发型、服装和年龄一致，并保持场景一致。";
+        const continuity = [
+          "参考图1是人物设定板：人物身份、脸部、发型、发色、年龄与服装必须严格一致。",
+          "参考图2是纯环境场景板：只参考空间、陈设、道具与光线，不得从中创造或替换人物。",
+          "将参考图1中的人物自然放入参考图2的环境，保持全片人物与场景连续。",
+        ].join("\n");
         const firstPrompt = `${shot.imagePrompt}\n${continuity}`;
         if (!shot.firstImagePath) {
           const firstCandidate = await this.generateImageMulti(image, firstPrompt, referencePaths, imageModel);

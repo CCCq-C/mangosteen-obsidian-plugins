@@ -3,8 +3,10 @@ const path = require("path");
 const crypto = require("crypto");
 
 const ROOT = "山竹视频资产库";
+const SCENE_GENERATION_POLICY_VERSION = 2;
 const WINDOWS_RESERVED_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
 const SAFE_ID = /^[\p{L}\p{N}][\p{L}\p{N}_-]{0,63}$/u;
+const HUMAN_CLAUSE = /(女主|男主|人物|两人|二人|女孩|男孩|女子|男子|女生|男生|哥哥|妹妹|情侣|行人|人群|模特|角色)/;
 
 function assertAssetId(value) {
   const id = String(value ?? "").trim().normalize("NFKC");
@@ -12,6 +14,49 @@ function assertAssetId(value) {
     throw new Error(`资产 ID 不安全：${id || "未填写"}。请只使用文字、数字、短横线或下划线。`);
   }
   return id;
+}
+
+function cleanPrompt(value) {
+  return String(value ?? "").trim().replace(/\s+/g, " ");
+}
+
+function environmentOnlyDescription(value) {
+  const source = cleanPrompt(value);
+  const clauses = source
+    .split(/(?<=[。！？；;])|[，,]/u)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .filter((part) => !HUMAN_CLAUSE.test(part));
+  return clauses.join("，").replace(/，([。！？；;])/gu, "$1").trim();
+}
+
+function createGenerationSpec(asset, prompt) {
+  const sourcePrompt = cleanPrompt(prompt);
+  if (!sourcePrompt) throw new Error(`${asset?.kind === "scene" ? "场景" : "人物"}资产缺少生成提示词。`);
+  if (asset?.kind !== "scene") {
+    return { sourcePrompt, generationPrompt: sourcePrompt, policyVersion: 1 };
+  }
+  const environment = environmentOnlyDescription(sourcePrompt) || "保留原描述中的建筑、陈设、自然环境、光线、道具与空间关系。";
+  return {
+    sourcePrompt,
+    policyVersion: SCENE_GENERATION_POLICY_VERSION,
+    generationPrompt: [
+      "纯环境空镜参考图。画面中禁止出现任何人、人体、脸、手、剪影、倒影或人物照片。",
+      "只生成建筑、自然环境、陈设、光线、道具与空间布局；忽略原描述中的人物位置、动作、服装和关系。",
+      environment,
+      "这是后续合成人物使用的干净场景板，保持写实、空间清楚、光线统一。",
+    ].join("\n"),
+  };
+}
+
+function assetMatchesGenerationSpec(asset, spec) {
+  if (!asset?.exists || !asset.metadata || !spec) return false;
+  const storedSource = cleanPrompt(asset.metadata.sourcePrompt || asset.metadata.prompt);
+  if (storedSource !== spec.sourcePrompt) return false;
+  if (asset.kind === "scene") {
+    return Number(asset.metadata.generationPolicyVersion) === Number(spec.policyVersion);
+  }
+  return true;
 }
 
 function isInside(root, target) {
@@ -117,8 +162,10 @@ function hashAssetImage(vaultRoot, asset) {
 }
 
 module.exports = {
+  assetMatchesGenerationSpec,
   assertAssetId,
   checkedAssetPath,
+  createGenerationSpec,
   hashAssetImage,
   resolveCharacterAsset,
   resolveSceneAsset,

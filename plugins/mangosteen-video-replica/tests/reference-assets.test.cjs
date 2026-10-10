@@ -23,6 +23,14 @@ assert.strictEqual(scene.imagePath, "山竹视频资产库/场景/harbor/场景�
 assert.strictEqual(scene.metadataPath, "山竹视频资产库/场景/harbor/scene.json");
 assert.strictEqual(scene.exists, false);
 
+const emptySceneSpec = assets.createGenerationSpec(scene, "海边集装箱场景。女主在前景，男主坐在后方。关键物件为白色耳机盒。");
+assert.strictEqual(emptySceneSpec.policyVersion, 2);
+assert.match(emptySceneSpec.generationPrompt, /纯环境空镜/);
+assert.match(emptySceneSpec.generationPrompt, /海边集装箱场景/);
+assert.match(emptySceneSpec.generationPrompt, /关键物件为白色耳机盒/);
+assert.doesNotMatch(emptySceneSpec.generationPrompt, /女主在前景|男主坐在后方/);
+assert.strictEqual(assets.assetMatchesGenerationSpec(scene, emptySceneSpec), false);
+
 fs.mkdirSync(path.dirname(path.join(vault, ...scene.imagePath.split("/"))), { recursive: true });
 fs.writeFileSync(path.join(vault, ...scene.imagePath.split("/")), "scene");
 assets.writeAssetMetadata(vault, scene, {
@@ -41,6 +49,23 @@ assert.deepStrictEqual(resolvedScene.metadata, {
 });
 assert.strictEqual(resolvedScene.metadataPath, "山竹视频资产库/场景/harbor/scene.json");
 assert.match(assets.hashAssetImage(vault, resolvedScene), /^sha256:[a-f0-9]{64}$/);
+assert.strictEqual(
+  assets.assetMatchesGenerationSpec(resolvedScene, emptySceneSpec),
+  false,
+  "legacy scene metadata must be regenerated under the empty-environment policy",
+);
+assets.writeAssetMetadata(vault, resolvedScene, {
+  prompt: emptySceneSpec.sourcePrompt,
+  sourcePrompt: emptySceneSpec.sourcePrompt,
+  generationPrompt: emptySceneSpec.generationPrompt,
+  generationPolicyVersion: emptySceneSpec.policyVersion,
+  createdAt: "2026-10-10T00:00:00.000Z",
+});
+assert.strictEqual(
+  assets.assetMatchesGenerationSpec(assets.resolveSceneAsset(vault, "harbor"), emptySceneSpec),
+  true,
+  "scene asset must be reused only when its source prompt and generation policy match",
+);
 
 const legacyFolder = path.join(vault, "山竹视频资产库", "人物", "legacy");
 fs.mkdirSync(legacyFolder, { recursive: true });

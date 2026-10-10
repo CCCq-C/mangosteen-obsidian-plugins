@@ -282,7 +282,10 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
       assert(fs.existsSync(path.join(caseVault, ...completed.characterAsset.imagePath.split("/"))), `${family}: character asset file must exist`);
       assert.strictEqual(completed.sceneAssets.length, 1, `${family}: one scene asset must be retained`);
       assert(fs.existsSync(path.join(caseVault, ...completed.sceneAssets[0].imagePath.split("/"))), `${family}: scene asset file must exist`);
-      assert.deepStrictEqual(generatedTextPrompts, ["固定人物参考板", "固定摄影棚场景"], `${family}: exactly one character and one scene asset must be generated`);
+      assert.strictEqual(generatedTextPrompts.length, 2, `${family}: exactly one character and one scene asset must be generated`);
+      assert.strictEqual(generatedTextPrompts[0], "固定人物参考板", `${family}: character board must keep its source prompt`);
+      assert.match(generatedTextPrompts[1], /固定摄影棚场景/, `${family}: scene asset must keep the environment description`);
+      assert.match(generatedTextPrompts[1], /纯环境空镜/, `${family}: scene assets must be generated without people`);
       assert(generatedImageModels.every((value) => value === "gpt-image-2-w"), `${family}: every image call must use the selected image model`);
 
       assert.strictEqual(completed.shots.length, 2, `${family}: two shots must be retained`);
@@ -440,22 +443,22 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   };
   await plugin.runGeneration(generatedV2Folder, requestV2, 456);
 
-  assert.deepStrictEqual(generatedTextPrompts, ["固定人物参考板", "摄影棚场景"]);
-  assert.deepStrictEqual(editCalls, [
-    {
-      prompt: "人物走在港口\n保持参考人物的脸部、发型、服装和年龄一致，并保持场景一致。",
-      references: ["text:固定人物参考板", "existing-harbor-scene"],
-    },
-    {
-      prompt: "人物走入摄影棚\n保持参考人物的脸部、发型、服装和年龄一致，并保持场景一致。",
-      references: ["text:固定人物参考板", "text:摄影棚场景"],
-    },
-    {
-      prompt: "人物停在灯光下\n保持参考人物的脸部、发型、服装和年龄一致，并保持场景一致。",
-      references: ["text:固定人物参考板", "text:摄影棚场景"],
-    },
+  assert.strictEqual(generatedTextPrompts.length, 3, "the legacy people-containing scene asset must be regenerated");
+  assert.strictEqual(generatedTextPrompts[0], "固定人物参考板");
+  assert.match(generatedTextPrompts[1], /纯环境空镜[\s\S]*海边集装箱场景/);
+  assert.match(generatedTextPrompts[2], /纯环境空镜[\s\S]*摄影棚场景/);
+  assert.strictEqual(editCalls.length, 3);
+  assert.deepStrictEqual(editCalls.map((call) => call.references), [
+    ["text:固定人物参考板", `text:${generatedTextPrompts[1]}`],
+    ["text:固定人物参考板", `text:${generatedTextPrompts[2]}`],
+    ["text:固定人物参考板", `text:${generatedTextPrompts[2]}`],
   ]);
+  assert.match(editCalls[0].prompt, /^人物走在港口\n/);
+  assert.match(editCalls[1].prompt, /^人物走入摄影棚\n/);
+  assert.match(editCalls[2].prompt, /^人物停在灯光下\n/);
   assert(editCalls.every((call) => !call.references.includes("source-frame-must-not-be-used")));
+  assert(editCalls.every((call) => /参考图1是人物设定板/.test(call.prompt)));
+  assert(editCalls.every((call) => /参考图2是纯环境场景板/.test(call.prompt)));
   assert.deepStrictEqual(submittedV2Options.map((options) => options.referenceImageFiles.map((file) => file.name)), [
     ["镜头-001-港口-首帧.png"],
     ["镜头-002-摄影棚-首帧.png", "镜头-002-摄影棚-尾帧.png"],
@@ -485,7 +488,7 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   assert.match(dashboardV2, /镜头-002-摄影棚\.mp4/);
 
   await plugin.runGeneration(generatedV2Folder, requestV2, 457);
-  assert.deepStrictEqual(generatedTextPrompts, ["固定人物参考板", "摄影棚场景"], "existing assets must be reused");
+  assert.strictEqual(generatedTextPrompts.length, 3, "existing assets must be reused");
   assert.strictEqual(editCalls.length, 3, "retrying an unchanged project must reuse saved keyframes");
   assert.strictEqual(submittedV2Options.length, 2, "retrying a completed unchanged project must not submit duplicate videos");
 
