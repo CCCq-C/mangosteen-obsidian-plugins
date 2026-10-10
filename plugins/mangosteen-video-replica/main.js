@@ -41,6 +41,30 @@ function atomicWrite(filePath, content) {
 
 function writeJson(filePath, value) { atomicWrite(filePath, `${JSON.stringify(value, null, 2)}\n`); }
 
+function isInsidePath(root, target) {
+  const relative = path.relative(root, target);
+  return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+}
+
+function withWorkbenchShotIds(request) {
+  if (!request || typeof request !== "object" || Array.isArray(request) || !Array.isArray(request.shots)) return request;
+  const used = new Set();
+  const shots = request.shots.map((shot, index) => {
+    if (!shot || typeof shot !== "object" || Array.isArray(shot)) return shot;
+    const fallback = `shot-${String(index + 1).padStart(3, "0")}`;
+    const base = String(shot.workbenchId || shot.id || fallback).trim() || fallback;
+    let workbenchId = base;
+    let suffix = 2;
+    while (used.has(workbenchId)) {
+      workbenchId = `${base}~${suffix}`;
+      suffix += 1;
+    }
+    used.add(workbenchId);
+    return { ...shot, workbenchId };
+  });
+  return { ...request, shots };
+}
+
 class PrepareModal extends Modal {
   constructor(plugin) { super(plugin.app); this.plugin = plugin; this.sourcePath = ""; }
 
@@ -260,15 +284,46 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     }
   }
 
-  workbenchProjectPaths(folder) {
+  checkedWorkbenchProjectFolder(folder) {
     const normalized = core.normalizeVaultPath(folder);
-    if (!normalized.startsWith(`${ROOT}/`)) throw new Error(`项目必须位于 ${ROOT}/ 下。`);
-    const absoluteFolder = this.absolute(normalized);
+    if (normalized !== ROOT && !normalized.startsWith(`${ROOT}/`)) throw new Error(`项目必须位于 ${ROOT}/ 下。`);
+
+    const vaultRoot = path.resolve(this.vaultPath());
+    const absoluteRoot = path.resolve(vaultRoot, ROOT);
+    const absoluteFolder = path.resolve(vaultRoot, ...normalized.split("/"));
+    if (!isInsidePath(absoluteRoot, absoluteFolder)) throw new Error("项目路径不安全，已拒绝访问山竹视频复刻范围外的文件。");
+
+    const vaultStat = fs.statSync(vaultRoot, { throwIfNoEntry: false });
+    const rootStat = fs.statSync(absoluteRoot, { throwIfNoEntry: false });
+    const folderStat = fs.statSync(absoluteFolder, { throwIfNoEntry: false });
+    if (!vaultStat?.isDirectory() || !rootStat?.isDirectory() || !folderStat?.isDirectory()) {
+      throw new Error("项目路径无法定位真实的山竹视频复刻目录。");
+    }
+
+    let realVault;
+    let realRoot;
+    let realFolder;
+    try {
+      realVault = fs.realpathSync(vaultRoot);
+      realRoot = fs.realpathSync(absoluteRoot);
+      realFolder = fs.realpathSync(absoluteFolder);
+    } catch (_) {
+      throw new Error("项目路径包含无法解析的符号链接，已拒绝访问。");
+    }
+    if (!isInsidePath(realVault, realRoot) || !isInsidePath(realRoot, realFolder)) {
+      throw new Error("项目路径通过符号链接超出山竹视频复刻范围，已拒绝访问。");
+    }
+    return { folder: normalized, absoluteFolder };
+  }
+
+  workbenchProjectPaths(folder) {
+    const checked = this.checkedWorkbenchProjectFolder(folder);
+    if (checked.folder === ROOT) throw new Error(`请选择 ${ROOT}/ 下的具体项目。`);
     return {
-      folder: normalized,
-      projectPath: path.join(absoluteFolder, "project.json"),
-      requestPath: path.join(absoluteFolder, REQUEST_FILE),
-      statePath: path.join(absoluteFolder, STATE_FILE),
+      folder: checked.folder,
+      projectPath: path.join(checked.absoluteFolder, "project.json"),
+      requestPath: path.join(checked.absoluteFolder, REQUEST_FILE),
+      statePath: path.join(checked.absoluteFolder, STATE_FILE),
     };
   }
 
@@ -291,6 +346,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     ]) {
       try {
         output[key] = this.readJson(filePath);
+        if (key === "request") output[key] = withWorkbenchShotIds(output[key]);
       } catch (error) {
         output.readErrors[key] = String(error?.message || error);
       }
@@ -311,24 +367,39 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     const paths = this.workbenchProjectPaths(folder);
     if (this.confirmingProjects?.has(paths.folder)) throw new Error("项目正在确认，不能编辑草案。");
     this.currentWorkbenchLock(paths);
-    const validation = replicaEditor.validateDraft(draft, core.normalizeGenerationRequest);
+    const identifiedDraft = withWorkbenchShotIds(draft);
+    const validation = replicaEditor.validateDraft(identifiedDraft, core.normalizeGenerationRequest);
     if (!validation.ok) {
       const details = validation.errors.map((error) => `${error.path}：${error.message}`).join("；");
       throw new Error(`草案校验失败：${details}`);
     }
+    const savedRequest = {
+      ...validation.value,
+      shots: validation.value.shots.map((shot, index) => ({
+        ...shot,
+        workbenchId: identifiedDraft.shots[index].workbenchId,
+      })),
+    };
     const project = this.readJson(paths.projectPath);
     const currentShots = Array.isArray(project.shots) ? project.shots : [];
-    project.shots = validation.value.shots.map((shot, index) => {
-      const next = { ...(currentShots[index] && typeof currentShots[index] === "object" ? currentShots[index] : {}) };
+    const currentShotsByWorkbenchId = new Map();
+    for (const shot of currentShots) {
+      if (!shot || typeof shot !== "object" || Array.isArray(shot)) continue;
+      const workbenchId = String(shot.workbenchId || shot.id || "").trim();
+      if (workbenchId && !currentShotsByWorkbenchId.has(workbenchId)) currentShotsByWorkbenchId.set(workbenchId, shot);
+    }
+    project.shots = savedRequest.shots.map((shot) => {
+      const previous = currentShotsByWorkbenchId.get(shot.workbenchId);
+      const next = { ...(previous || {}), workbenchId: shot.workbenchId };
       for (const field of WORKBENCH_SHOT_FIELDS) {
         if (Object.prototype.hasOwnProperty.call(shot, field)) next[field] = shot[field];
       }
       return next;
     });
-    writeJson(paths.requestPath, validation.value);
+    writeJson(paths.requestPath, savedRequest);
     this.saveProject(paths.folder, project);
     this.requestWorkbenchRefresh();
-    return validation.value;
+    return savedRequest;
   }
 
   async confirmWorkbenchDraft(folder) {
@@ -359,14 +430,15 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
   }
 
   projectRecords() {
-    const root = this.absolute(ROOT);
-    if (!fs.existsSync(root)) return [];
+    const rootCandidate = path.resolve(this.vaultPath(), ROOT);
+    if (!fs.lstatSync(rootCandidate, { throwIfNoEntry: false })) return [];
+    const root = this.checkedWorkbenchProjectFolder(ROOT).absoluteFolder;
     const records = [];
     for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
-      const projectPath = path.join(root, entry.name, "project.json");
-      if (!fs.existsSync(projectPath)) continue;
       try {
+        const { projectPath } = this.workbenchProjectPaths(`${ROOT}/${entry.name}`);
+        if (!fs.existsSync(projectPath)) continue;
         records.push({ project: this.readJson(projectPath), projectPath, mtimeMs: fs.statSync(projectPath).mtimeMs });
       } catch (_) { /* skip incomplete folders */ }
     }
