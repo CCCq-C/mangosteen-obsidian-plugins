@@ -86,6 +86,112 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   assert.strictEqual(state.requestMtimeMs, fs.statSync(requestPath).mtimeMs);
   assert.strictEqual(plugin.requestAlreadyHandled("山竹视频复刻/失败任务", state.requestMtimeMs), true);
 
+  async function runMockEndToEnd(model, family) {
+    const caseVault = fs.mkdtempSync(path.join(os.tmpdir(), `mangosteen-replica-e2e-${family}-`));
+    const projectFolder = "山竹视频复刻/双镜头端到端";
+    const projectRoot = path.join(caseVault, ...projectFolder.split("/"));
+    const videoRoot = path.join(caseVault, "山竹视频");
+    fs.mkdirSync(projectRoot, { recursive: true });
+    fs.mkdirSync(videoRoot, { recursive: true });
+    fs.writeFileSync(path.join(projectRoot, "project.json"), JSON.stringify({
+      folder: projectFolder,
+      title: "双镜头端到端",
+      frames: [],
+      shots: [],
+    }));
+
+    const request = {
+      version: 2,
+      confirmed: true,
+      character: { id: "hero", prompt: "固定人物参考板" },
+      scenes: [{ id: "studio", prompt: "固定摄影棚场景" }],
+      settings: { ratio: "9:16", resolution: "720p", videoModel: model },
+      shots: [
+        { title: "入场", sceneId: "studio", duration: 4, imagePrompt: "人物走入摄影棚", videoPrompt: "人物向前走" },
+        { title: "定格", sceneId: "studio", duration: 4, imagePrompt: "人物转身", lastImagePrompt: "人物停在灯光下", videoPrompt: "镜头缓慢推进" },
+      ],
+    };
+    const requestPath = path.join(projectRoot, "generation-request.json");
+    fs.writeFileSync(requestPath, JSON.stringify(request));
+
+    const generatedTextPrompts = [];
+    const submittedOptions = [];
+    const image = {
+      generateText: async (prompt) => {
+        generatedTextPrompts.push(prompt);
+        return { candidate: { kind: "base64", value: Buffer.from(`asset:${prompt}`).toString("base64") } };
+      },
+      generateEdit: async () => { throw new Error("version 2 must use generateEditMulti"); },
+      generateEditMulti: async (prompt) => ({
+        candidate: { kind: "base64", value: Buffer.from(`keyframe:${prompt}`).toString("base64") },
+      }),
+      extractResults: (response) => response?.candidate ? [response.candidate] : [],
+    };
+    const video = {
+      settings: { model, resolution: "720p" },
+      refreshAgentAccess: async () => ({ videoModelKeys: { [model]: "mock-key-never-used" } }),
+      submitVideo: async (options) => {
+        submittedOptions.push(options);
+        const id = `mock-video-${submittedOptions.length}`;
+        fs.writeFileSync(path.join(videoRoot, `${id}.mp4`), `video:${id}`);
+        return { id };
+      },
+    };
+
+    plugin.app = { vault: { adapter: { getBasePath: () => caseVault } } };
+    plugin.processing = new Set();
+    plugin.referenceAssetPromises = new Map();
+    plugin.getGenerationPlugins = () => ({ image, video });
+    plugin.waitForVideo = async (_video, taskId) => ({ localPath: `山竹视频/${taskId}.mp4` });
+    plugin.openVaultPath = async () => true;
+
+    try {
+      await plugin.processRequest(requestPath);
+      const completed = JSON.parse(fs.readFileSync(path.join(projectRoot, "project.json"), "utf8"));
+      const completedState = JSON.parse(fs.readFileSync(path.join(projectRoot, ".work/generation-state.json"), "utf8"));
+      assert.strictEqual(completedState.status, "completed", `${family}: mock workflow must complete`);
+      assert.strictEqual(completed.status, "completed", `${family}: project must be retained as completed`);
+      assert.strictEqual(completed.characterAsset.id, "hero", `${family}: one character asset must be retained`);
+      assert(fs.existsSync(path.join(caseVault, ...completed.characterAsset.imagePath.split("/"))), `${family}: character asset file must exist`);
+      assert.strictEqual(completed.sceneAssets.length, 1, `${family}: one scene asset must be retained`);
+      assert(fs.existsSync(path.join(caseVault, ...completed.sceneAssets[0].imagePath.split("/"))), `${family}: scene asset file must exist`);
+      assert.deepStrictEqual(generatedTextPrompts, ["固定人物参考板", "固定摄影棚场景"], `${family}: exactly one character and one scene asset must be generated`);
+
+      assert.strictEqual(completed.shots.length, 2, `${family}: two shots must be retained`);
+      assert(completed.shots.every((shot) => shot.firstImagePath && fs.existsSync(path.join(caseVault, ...shot.firstImagePath.split("/")))), `${family}: both shot first keyframes must be retained`);
+      assert.strictEqual(completed.shots[0].lastImagePath, "", `${family}: first shot must not invent a last keyframe`);
+      assert(completed.shots[1].lastImagePath && fs.existsSync(path.join(caseVault, ...completed.shots[1].lastImagePath.split("/"))), `${family}: optional last keyframe must be retained`);
+      assert(completed.shots.every((shot) => shot.videoPath && fs.existsSync(path.join(caseVault, ...shot.videoPath.split("/")))), `${family}: two video files must be retained`);
+      assert.deepStrictEqual(completed.shots.map((shot) => fs.readFileSync(path.join(caseVault, ...shot.videoPath.split("/")), "utf8")), [
+        "video:mock-video-1",
+        "video:mock-video-2",
+      ], `${family}: retained videos must match both mock tasks`);
+
+      assert.strictEqual(submittedOptions.length, 2, `${family}: both shots must submit video calls`);
+      if (family === "minimax-h3") {
+        assert(submittedOptions.every((options) => options.firstImageFile?.buffer), "MiniMax-H3: every call must contain a local first frame");
+        assert.strictEqual(Object.hasOwn(submittedOptions[0], "lastImageFile"), false, "MiniMax-H3: last frame must stay optional");
+        assert(submittedOptions[1].lastImageFile?.buffer, "MiniMax-H3: second call must contain its local last frame");
+        assert(submittedOptions.every((options) => !Object.hasOwn(options, "referenceImageFiles")), "MiniMax-H3: reference image arrays must not be sent");
+      } else {
+        assert(submittedOptions.every((options) => !Object.hasOwn(options, "firstImageFile") && !Object.hasOwn(options, "lastImageFile")), "Seedance: first/last frame fields must not be sent");
+        assert.deepStrictEqual(submittedOptions.map((options) => options.referenceImageFiles.map((file) => file.name)), [
+          ["镜头-001-入场-首帧.png"],
+          ["镜头-002-定格-首帧.png", "镜头-002-定格-尾帧.png"],
+        ], "Seedance: only local reference image files must be sent");
+        assert(submittedOptions.every((options) => options.referenceImageFiles.every((file) => Buffer.isBuffer(file.buffer))), "Seedance: every reference must contain local file bytes");
+      }
+    } finally {
+      fs.rmSync(caseVault, { recursive: true, force: true });
+    }
+  }
+
+  await runMockEndToEnd("MiniMax-H3", "minimax-h3");
+  await runMockEndToEnd("seedance-2.5", "seedance");
+  plugin.app = { vault: { adapter: { getBasePath: () => vault } } };
+  plugin.processing = new Set();
+  plugin.referenceAssetPromises = new Map();
+
   const generatedFolder = "山竹视频复刻/模拟生成";
   const generated = path.join(vault, ...generatedFolder.split("/"));
   fs.mkdirSync(generated, { recursive: true });
