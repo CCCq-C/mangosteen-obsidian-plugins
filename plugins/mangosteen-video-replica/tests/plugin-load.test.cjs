@@ -58,13 +58,18 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
     generateEdit: async () => ({}),
     extractResults: () => [{ kind: "base64", value: Buffer.from("image").toString("base64") }],
   };
-  const video = { settings: { model: "mock", resolution: "720p" }, submitVideo: async () => ({ id: "task-1" }) };
+  let submittedOptions;
+  const video = {
+    settings: { model: "seedance-2.5", resolution: "720p" },
+    refreshAgentAccess: async () => ({ videoModelKeys: { "seedance-2.5": "secret-not-read-by-replica" } }),
+    submitVideo: async (options) => { submittedOptions = options; return { id: "task-1" }; },
+  };
   plugin.getGenerationPlugins = () => ({ image, video });
   plugin.waitForVideo = async () => ({ localPath: "山竹视频/mock.mp4" });
   plugin.openVaultPath = async () => true;
   await plugin.runGeneration(generatedFolder, {
     character: { prompt: "人物三视图" },
-    settings: { ratio: "9:16", resolution: "720p", videoModel: "mock" },
+    settings: { ratio: "9:16", resolution: "720p", videoModel: "seedance-2.5" },
     shots: [{ id: 1, title: "开场", duration: 5, imagePrompt: "人物站立", videoPrompt: "人物向前走" }],
   }, 123);
   const completed = JSON.parse(fs.readFileSync(path.join(generated, "project.json"), "utf8"));
@@ -72,6 +77,8 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   assert(fs.existsSync(path.join(generated, "01-人物参考/人物三视图.png")));
   assert(fs.existsSync(path.join(generated, "02-分镜脚本/镜头-1-开场.png")));
   assert(fs.existsSync(path.join(generated, "03-视频片段/镜头-1-开场.mp4")));
+  assert.deepStrictEqual(submittedOptions.referenceImageFiles.map((file) => file.name), ["镜头-1-开场.png"]);
+  assert.strictEqual(Object.hasOwn(submittedOptions, "firstImageFile"), false);
 
   fs.rmSync(vault, { recursive: true, force: true });
   delete global.window;

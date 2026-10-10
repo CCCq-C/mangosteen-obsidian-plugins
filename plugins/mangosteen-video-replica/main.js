@@ -3,6 +3,7 @@ const fs = require("fs");
 const path = require("path");
 
 let core;
+let generationPolicy;
 let workflow;
 
 const ROOT = "山竹视频复刻";
@@ -63,6 +64,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
   async onload() {
     const pluginRoot = path.join(this.vaultPath(), ...String(this.manifest.dir || "").split(/[\\/]/).filter(Boolean));
     core = require(path.join(pluginRoot, "replica-core.cjs"));
+    generationPolicy = require(path.join(pluginRoot, "generation-policy.cjs"));
     workflow = require(path.join(pluginRoot, "replica-cli.cjs"));
     this.pluginRoot = pluginRoot;
     this.processing = new Set();
@@ -169,7 +171,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     const image = this.app.plugins.getPlugin("mangosteen-image");
     const video = this.app.plugins.getPlugin("mangosteen-video");
     if (!image?.generateText || !image?.generateEdit) throw new Error("山竹生图插件未启用或版本不兼容。");
-    if (!video?.submitVideo || !video?.refreshVideoTasks) throw new Error("山竹视频插件未启用或版本不兼容。");
+    if (!video?.submitVideo || !video?.refreshVideoTasks || !video?.refreshAgentAccess) throw new Error("山竹视频插件未启用或版本不兼容。");
     return { image, video };
   }
 
@@ -230,6 +232,15 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
 
   async runGeneration(projectFolder, request, requestMtimeMs) {
     const { image, video } = this.getGenerationPlugins();
+    const access = await video.refreshAgentAccess();
+    const models = generationPolicy.eligibleModels(Object.keys(access?.videoModelKeys || {}));
+    const requestedModel = String(request.settings.videoModel || video.settings.model || "").trim();
+    const model = models.find((candidate) => candidate === requestedModel)
+      || models.find((candidate) => candidate.toLowerCase() === requestedModel.toLowerCase());
+    if (!model) {
+      const detail = models.length ? `当前可用：${models.join("、")}` : "当前账号没有可用的 MiniMax-H3 或 Seedance 模型";
+      throw new Error(`视频复刻不能使用模型“${requestedModel || "未选择"}”。${detail}，请刷新山竹账号中心或选择已开通模型。`);
+    }
     const projectPath = path.join(this.absolute(projectFolder), "project.json");
     const project = this.readJson(projectPath);
     const state = { status: "processing", requestMtimeMs, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), currentStep: "人物三视图" };
@@ -256,15 +267,14 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         shot.imagePath = await this.saveImageCandidate(image, shotCandidate, `${projectFolder}/02-分镜脚本/镜头-${shot.id}-${core.safeSegment(shot.title)}.png`);
         shot.status = "正在生成视频";
         this.saveProject(projectFolder, project);
-        const model = request.settings.videoModel || video.settings.model;
-        const task = await video.submitVideo({
+        const task = await video.submitVideo(generationPolicy.buildVideoOptions({
           model,
           prompt: shot.videoPrompt,
           duration: shot.duration,
           ratio: request.settings.ratio,
           resolution: request.settings.resolution || video.settings.resolution,
           firstImageFile: this.localImage(shot.imagePath),
-        });
+        }));
         const completed = await this.waitForVideo(video, task.id);
         shot.videoPath = this.copyVaultFile(completed.localPath, `${projectFolder}/03-视频片段/镜头-${shot.id}-${core.safeSegment(shot.title)}.mp4`);
         shot.status = "已完成";
