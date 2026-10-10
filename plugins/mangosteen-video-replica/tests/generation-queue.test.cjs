@@ -2,7 +2,11 @@ const assert = require("assert");
 const {
   CONFIRMATION_WARNING,
   confirmGenerationPlan,
+  createGenerationQueue,
+  lockedShotIds,
   prepareGenerationPlan,
+  requestQueueStop,
+  runGenerationQueue,
 } = require("../generation-queue.cjs");
 
 function draft() {
@@ -89,4 +93,63 @@ for (const changed of [
   assert.throws(() => confirmGenerationPlan(plan, changed), /草案已变化.*重新确认/);
 }
 
-console.log("generation-queue: planning ok");
+(async () => {
+  const confirmedBatch = confirmGenerationPlan(prepareGenerationPlan(draft(), ["001", "003"]), draft());
+  const queue = createGenerationQueue(confirmedBatch, { now: "2026-10-11T00:00:00.000Z" });
+  assert.strictEqual(queue.status, "idle");
+  assert.deepStrictEqual(queue.shots.map((shot) => shot.status), ["queued", "queued"]);
+  assert.deepStrictEqual(lockedShotIds(queue), ["001", "003"]);
+  assert.strictEqual(lockedShotIds(queue).includes("002"), false, "unselected shots must remain editable");
+  assert.throws(
+    () => createGenerationQueue(
+      confirmGenerationPlan(prepareGenerationPlan(draft(), ["001"]), draft()),
+      { activeQueues: [queue] },
+    ),
+    /镜头 001.*已经在生成队列/,
+  );
+
+  const callOrder = [];
+  const finished = await runGenerationQueue(queue, async (shot, context) => {
+    callOrder.push(shot.id);
+    assert.strictEqual(context.planId, confirmedBatch.planId);
+    assert.strictEqual(shot.effectiveVideoPrompt, confirmedBatch.shots.find((item) => item.id === shot.id).effectiveVideoPrompt);
+    return { videoPath: `03-视频片段/${shot.id}.mp4` };
+  });
+  assert.deepStrictEqual(callOrder, ["001", "003"]);
+  assert.strictEqual(finished.status, "completed");
+  assert.deepStrictEqual(finished.shots.map((shot) => shot.status), ["completed", "completed"]);
+  assert.deepStrictEqual(finished.shots.map((shot) => shot.result.videoPath), ["03-视频片段/001.mp4", "03-视频片段/003.mp4"]);
+  assert.deepStrictEqual(lockedShotIds(finished), [], "terminal shots must become editable again");
+
+  const failureQueue = createGenerationQueue(confirmedBatch);
+  const failureOrder = [];
+  await runGenerationQueue(failureQueue, async (shot) => {
+    failureOrder.push(shot.id);
+    if (shot.id === "001") throw new Error("供应商任务失败");
+    return { videoPath: `${shot.id}.mp4` };
+  });
+  assert.deepStrictEqual(failureOrder, ["001", "003"], "one shot failure must not block later selected shots");
+  assert.strictEqual(failureQueue.status, "completed_with_errors");
+  assert.strictEqual(failureQueue.shots[0].status, "failed");
+  assert.match(failureQueue.shots[0].error, /供应商任务失败/);
+  assert.strictEqual(failureQueue.shots[1].status, "completed");
+  assert.deepStrictEqual(lockedShotIds(failureQueue), []);
+
+  const stopQueue = createGenerationQueue(confirmedBatch);
+  const stopOrder = [];
+  await runGenerationQueue(stopQueue, async (shot) => {
+    stopOrder.push(shot.id);
+    requestQueueStop(stopQueue);
+    return { videoPath: `${shot.id}.mp4` };
+  });
+  assert.deepStrictEqual(stopOrder, ["001"], "stop request must prevent the next paid task from being submitted");
+  assert.strictEqual(stopQueue.shots[0].status, "completed", "already submitted current shot may complete");
+  assert.strictEqual(stopQueue.shots[1].status, "stopped");
+  assert.strictEqual(stopQueue.status, "stopped");
+  assert.deepStrictEqual(lockedShotIds(stopQueue), []);
+
+  console.log("generation-queue: ok");
+})().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

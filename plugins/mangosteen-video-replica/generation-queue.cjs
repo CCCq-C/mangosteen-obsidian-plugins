@@ -80,8 +80,118 @@ function confirmGenerationPlan(plan, currentRequest) {
   return deepFreeze({ ...clone(plan), confirmed: true });
 }
 
+function lockedShotIds(queue) {
+  if (!queue || !Array.isArray(queue.shots)) return [];
+  return queue.shots
+    .filter((shot) => shot?.status === "queued" || shot?.status === "processing")
+    .map((shot) => String(shot.id));
+}
+
+function createGenerationQueue(confirmedPlan, { activeQueues = [], now = new Date().toISOString() } = {}) {
+  if (!confirmedPlan || confirmedPlan.confirmed !== true) throw new Error("生成计划尚未确认，不能加入队列。");
+  const requestedIds = new Set(confirmedPlan.selectedShotIds || []);
+  for (const activeQueue of activeQueues) {
+    const conflict = lockedShotIds(activeQueue).find((id) => requestedIds.has(id));
+    if (conflict) throw new Error(`镜头 ${conflict} 已经在生成队列中，请等待完成或停止后再试。`);
+  }
+  const createdAt = String(now || new Date().toISOString());
+  const queue = {
+    version: 1,
+    queueId: sha256({ planId: confirmedPlan.planId, createdAt }),
+    planId: confirmedPlan.planId,
+    createdAt,
+    updatedAt: createdAt,
+    status: "idle",
+    stopRequested: false,
+    character: clone(confirmedPlan.character),
+    products: clone(confirmedPlan.products || []),
+    scenes: clone(confirmedPlan.scenes || []),
+    settings: clone(confirmedPlan.settings),
+    selectedShotIds: clone(confirmedPlan.selectedShotIds),
+    shots: clone(confirmedPlan.shots).map((shot) => ({
+      ...shot,
+      status: "queued",
+      error: "",
+      result: null,
+    })),
+  };
+  return queue;
+}
+
+function requestQueueStop(queue) {
+  if (!queue || typeof queue !== "object") throw new Error("生成队列格式错误。");
+  queue.stopRequested = true;
+  queue.updatedAt = new Date().toISOString();
+  if (queue.status === "idle") {
+    for (const shot of queue.shots || []) {
+      if (shot.status === "queued") shot.status = "stopped";
+    }
+    queue.status = "stopped";
+  }
+  return queue;
+}
+
+async function runGenerationQueue(queue, runShot, { onUpdate = null } = {}) {
+  if (!queue || !Array.isArray(queue.shots)) throw new Error("生成队列格式错误。");
+  if (typeof runShot !== "function") throw new Error("缺少单镜头运行器。");
+  if (queue.status !== "idle") throw new Error(`生成队列当前状态不能运行：${String(queue.status)}`);
+
+  const notify = async () => {
+    queue.updatedAt = new Date().toISOString();
+    if (typeof onUpdate === "function") await onUpdate(clone(queue));
+  };
+  const context = deepFreeze({
+    queueId: queue.queueId,
+    planId: queue.planId,
+    character: clone(queue.character),
+    products: clone(queue.products),
+    scenes: clone(queue.scenes),
+    settings: clone(queue.settings),
+  });
+
+  queue.status = "processing";
+  queue.startedAt = new Date().toISOString();
+  await notify();
+  for (const shot of queue.shots) {
+    if (shot.status !== "queued") continue;
+    if (queue.stopRequested) {
+      shot.status = "stopped";
+      continue;
+    }
+    shot.status = "processing";
+    await notify();
+    try {
+      const result = await runShot(deepFreeze(clone(shot)), context);
+      shot.result = clone(result ?? null);
+      shot.status = "completed";
+      shot.error = "";
+    } catch (error) {
+      shot.result = null;
+      shot.status = "failed";
+      shot.error = String(error?.message || error);
+    }
+    await notify();
+  }
+
+  if (queue.stopRequested) {
+    for (const shot of queue.shots) {
+      if (shot.status === "queued") shot.status = "stopped";
+    }
+    queue.status = "stopped";
+  } else {
+    queue.status = queue.shots.some((shot) => shot.status === "failed") ? "completed_with_errors" : "completed";
+  }
+  queue.completedAt = new Date().toISOString();
+  await notify();
+  return queue;
+}
+
 module.exports = {
   CONFIRMATION_WARNING,
   confirmGenerationPlan,
+  createGenerationQueue,
+  lockedShotIds,
   prepareGenerationPlan,
+  requestQueueStop,
+  runGenerationQueue,
 };
