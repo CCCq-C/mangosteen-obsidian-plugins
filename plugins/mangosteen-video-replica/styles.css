@@ -354,16 +354,43 @@
   .mangosteen-replica-workbench textarea { max-width: 100%; min-width: 0; }
 }
 
-@media (max-width: 759px) {
-  .mangosteen-replica-shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
-  .mangosteen-replica-nav { flex-direction: row; flex-wrap: wrap; overflow: visible; }
-  .mangosteen-replica-shot-grid { grid-template-columns: minmax(0, 1fr); }
-}
+@supports not (container-type: inline-size) {
+  .mangosteen-replica-workbench {
+    --replica-gap: 14px;
+    --replica-pad: 18px;
+  }
 
-@media (max-width: 519px) {
-  .mangosteen-replica-toolbar,
-  .mangosteen-replica-form-row { align-items: stretch; flex-direction: column; }
-  .mangosteen-replica-toolbar button { width: 100%; }
+  .mangosteen-replica-empty { margin: 48px auto; }
+
+  @media (max-width: 1099px) {
+    .mangosteen-replica-shot-grid,
+    .mangosteen-replica-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .mangosteen-replica-asset-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+
+  @media (max-width: 759px) {
+    .mangosteen-replica-toolbar,
+    .mangosteen-replica-page-header { align-items: stretch; flex-direction: column; }
+    .mangosteen-replica-toolbar-actions { justify-content: flex-start; }
+    .mangosteen-replica-shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+    .mangosteen-replica-nav { display: flex; flex-direction: row; flex-wrap: wrap; overflow: visible; border-right: 0; border-bottom: 1px solid var(--background-modifier-border); }
+    .mangosteen-replica-nav button { width: auto; flex: 1 1 auto; text-align: center; }
+    .mangosteen-replica-shot-grid,
+    .mangosteen-replica-asset-grid { grid-template-columns: minmax(0, 1fr); }
+  }
+
+  @media (max-width: 519px) {
+    .mangosteen-replica-toolbar,
+    .mangosteen-replica-form-row { align-items: stretch; flex-direction: column; }
+    .mangosteen-replica-toolbar-group { flex-basis: auto; align-items: stretch; flex-direction: column; }
+    .mangosteen-replica-toolbar-actions { display: grid; grid-template-columns: minmax(0, 1fr); width: 100%; }
+    .mangosteen-replica-toolbar button { width: 100%; }
+    .mangosteen-replica-summary-grid { grid-template-columns: minmax(0, 1fr); }
+    .mangosteen-replica-inline-actions { align-items: stretch; flex-direction: column; }
+    .mangosteen-replica-workbench input,
+    .mangosteen-replica-workbench select,
+    .mangosteen-replica-workbench textarea { max-width: 100%; min-width: 0; }
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

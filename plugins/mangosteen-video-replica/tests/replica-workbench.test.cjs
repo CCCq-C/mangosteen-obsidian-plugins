@@ -1,5 +1,7 @@
 const assert = require("assert");
+const fs = require("fs");
 const Module = require("module");
+const path = require("path");
 
 class FakeClassList {
   constructor() { this.values = new Set(); }
@@ -231,6 +233,21 @@ function createView(plugin) {
   assert.strictEqual(view.dirty, true);
   assert.strictEqual(view.draft.shots[0].title, "本地改名");
 
+  const immediateSaveButton = view.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "保存草案");
+  assert.strictEqual(immediateSaveButton.disabled, false, "editing must enable Save without waiting for refresh");
+  assert(view.contentEl.find((element) => element.textContent === "有未保存修改"), "dirty status must update immediately");
+  await immediateSaveButton.dispatch("click");
+  assert.strictEqual(plugin.saveCalls.length, 1, "editing then saving must work without an intervening refresh");
+  assert.strictEqual(plugin.saveCalls[0].request.shots[0].title, "本地改名");
+
+  const refreshedTitleInput = view.contentEl.find((element) => (
+    element.tagName === "INPUT"
+      && element.dataset.section === "shot"
+      && element.dataset.field === "title"
+  ));
+  refreshedTitleInput.value = "本地未保存改名";
+  await refreshedTitleInput.dispatch("input");
+
   const assetsTab = view.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "资产");
   await assetsTab.dispatch("click");
   const voiceProfileInput = view.contentEl.find((element) => (
@@ -245,13 +262,13 @@ function createView(plugin) {
   plugin.snapshot.request.shots[0].title = "外部改名";
   plugin.snapshot.project.statusText = "轮询状态变化";
   await view.refresh();
-  assert.strictEqual(view.draft.shots[0].title, "本地改名", "polling must not replace a dirty draft");
+  assert.strictEqual(view.draft.shots[0].title, "本地未保存改名", "polling must not replace a dirty draft");
 
   const saveButton = view.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "保存草案");
   assert(saveButton, "save button should render");
   await saveButton.dispatch("click");
-  assert.strictEqual(plugin.saveCalls.length, 1);
-  assert.strictEqual(plugin.saveCalls[0].request.shots[0].title, "本地改名");
+  assert.strictEqual(plugin.saveCalls.length, 2);
+  assert.strictEqual(plugin.saveCalls[1].request.shots[0].title, "本地未保存改名");
   assert.strictEqual(view.dirty, false);
 
   view.contentScrollEl.scrollTop = 137;
@@ -266,6 +283,102 @@ function createView(plugin) {
   assert.strictEqual(view.refreshTimer, null);
   assert.deepStrictEqual(clearedTimers, [1]);
   assert.strictEqual(resizeObservers[0].disconnected, true);
+
+  const unavailablePlugin = createPlugin();
+  const unavailableView = createView(unavailablePlugin);
+  await unavailableView.onOpen();
+  await unavailableView.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "分镜").dispatch("click");
+  const unavailableInput = unavailableView.contentEl.find((element) => (
+    element.tagName === "INPUT" && element.dataset.section === "shot" && element.dataset.field === "title"
+  ));
+  unavailableInput.value = "项目消失时保留的修改";
+  await unavailableInput.dispatch("input");
+  const originalFolder = unavailableView.selectedFolder;
+  const replacementFolder = "山竹视频复刻/另一个项目";
+  unavailablePlugin.projects = [{ folder: replacementFolder, title: "另一个项目" }];
+  unavailablePlugin.snapshot = {
+    ...clone(readySnapshot),
+    project: { ...clone(readySnapshot.project), folder: replacementFolder, title: "另一个项目" },
+    request: { ...clone(request), shots: [{ ...clone(request.shots[0]), title: "外部替代项目" }] },
+  };
+  const loadCallsBeforeUnavailableRefresh = unavailablePlugin.loadCalls;
+  await unavailableView.refresh();
+  assert.strictEqual(unavailableView.selectedFolder, originalFolder, "dirty view must not auto-switch when its project disappears");
+  assert.strictEqual(unavailableView.dirty, true);
+  assert.strictEqual(unavailableView.draft.shots[0].title, "项目消失时保留的修改");
+  assert.strictEqual(unavailablePlugin.loadCalls, loadCallsBeforeUnavailableRefresh, "unavailable dirty project must not load a replacement");
+  assert(unavailableView.contentEl.find((element) => element.textContent.includes("当前项目暂不可用")));
+  const unavailableRenderCount = unavailableView.contentEl.emptyCalls;
+  await unavailableView.refresh();
+  assert.strictEqual(unavailableView.contentEl.emptyCalls, unavailableRenderCount, "unchanged unavailable polling must preserve the DOM");
+  await unavailableView.onClose();
+
+  const refreshErrorPlugin = createPlugin();
+  const refreshErrorView = createView(refreshErrorPlugin);
+  await refreshErrorView.onOpen();
+  refreshErrorPlugin.listWorkbenchProjects = async () => { throw new Error("轮询读取失败"); };
+  await refreshErrorView.refresh();
+  assert(refreshErrorView.contentEl.find((element) => element.textContent === "刷新失败：轮询读取失败"), "polling failure must be visible immediately");
+  refreshErrorPlugin.listWorkbenchProjects = async function listWorkbenchProjects() { return clone(this.projects); };
+  await refreshErrorView.refresh();
+  assert.strictEqual(
+    refreshErrorView.contentEl.find((element) => element.textContent.includes("轮询读取失败")),
+    null,
+    "successful polling must clear the stale refresh error",
+  );
+  await refreshErrorView.onClose();
+
+  const ineligiblePlugin = createPlugin({
+    ...clone(readySnapshot),
+    project: { ...clone(readySnapshot.project), status: "prepared", statusText: "等待分析" },
+  });
+  const ineligibleView = createView(ineligiblePlugin);
+  await ineligibleView.onOpen();
+  await ineligibleView.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "分镜").dispatch("click");
+  const ineligibleInput = ineligibleView.contentEl.find((element) => (
+    element.tagName === "INPUT" && element.dataset.section === "shot" && element.dataset.field === "title"
+  ));
+  ineligibleInput.value = "未完成分析的本地修改";
+  await ineligibleInput.dispatch("input");
+  await ineligibleView.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "总览").dispatch("click");
+  const ineligibleConfirm = ineligibleView.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "确认并生成");
+  assert.strictEqual(ineligibleConfirm.disabled, true, "dirty state must not bypass confirmation eligibility");
+  await ineligibleView.confirmDraft();
+  assert.strictEqual(ineligiblePlugin.confirmCalls.length, 0, "confirmDraft must enforce eligibility before the plugin call");
+  await ineligibleView.onClose();
+
+  const concurrentPlugin = createPlugin();
+  let releaseConfirm;
+  let confirmStarted;
+  const confirmBlocker = new Promise((resolve) => { releaseConfirm = resolve; });
+  const started = new Promise((resolve) => { confirmStarted = resolve; });
+  concurrentPlugin.confirmWorkbenchDraft = async function confirmWorkbenchDraft(folder) {
+    this.confirmCalls.push(folder);
+    confirmStarted();
+    await confirmBlocker;
+  };
+  const concurrentView = createView(concurrentPlugin);
+  await concurrentView.onOpen();
+  const firstConfirm = concurrentView.confirmDraft();
+  await started;
+  const pendingConfirmButton = concurrentView.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "确认并生成");
+  assert.strictEqual(pendingConfirmButton.disabled, true, "confirm must disable synchronously while pending");
+  const secondConfirm = concurrentView.confirmDraft();
+  assert.strictEqual(concurrentPlugin.confirmCalls.length, 1, "concurrent confirmation must call the plugin once");
+  releaseConfirm();
+  await Promise.all([firstConfirm, secondConfirm]);
+  assert.strictEqual(concurrentView.confirmPending, false);
+  assert.strictEqual(concurrentView.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "确认并生成").disabled, false);
+  await concurrentView.onClose();
+
+  const failedConfirmPlugin = createPlugin();
+  failedConfirmPlugin.confirmWorkbenchDraft = async () => { throw new Error("确认调用失败"); };
+  const failedConfirmView = createView(failedConfirmPlugin);
+  await failedConfirmView.onOpen();
+  await assert.rejects(() => failedConfirmView.confirmDraft(), /确认调用失败/);
+  assert.strictEqual(failedConfirmView.confirmPending, false, "failed confirmation must release the pending guard");
+  assert.strictEqual(failedConfirmView.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "确认并生成").disabled, false);
+  await failedConfirmView.onClose();
 
   const emptyView = createView(createPlugin({ project: {}, request: {}, generationState: {} }, []));
   await assert.doesNotReject(() => emptyView.onOpen());
@@ -296,6 +409,20 @@ function createView(plugin) {
   await assert.doesNotReject(() => failedView.onOpen());
   assert(failedView.contentEl.find((element) => element.textContent.includes("上游生成失败")));
   await failedView.onClose();
+
+  const css = fs.readFileSync(path.join(__dirname, "../styles.css"), "utf8");
+  const fallbackStart = css.indexOf("@supports not (container-type: inline-size)");
+  assert.notStrictEqual(fallbackStart, -1, "CSS must provide an explicit no-container-query fallback");
+  const fallbackCss = css.slice(fallbackStart, css.indexOf("@media (prefers-reduced-motion: reduce)"));
+  assert.match(fallbackCss, /--replica-gap:\s*14px/);
+  assert.match(fallbackCss, /--replica-pad:\s*18px/);
+  assert.match(fallbackCss, /@media \(max-width: 1099px\)/);
+  assert.match(fallbackCss, /@media \(max-width: 759px\)/);
+  assert.match(fallbackCss, /@media \(max-width: 519px\)/);
+  assert.match(fallbackCss, /\.mangosteen-replica-summary-grid/);
+  assert.match(fallbackCss, /\.mangosteen-replica-page-header/);
+  assert.match(fallbackCss, /\.mangosteen-replica-toolbar-actions/);
+  assert.match(fallbackCss, /\.mangosteen-replica-inline-actions/);
 
   Module._load = originalLoad;
   console.log("replica-workbench: ok");

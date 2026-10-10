@@ -69,11 +69,16 @@ class VideoReplicaWorkbenchView extends ItemView {
     this.refreshPromise = null;
     this.renderSignature = "";
     this.feedback = "";
+    this.refreshFeedback = "";
     this.savedScrollTop = 0;
     this.collapsedSections = new Map();
     this.detailElements = [];
     this.contentScrollEl = null;
     this.widthLabelEl = null;
+    this.saveButtons = [];
+    this.saveStatusElements = [];
+    this.confirmButtons = [];
+    this.confirmPending = false;
   }
 
   getViewType() { return VIEW_TYPE; }
@@ -118,9 +123,19 @@ class VideoReplicaWorkbenchView extends ItemView {
 
   async loadAndRender(force) {
     try {
-      this.projects = normalizeProjects(await this.plugin.listWorkbenchProjects());
+      const nextProjects = normalizeProjects(await this.plugin.listWorkbenchProjects());
+      this.projects = nextProjects;
       const availableFolders = new Set(this.projects.map((project) => project.folder));
       if (!availableFolders.has(this.selectedFolder)) {
+        if (this.dirty && this.selectedFolder) {
+          this.refreshFeedback = `当前项目暂不可用：${this.selectedFolder}。本地未保存草案已保留。`;
+          const unavailableSignature = this.buildRenderSignature();
+          if (force || unavailableSignature !== this.renderSignature) {
+            this.render();
+            this.renderSignature = this.buildRenderSignature();
+          }
+          return;
+        }
         this.selectedFolder = this.projects[0]?.folder || "";
       }
 
@@ -140,13 +155,18 @@ class VideoReplicaWorkbenchView extends ItemView {
       if (!this.dirty || folderChanged || !this.draft) this.draft = clone(nextSnapshot.request);
       this.snapshot = nextSnapshot;
       this.viewModel = deriveWorkbenchState(nextSnapshot);
+      this.refreshFeedback = "";
       const nextSignature = this.buildRenderSignature();
       if (!force && nextSignature === this.renderSignature) return;
       this.render();
       this.renderSignature = this.buildRenderSignature();
     } catch (error) {
-      this.feedback = `刷新失败：${String(error?.message || error)}`;
-      if (!this.renderSignature || force) this.render();
+      const message = `刷新失败：${String(error?.message || error)}`;
+      if (message !== this.refreshFeedback || !this.renderSignature || force) {
+        this.refreshFeedback = message;
+        this.render();
+        this.renderSignature = this.buildRenderSignature();
+      }
     }
   }
 
@@ -155,6 +175,7 @@ class VideoReplicaWorkbenchView extends ItemView {
       activeTab: this.activeTab,
       draft: this.draft,
       projects: this.projects.map(({ folder, title }) => ({ folder, title })),
+      refreshFeedback: this.refreshFeedback,
       selectedFolder: this.selectedFolder,
       state: stateSignature(this.viewModel),
     });
@@ -170,6 +191,9 @@ class VideoReplicaWorkbenchView extends ItemView {
     this.contentEl.empty();
     this.detailElements = [];
     this.widthLabelEl = null;
+    this.saveButtons = [];
+    this.saveStatusElements = [];
+    this.confirmButtons = [];
 
     const frame = this.contentEl.createDiv({ cls: "mangosteen-replica-frame" });
     this.renderToolbar(frame);
@@ -178,6 +202,7 @@ class VideoReplicaWorkbenchView extends ItemView {
     const content = shell.createDiv({ cls: "mangosteen-replica-content" });
     this.contentScrollEl = content;
 
+    if (this.refreshFeedback) content.createDiv({ cls: "mangosteen-replica-feedback", text: this.refreshFeedback });
     if (this.feedback) content.createDiv({ cls: "mangosteen-replica-feedback", text: this.feedback });
     if (this.viewModel.empty) this.renderEmpty(content);
     else if (this.activeTab === "assets") this.renderAssets(content);
@@ -259,8 +284,14 @@ class VideoReplicaWorkbenchView extends ItemView {
     heading.createEl("h2", { text: text(this.viewModel.title, "未命名项目") });
     heading.createEl("p", { text: text(this.viewModel.statusText, "等待下一步") });
     const actions = header.createDiv({ cls: "mangosteen-replica-inline-actions" });
-    this.createButton(actions, "保存草案", () => this.saveDraft(), "mod-cta", this.editingLocked() || !this.dirty);
-    this.createButton(actions, "确认并生成", () => this.confirmDraft(), "", !this.viewModel.canConfirm && !this.dirty);
+    this.saveButtons.push(this.createButton(actions, "保存草案", () => this.saveDraft(), "mod-cta", this.editingLocked() || !this.dirty));
+    this.confirmButtons.push(this.createButton(
+      actions,
+      "确认并生成",
+      () => this.confirmDraft(),
+      "",
+      this.confirmPending || this.editingLocked() || !this.viewModel.canConfirm,
+    ));
     this.createButton(actions, "打开项目总览", () => this.plugin.openVaultPath(`${this.viewModel.folder}/00-项目总览.md`));
 
     const progressCard = parent.createDiv({ cls: "mangosteen-replica-card mangosteen-replica-progress-card" });
@@ -410,10 +441,10 @@ class VideoReplicaWorkbenchView extends ItemView {
 
   renderSaveRow(parent) {
     const actions = parent.createDiv({ cls: "mangosteen-replica-save-row" });
-    actions.createEl("span", {
+    this.saveStatusElements.push(actions.createEl("span", {
       text: this.editingLocked() ? "草案已锁定" : this.dirty ? "有未保存修改" : "草案已保存",
-    });
-    this.createButton(actions, "保存草案", () => this.saveDraft(), "mod-cta", this.editingLocked() || !this.dirty);
+    }));
+    this.saveButtons.push(this.createButton(actions, "保存草案", () => this.saveDraft(), "mod-cta", this.editingLocked() || !this.dirty));
   }
 
   createDraftControl(parent, labelText, tagName, value, target, options = {}) {
@@ -439,6 +470,7 @@ class VideoReplicaWorkbenchView extends ItemView {
         this.draft = updateDraftField(this.draft, target, nextValue);
         this.dirty = true;
         this.feedback = "";
+        this.syncSaveState();
         this.renderSignature = this.buildRenderSignature();
       } catch (error) {
         this.setFeedback(String(error?.message || error));
@@ -463,6 +495,18 @@ class VideoReplicaWorkbenchView extends ItemView {
       }
     });
     return button;
+  }
+
+  syncSaveState() {
+    const locked = this.editingLocked();
+    for (const button of this.saveButtons) button.disabled = locked || !this.dirty;
+    const label = locked ? "草案已锁定" : this.dirty ? "有未保存修改" : "草案已保存";
+    for (const element of this.saveStatusElements) element.setText(label);
+  }
+
+  syncConfirmState() {
+    const disabled = this.confirmPending || this.editingLocked() || !this.viewModel.canConfirm;
+    for (const button of this.confirmButtons) button.disabled = disabled;
   }
 
   createDetails(parent, key, label, defaultOpen) {
@@ -504,11 +548,20 @@ class VideoReplicaWorkbenchView extends ItemView {
   }
 
   async confirmDraft() {
-    if (this.dirty && !(await this.saveDraft())) return;
-    if (!this.selectedFolder) return;
-    await this.plugin.confirmWorkbenchDraft(this.selectedFolder);
-    this.feedback = "已确认草案，生成任务已启动。";
-    await this.refresh({ force: true });
+    if (this.confirmPending || this.editingLocked() || !this.viewModel.canConfirm || !this.selectedFolder) return false;
+    this.confirmPending = true;
+    this.syncConfirmState();
+    try {
+      if (this.dirty && !(await this.saveDraft())) return false;
+      if (this.editingLocked() || !this.viewModel.canConfirm || !this.selectedFolder) return false;
+      await this.plugin.confirmWorkbenchDraft(this.selectedFolder);
+      this.feedback = "已确认草案，生成任务已启动。";
+      await this.refresh({ force: true });
+      return true;
+    } finally {
+      this.confirmPending = false;
+      this.syncConfirmState();
+    }
   }
 
   setFeedback(message) {
