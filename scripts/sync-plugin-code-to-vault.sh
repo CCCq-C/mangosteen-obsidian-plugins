@@ -47,4 +47,11 @@ copy_plugin_files mangosteen-video-replica \
   tests/generation-policy.test.cjs tests/plugin-load.test.cjs tests/reference-assets.test.cjs \
   tests/replica-cli.test.cjs tests/replica-core.test.cjs
 
+agent_main="$plugin_root/mangosteen-agent/main.js"
+if [[ -f "$agent_main" ]]; then
+  node "$repo_root/scripts/patch-mangosteen-agent-structured-analysis.cjs" "$agent_main"
+else
+  printf 'Warning: mangosteen-agent is not installed; video analysis will remain unavailable.\n' >&2
+fi
+
 printf 'Synced allow-listed plugin code to %s\n' "$plugin_root"

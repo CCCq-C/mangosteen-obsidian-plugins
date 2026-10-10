@@ -50,6 +50,51 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   plugin.app = { vault: { adapter: { getBasePath: () => vault } } };
   plugin.processing = new Set();
 
+  const analysisFolder = "山竹视频复刻/山竹模型分析";
+  const analysisRoot = path.join(vault, ...analysisFolder.split("/"));
+  fs.mkdirSync(path.join(analysisRoot, "02-分镜脚本"), { recursive: true });
+  const analysisFrames = [1, 2].map((index) => {
+    const framePath = `${analysisFolder}/02-分镜脚本/原片画面-${String(index).padStart(3, "0")}.jpg`;
+    fs.writeFileSync(path.join(vault, ...framePath.split("/")), `frame-${index}`);
+    return { index, timestamp: index - 1, path: framePath };
+  });
+  fs.writeFileSync(path.join(analysisRoot, "project.json"), JSON.stringify({
+    folder: analysisFolder, title: "山竹模型分析", duration: 8, width: 1080, height: 1920,
+    frames: analysisFrames, shots: [], transcriptPath: `${analysisFolder}/02-分镜脚本/台词转写.md`,
+    storyboardPath: `${analysisFolder}/02-分镜脚本/分镜脚本.md`, status: "prepared",
+  }));
+  fs.writeFileSync(path.join(analysisRoot, "02-分镜脚本/台词转写.md"), "# 台词转写\n\n- 00:00 你好\n");
+  const structuredCalls = [];
+  const agentResult = { data: {
+    character: { id: "hero", prompt: "短黑发人物三视图，固定五官和服装。" },
+    scenes: [{ id: "studio", prompt: "明亮摄影棚，固定白色背景和柔光灯。" }],
+    shots: [{
+      title: "打招呼", sceneId: "studio", startTime: 0, endTime: 4,
+      dialogue: "你好", plot: "人物抬手打招呼", environment: "摄影棚", camera: "中景固定",
+      imagePrompt: "人物面对镜头抬手。", lastImagePrompt: "人物放下手。", videoPrompt: "人物自然挥手后放下。",
+    }],
+  }, model: "山竹当前模型" };
+  const agent = {
+    analyzeStructured: async (options) => {
+      structuredCalls.push(options);
+      return agentResult;
+    },
+  };
+  plugin.app.plugins = { getPlugin: (id) => id === "mangosteen-agent" ? agent : id === "mangosteen-video" ? { settings: { model: "MiniMax-H3", resolution: "768p" } } : null };
+  plugin.openVaultPath = async () => true;
+  const analyzedByAgent = await plugin.analyzeProject(analysisFolder);
+  assert.strictEqual(structuredCalls.length, 1, "analysis must call the Mangosteen Agent exactly once");
+  assert.strictEqual(structuredCalls[0].images.length, 2, "analysis must pass sampled local frames to the Mangosteen Agent");
+  assert.strictEqual(structuredCalls[0].schemaName, "video_replica_analysis");
+  assert.match(structuredCalls[0].prompt, /你好/, "analysis must include the local Whisper transcript in the model prompt");
+  assert.strictEqual(analyzedByAgent.request.confirmed, false);
+  assert.strictEqual(analyzedByAgent.project.analysisProvider, "mangosteen-agent");
+  assert.deepStrictEqual(
+    JSON.parse(fs.readFileSync(path.join(analysisRoot, ".work/last-agent-response.json"), "utf8")),
+    agentResult.data,
+    "the latest model response must be retained for diagnosis",
+  );
+
   plugin.concatProject = async (value) => {
     const output = `${value.folder}/04-最终成片/最终成片.mp4`;
     const absolute = path.join(plugin.vaultPath(), ...output.split("/"));

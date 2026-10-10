@@ -44,7 +44,6 @@ function resolveRuntimes(pluginRoot = __dirname) {
     ffprobe: resolveRuntime(pluginRoot, "ffprobe", "MANGOSTEEN_FFPROBE", ["/opt/homebrew/bin/ffprobe", "/usr/local/bin/ffprobe"]),
     whisper: resolveRuntime(pluginRoot, "whisper-cli", "MANGOSTEEN_WHISPER", ["/opt/homebrew/bin/whisper-cli", "/usr/local/bin/whisper-cli"]),
     whisperModel: resolveWhisperModel(pluginRoot),
-    codex: resolveRuntime(pluginRoot, "codex", "MANGOSTEEN_CODEX_CLI", [path.join(os.homedir(), ".local", "bin", "codex"), "/opt/homebrew/bin/codex", "/usr/local/bin/codex"]),
   };
 }
 
@@ -295,18 +294,15 @@ function sampleFrames(frames, limit = 12) {
   return Array.from({ length: count }, (_, index) => values[Math.round(index * (values.length - 1) / (count - 1))]);
 }
 
-function parseAnalysisOutput(text) {
-  const cleaned = String(text || "").trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
-  try { return JSON.parse(cleaned); } catch (_) { throw new Error("AI 已返回结果，但分镜 JSON 无法读取。请重新运行“分析最近的视频复刻项目”。"); }
-}
-
-function analysisPrompt(project) {
+function analysisPrompt(project, transcriptText = "") {
   const transcript = project.transcriptPath || `${project.folder}/02-分镜脚本/台词转写.md`;
   return [
     "你是视频复刻分镜分析器。只分析本次提供的项目资料，不搜索网络，不修改任何文件。",
     `项目：${project.folder}`,
     `时长：${Number(project.duration || 0).toFixed(1)} 秒；尺寸：${Number(project.width || 0)}x${Number(project.height || 0)}`,
-    `先读取台词转写：${transcript}，再结合附带的按时间顺序截图。`,
+    `台词转写来源：${transcript}`,
+    String(transcriptText || "").trim() ? `以下是完整台词转写：\n${String(transcriptText).trim()}` : "原片没有识别到可用台词。",
+    "再结合附带的按时间顺序截图完成分析。",
     "输出最多 12 个连续分镜，覆盖主要剧情。每个分镜写清人物动作、台词、环境、镜头语言、首帧提示词、可选尾帧提示词和视频提示词。",
     "人物提示词必须描述稳定的五官、发型、年龄、服装和正面/侧面/背面三视图。场景提示词必须保留地标、空间关系、光线、天气和关键物件。",
     "所有镜头复用同一人物资产；同一地点复用同一 sceneId。ID 只用英文、数字、下划线或短横线。",
@@ -314,7 +310,7 @@ function analysisPrompt(project) {
   ].join("\n");
 }
 
-async function analyzeProject({ projectFolder, vaultPath, pluginRoot = __dirname, settings = {} } = {}) {
+function applyAnalysis({ projectFolder, vaultPath, analysis, settings = {}, analysisProvider = "mangosteen-agent", analysisModel = "" } = {}) {
   const vault = path.resolve(String(vaultPath || ""));
   if (!fs.statSync(vault, { throwIfNoEntry: false })?.isDirectory()) throw new Error("找不到 Obsidian 知识库目录。");
   const folder = core.normalizeVaultPath(projectFolder);
@@ -322,50 +318,22 @@ async function analyzeProject({ projectFolder, vaultPath, pluginRoot = __dirname
   const projectPath = path.join(absoluteFolder, "project.json");
   if (!fs.statSync(projectPath, { throwIfNoEntry: false })?.isFile()) throw new Error("找不到视频复刻项目的 project.json。");
   const project = JSON.parse(fs.readFileSync(projectPath, "utf8"));
-  const runtime = resolveRuntimes(pluginRoot);
-  if (!runtime.codex) throw new Error("缺少 Codex CLI。请先完成山竹智能体基础安装，再重新分析。");
-  const frames = sampleFrames(project.frames, 12);
-  if (!frames.length) throw new Error("项目还没有提取画面，请先完成本地拆解。");
-  const imagePaths = frames.map((frame) => path.join(vault, ...core.normalizeVaultPath(frame.path).split("/")));
-  if (imagePaths.some((filePath) => !fs.statSync(filePath, { throwIfNoEntry: false })?.isFile())) throw new Error("部分原片画面丢失，请重新执行本地拆解。");
-  const schemaPath = path.join(pluginRoot, "video-analysis-schema.json");
-  if (!fs.statSync(schemaPath, { throwIfNoEntry: false })?.isFile()) throw new Error("缺少视频分析规则文件，请重新安装山竹视频复刻插件。");
   const workFolder = path.join(absoluteFolder, ".work");
   const outputPath = path.join(workFolder, "ai-analysis.json");
   fs.mkdirSync(workFolder, { recursive: true });
-  fs.rmSync(outputPath, { force: true });
-  project.status = "analyzing";
-  project.statusText = "AI 正在分析人物、场景和分镜";
+  const request = core.buildGenerationDraft(project, analysis, settings);
+  project.status = "analysis_ready";
+  project.statusText = "山竹智能体分析完成，等待确认生成";
+  project.videoModel = request.settings.videoModel;
+  project.analysisProvider = analysisProvider;
+  project.analysisModel = String(analysisModel || "");
+  project.shots = request.shots.map((shot) => ({ ...shot, status: "等待确认", imagePath: "", videoPath: "", error: "" }));
+  writeJson(outputPath, analysis);
   writeJson(projectPath, project);
+  writeJson(path.join(absoluteFolder, "generation-request.json"), request);
+  atomicWrite(path.join(absoluteFolder, "02-分镜脚本", "分镜脚本.md"), core.analysisStoryboardMarkdown(project, request));
   atomicWrite(path.join(absoluteFolder, "00-项目总览.md"), core.dashboardMarkdown(project));
-  try {
-    const args = [
-      "exec", "--ephemeral", "--ignore-rules", "--skip-git-repo-check", "--sandbox", "read-only",
-      "-C", vault, "--output-schema", schemaPath, "--output-last-message", outputPath,
-    ];
-    for (const imagePath of imagePaths) args.push("--image", imagePath);
-    args.push("--", analysisPrompt(project));
-    await run(runtime.codex, args, { cwd: vault, timeoutMs: 20 * 60 * 1000, maxOutput: 2 * 1024 * 1024 });
-    if (!fs.statSync(outputPath, { throwIfNoEntry: false })?.isFile()) throw new Error("AI 分析完成，但没有输出分镜文件。");
-    const analysis = parseAnalysisOutput(fs.readFileSync(outputPath, "utf8"));
-    const request = core.buildGenerationDraft(project, analysis, settings);
-    project.status = "analysis_ready";
-    project.statusText = "AI 分析完成，等待确认生成";
-    project.videoModel = request.settings.videoModel;
-    project.analysisProvider = "codex-cli";
-    project.shots = request.shots.map((shot) => ({ ...shot, status: "等待确认", imagePath: "", videoPath: "", error: "" }));
-    writeJson(projectPath, project);
-    writeJson(path.join(absoluteFolder, "generation-request.json"), request);
-    atomicWrite(path.join(absoluteFolder, "02-分镜脚本", "分镜脚本.md"), core.analysisStoryboardMarkdown(project, request));
-    atomicWrite(path.join(absoluteFolder, "00-项目总览.md"), core.dashboardMarkdown(project));
-    return { project, request, outputPath };
-  } catch (error) {
-    project.status = "analysis_failed";
-    project.statusText = `AI 分析失败：${String(error?.message || error)}`;
-    writeJson(projectPath, project);
-    atomicWrite(path.join(absoluteFolder, "00-项目总览.md"), core.dashboardMarkdown(project));
-    throw error;
-  }
+  return { project, request, outputPath };
 }
 
 function concatFileLine(filePath) {
@@ -419,10 +387,9 @@ if (require.main === module) main().catch((error) => { process.stderr.write(`${S
 
 module.exports = {
   analysisPrompt,
-  analyzeProject,
+  applyAnalysis,
   concatProjectVideos,
   hasFrameCoverage,
-  parseAnalysisOutput,
   prepareProject,
   resolveRuntimes,
   sampleFrames,

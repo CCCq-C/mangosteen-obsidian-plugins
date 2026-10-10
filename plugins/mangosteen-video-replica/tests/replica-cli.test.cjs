@@ -3,10 +3,10 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const {
-  analyzeProject,
+  applyAnalysis,
   concatProjectVideos,
   hasFrameCoverage,
-  parseAnalysisOutput,
+  resolveRuntimes,
   sampleFrames,
   transcriptSegments,
 } = require("../replica-cli.cjs");
@@ -27,7 +27,7 @@ assert.strictEqual(sampled.length, 12);
 assert.strictEqual(sampled[0].index, 1);
 assert.strictEqual(sampled.at(-1).index, 30);
 assert.deepStrictEqual(sampleFrames([], 12), []);
-assert.deepStrictEqual(parseAnalysisOutput('```json\n{"character":{"id":"hero"}}\n```'), { character: { id: "hero" } });
+assert.strictEqual(Object.hasOwn(resolveRuntimes(path.resolve(__dirname, "..")), "codex"), false, "video replica must not launch Codex CLI as an analysis fallback");
 
 (async () => {
   const vault = fs.mkdtempSync(path.join(os.tmpdir(), "mangosteen-replica-cli-"));
@@ -53,22 +53,15 @@ assert.deepStrictEqual(parseAnalysisOutput('```json\n{"character":{"id":"hero"}}
     storyboardPath: `${projectFolder}/02-分镜脚本/分镜脚本.md`,
   }));
 
-  const fakeCodex = path.join(vault, "fake-codex");
-  fs.writeFileSync(fakeCodex, `#!/usr/bin/env node
-const fs = require("fs");
-const args = process.argv.slice(2);
-const output = args[args.indexOf("--output-last-message") + 1];
-fs.writeFileSync(output, JSON.stringify({
+  const analysis = {
   character: { id: "hero", prompt: "短黑发人物三视图，固定五官和服装。" },
   scenes: [{ id: "studio", prompt: "明亮摄影棚，固定白色背景和柔光灯。" }],
   shots: [{
     title: "打招呼", sceneId: "studio", startTime: 0, endTime: 4,
     dialogue: "你好", plot: "人物抬手打招呼", environment: "摄影棚", camera: "中景固定",
     imagePrompt: "人物面对镜头抬手。", lastImagePrompt: "人物放下手。", videoPrompt: "人物自然挥手后放下。"
-  }]
-}));
-`);
-  fs.chmodSync(fakeCodex, 0o755);
+  }],
+  };
 
   const fakeFfmpeg = path.join(vault, "fake-ffmpeg");
   fs.writeFileSync(fakeFfmpeg, `#!/usr/bin/env node
@@ -78,12 +71,10 @@ fs.writeFileSync(output, "joined-video");
 `);
   fs.chmodSync(fakeFfmpeg, 0o755);
 
-  const oldCodex = process.env.MANGOSTEEN_CODEX_CLI;
   const oldFfmpeg = process.env.MANGOSTEEN_FFMPEG;
-  process.env.MANGOSTEEN_CODEX_CLI = fakeCodex;
   process.env.MANGOSTEEN_FFMPEG = fakeFfmpeg;
   try {
-    const analyzed = await analyzeProject({ projectFolder, vaultPath: vault, pluginRoot: path.resolve(__dirname, "..") });
+    const analyzed = applyAnalysis({ projectFolder, vaultPath: vault, analysis, settings: { videoModel: "MiniMax-H3", resolution: "768p" } });
     assert.strictEqual(analyzed.request.confirmed, false);
     assert.strictEqual(analyzed.project.status, "analysis_ready");
     assert.strictEqual(analyzed.project.shots[0].status, "等待确认");
@@ -103,7 +94,6 @@ fs.writeFileSync(output, "joined-video");
     assert.strictEqual(finalVideoPath, `${projectFolder}/04-最终成片/最终成片.mp4`);
     assert.strictEqual(fs.readFileSync(path.join(vault, ...finalVideoPath.split("/")), "utf8"), "joined-video");
   } finally {
-    if (oldCodex === undefined) delete process.env.MANGOSTEEN_CODEX_CLI; else process.env.MANGOSTEEN_CODEX_CLI = oldCodex;
     if (oldFfmpeg === undefined) delete process.env.MANGOSTEEN_FFMPEG; else process.env.MANGOSTEEN_FFMPEG = oldFfmpeg;
     fs.rmSync(vault, { recursive: true, force: true });
   }

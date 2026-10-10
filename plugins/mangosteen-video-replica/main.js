@@ -144,14 +144,54 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
   }
 
   async analyzeProject(projectFolder) {
-    const result = await workflow.analyzeProject({
-      projectFolder,
-      vaultPath: this.vaultPath(),
-      pluginRoot: this.pluginRoot,
-      settings: this.analysisSettings(),
+    const projectPath = path.join(this.absolute(projectFolder), "project.json");
+    if (!fs.existsSync(projectPath)) throw new Error("找不到视频复刻项目的 project.json。");
+    const project = this.readJson(projectPath);
+    const frames = workflow.sampleFrames(project.frames, 8);
+    if (!frames.length) throw new Error("项目还没有提取画面，请先完成本地拆解。");
+    const agent = this.app.plugins?.getPlugin?.("mangosteen-agent");
+    if (typeof agent?.analyzeStructured !== "function") throw new Error("山竹智能体版本过低或未启用，请先更新并启用山竹智能体。");
+    const schemaPath = path.join(this.pluginRoot, "video-analysis-schema.json");
+    if (!fs.existsSync(schemaPath)) throw new Error("缺少视频分析规则文件，请重新安装山竹视频复刻插件。");
+    const transcriptPath = project.transcriptPath ? this.absolute(project.transcriptPath) : "";
+    const transcriptText = transcriptPath && fs.existsSync(transcriptPath) ? fs.readFileSync(transcriptPath, "utf8") : "";
+    const images = frames.map((frame) => {
+      const framePath = this.absolute(frame.path);
+      if (!fs.statSync(framePath, { throwIfNoEntry: false })?.isFile()) throw new Error(`原片画面丢失：${path.basename(framePath)}`);
+      return { name: path.basename(framePath), type: "image/jpeg", bytes: fs.readFileSync(framePath) };
     });
-    await this.openVaultPath(`${projectFolder}/00-项目总览.md`);
-    return result;
+    project.status = "analyzing";
+    project.statusText = "山竹智能体正在分析人物、场景和分镜";
+    project.analysisProvider = "mangosteen-agent";
+    project.analysisModel = "";
+    this.saveProject(projectFolder, project);
+    try {
+      const response = await agent.analyzeStructured({
+        prompt: workflow.analysisPrompt(project, transcriptText),
+        images,
+        schema: this.readJson(schemaPath),
+        schemaName: "video_replica_analysis",
+      });
+      const analysis = response?.data ?? response;
+      const diagnosticPath = path.join(this.absolute(projectFolder), ".work", "last-agent-response.json");
+      fs.mkdirSync(path.dirname(diagnosticPath), { recursive: true });
+      writeJson(diagnosticPath, analysis);
+      const result = workflow.applyAnalysis({
+        projectFolder,
+        vaultPath: this.vaultPath(),
+        analysis,
+        settings: this.analysisSettings(),
+        analysisProvider: "mangosteen-agent",
+        analysisModel: response?.model,
+      });
+      await this.openVaultPath(`${projectFolder}/00-项目总览.md`);
+      return result;
+    } catch (error) {
+      project.status = "analysis_failed";
+      project.statusText = `山竹智能体分析失败：${String(error?.message || error)}`;
+      this.saveProject(projectFolder, project);
+      throw error;
+    }
   }
 
   async analyzeLatestProject() {
