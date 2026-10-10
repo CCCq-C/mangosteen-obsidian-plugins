@@ -80,6 +80,14 @@ assert.strictEqual(confirmed.confirmed, true);
 assert.strictEqual(confirmed.planId, plan.planId);
 assert.strictEqual(Object.isFrozen(confirmed), true);
 
+const tamperedPlan = JSON.parse(JSON.stringify(plan));
+tamperedPlan.shots[0].effectiveVideoPrompt = "没有经过用户确认的替换提示词";
+assert.throws(
+  () => confirmGenerationPlan(tamperedPlan, draft()),
+  /生成计划内容已变化.*重新预览/,
+  "a serialized plan must not be alterable after preview",
+);
+
 const unselectedChanged = draft();
 unselectedChanged.shots[1].videoPrompt = "未选镜头仍可编辑";
 assert.strictEqual(confirmGenerationPlan(plan, unselectedChanged).confirmed, true);
@@ -95,6 +103,13 @@ for (const changed of [
 
 (async () => {
   const confirmedBatch = confirmGenerationPlan(prepareGenerationPlan(draft(), ["001", "003"]), draft());
+  const tamperedConfirmed = JSON.parse(JSON.stringify(confirmedBatch));
+  tamperedConfirmed.shots[0].effectiveVideoPrompt = "确认后又被替换的提示词";
+  assert.throws(
+    () => createGenerationQueue(tamperedConfirmed),
+    /生成计划内容已变化.*重新预览/,
+    "enqueue must verify a serialized confirmed plan again",
+  );
   const queue = createGenerationQueue(confirmedBatch, { now: "2026-10-11T00:00:00.000Z" });
   assert.strictEqual(queue.status, "idle");
   assert.deepStrictEqual(queue.shots.map((shot) => shot.status), ["queued", "queued"]);

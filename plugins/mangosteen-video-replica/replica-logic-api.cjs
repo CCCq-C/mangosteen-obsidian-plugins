@@ -7,8 +7,10 @@ const {
   runGenerationQueue,
 } = require("./generation-queue.cjs");
 
-function createReplicaLogicApi({ saveQueue = async () => {}, runShot = null } = {}) {
+function createReplicaLogicApi({ activeQueues = [], saveQueue = async () => {}, runShot = null } = {}) {
   if (typeof saveQueue !== "function") throw new Error("saveQueue 必须是函数。");
+  if (!Array.isArray(activeQueues)) throw new Error("activeQueues 必须是数组。");
+  const knownQueues = [...activeQueues];
 
   return {
     preview(request, selectedShotIds) {
@@ -20,8 +22,19 @@ function createReplicaLogicApi({ saveQueue = async () => {}, runShot = null } = 
     },
 
     async enqueue(confirmedPlan, options = {}) {
-      const queue = createGenerationQueue(confirmedPlan, options);
-      await saveQueue(queue);
+      const suppliedQueues = Array.isArray(options.activeQueues) ? options.activeQueues : [];
+      const queue = createGenerationQueue(confirmedPlan, {
+        ...options,
+        activeQueues: [...knownQueues, ...suppliedQueues],
+      });
+      knownQueues.push(queue);
+      try {
+        await saveQueue(queue);
+      } catch (error) {
+        const index = knownQueues.indexOf(queue);
+        if (index >= 0) knownQueues.splice(index, 1);
+        throw error;
+      }
       return queue;
     },
 

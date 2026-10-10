@@ -22,6 +22,18 @@ function sha256(value) {
   return `sha256:${crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex")}`;
 }
 
+function planSnapshot(plan) {
+  return {
+    version: Number(plan?.version),
+    character: clone(plan?.character),
+    products: clone(plan?.products || []),
+    scenes: clone(plan?.scenes || []),
+    settings: clone(plan?.settings),
+    selectedShotIds: clone(plan?.selectedShotIds || []),
+    shots: clone(plan?.shots || []),
+  };
+}
+
 function normalizedSelection(selectedShotIds) {
   if (!Array.isArray(selectedShotIds) || !selectedShotIds.length) throw new Error("至少选择一个镜头后才能生成。");
   const output = selectedShotIds.map((id) => String(id || "").trim());
@@ -75,6 +87,7 @@ function prepareGenerationPlan(request, selectedShotIds) {
 
 function confirmGenerationPlan(plan, currentRequest) {
   if (!plan || typeof plan !== "object" || !Array.isArray(plan.selectedShotIds)) throw new Error("生成计划格式错误，请重新预览确认。");
+  if (sha256(planSnapshot(plan)) !== plan.planId) throw new Error("生成计划内容已变化，请重新预览并确认生成。");
   const current = prepareGenerationPlan(currentRequest, plan.selectedShotIds);
   if (current.planId !== plan.planId) throw new Error("所选镜头的草案已变化，请重新确认生成。");
   return deepFreeze({ ...clone(plan), confirmed: true });
@@ -89,6 +102,7 @@ function lockedShotIds(queue) {
 
 function createGenerationQueue(confirmedPlan, { activeQueues = [], now = new Date().toISOString() } = {}) {
   if (!confirmedPlan || confirmedPlan.confirmed !== true) throw new Error("生成计划尚未确认，不能加入队列。");
+  if (sha256(planSnapshot(confirmedPlan)) !== confirmedPlan.planId) throw new Error("生成计划内容已变化，请重新预览并确认生成。");
   const requestedIds = new Set(confirmedPlan.selectedShotIds || []);
   for (const activeQueue of activeQueues) {
     const conflict = lockedShotIds(activeQueue).find((id) => requestedIds.has(id));

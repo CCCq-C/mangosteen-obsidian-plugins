@@ -15,6 +15,25 @@ const request = {
 };
 
 (async () => {
+  let releaseFirstSave;
+  let saveCalls = 0;
+  const concurrentApi = createReplicaLogicApi({
+    saveQueue: async () => {
+      saveCalls += 1;
+      if (saveCalls === 1) await new Promise((resolve) => { releaseFirstSave = resolve; });
+    },
+  });
+  const concurrentPlan = concurrentApi.confirm(concurrentApi.preview(request, ["001"]), request);
+  const firstEnqueue = concurrentApi.enqueue(concurrentPlan);
+  await Promise.resolve();
+  await assert.rejects(
+    () => concurrentApi.enqueue(concurrentPlan),
+    /镜头 001.*已经在生成队列/,
+    "double-clicking enqueue must not create two paid queues while the first save is pending",
+  );
+  releaseFirstSave();
+  await firstEnqueue;
+
   const persisted = [];
   const submitted = [];
   const api = createReplicaLogicApi({
@@ -38,6 +57,11 @@ const request = {
   assert.strictEqual(api.isLocked(queue, "001"), false);
   assert.deepStrictEqual(api.lockedShotIds(queue), ["002"]);
   assert.strictEqual(persisted.length, 1, "enqueue must be persisted before paid work can start");
+  await assert.rejects(
+    () => api.enqueue(api.confirm(api.preview(request, ["002"]), request)),
+    /镜头 002.*已经在生成队列/,
+    "the facade must prevent duplicate paid queues without relying on UI bookkeeping",
+  );
 
   await api.run(queue);
   assert.deepStrictEqual(submitted.map((item) => item.id), ["002"]);
