@@ -64,19 +64,53 @@ assert.throws(
   /最多只能包含 12 个分镜/,
 );
 
+const requestV3Input = {
+  ...requestV2Input,
+  version: 3,
+  products: [{ id: "headphones", prompt: "白色头戴式耳机与白色包装盒，外观、比例、材质和品牌位置固定。" }],
+  shots: [{ ...requestV2Input.shots[0], productIds: ["headphones"] }],
+};
+const requestV3 = core.normalizeGenerationRequest(requestV3Input);
+assert.strictEqual(requestV3.version, 3);
+assert.deepStrictEqual(requestV3.products, requestV3Input.products);
+assert.deepStrictEqual(requestV3.shots[0].productIds, ["headphones"]);
+assert.throws(
+  () => core.normalizeGenerationRequest({ ...requestV3Input, shots: [{ ...requestV3Input.shots[0], productIds: ["missing"] }] }),
+  /找不到产品 ID.*missing/,
+);
+assert.throws(
+  () => core.normalizeGenerationRequest({
+    ...requestV3Input,
+    products: [
+      requestV3Input.products[0],
+      { id: "phone", prompt: "黑色手机固定产品参考板" },
+      { id: "cup", prompt: "白色咖啡杯固定产品参考板" },
+    ],
+    shots: [{ ...requestV3Input.shots[0], productIds: ["headphones", "phone", "cup"] }],
+  }),
+  /最多引用 2 个产品/,
+);
+
 const analysisDraft = core.buildGenerationDraft({ width: 1080, height: 1920 }, {
   character: { id: "main-hero", prompt: "固定人物三视图，短黑发、米白夹克、深蓝工装裤，保持五官和服装一致。" },
+  products: [{ id: "headphones", prompt: "白色头戴式耳机与白色包装盒，外观、比例、材质和品牌位置固定。" }],
   scenes: [{ id: "harbor", prompt: "傍晚海边集装箱码头，左侧蓝色集装箱，右侧海面，远处白色灯塔。" }],
   shots: [{
     title: "走向集装箱", sceneId: "harbor", startTime: 0, endTime: 4,
+    productIds: ["headphones"],
     dialogue: "", plot: "人物向前走两步", environment: "海边码头", camera: "中景缓慢推进",
     imagePrompt: "同一人物站在码头通道起点。", lastImagePrompt: "同一人物向前两步后停下。", videoPrompt: "人物自然向前走两步，镜头缓慢推进。",
   }],
 }, { videoModel: "MiniMax-H3", resolution: "768p" });
 assert.strictEqual(analysisDraft.confirmed, false);
+assert.strictEqual(analysisDraft.version, 3);
 assert.strictEqual(analysisDraft.settings.ratio, "9:16");
 assert.strictEqual(analysisDraft.shots[0].duration, 4);
-assert.match(core.analysisStoryboardMarkdown({ title: "测试" }, analysisDraft), /原片截图只用于分析/);
+assert.deepStrictEqual(analysisDraft.shots[0].productIds, ["headphones"]);
+const storyboard = core.analysisStoryboardMarkdown({ title: "测试" }, analysisDraft);
+assert.match(storyboard, /原片截图只用于分析/);
+assert.match(storyboard, /产品参考提示词/);
+assert.match(storyboard, /headphones/);
 
 const markdown = core.dashboardMarkdown({
   folder: "山竹视频复刻/测试项目",
@@ -86,12 +120,14 @@ const markdown = core.dashboardMarkdown({
   createdAt: "2026-10-10T00:00:00.000Z",
   status: "prepared",
   transcriptPath: "山竹视频复刻/测试项目/02-分镜脚本/台词转写.md",
+  productAssets: [{ id: "headphones", imagePath: "山竹视频资产库/产品/headphones/产品参考板.png" }],
   frames: [{ index: 1, timestamp: 0, path: "山竹视频复刻/测试项目/02-分镜脚本/原片画面-001.jpg" }],
   shots: [],
 });
 assert.match(markdown, /!\[\[山竹视频复刻\/测试项目\/02-分镜脚本\/原片画面-001.jpg\]\]/);
 assert.match(markdown, /!\[\[山竹视频复刻\/测试项目\/02-分镜脚本\/台词转写.md\]\]/);
 assert.match(markdown, /当前状态/);
+assert.match(markdown, /山竹视频资产库\/产品\/headphones\/产品参考板\.png/);
 
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log("replica-core: ok");

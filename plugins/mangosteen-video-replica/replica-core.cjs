@@ -68,15 +68,15 @@ function normalizeGenerationRequest(input) {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("生成任务格式错误。");
   if (input.confirmed !== true) throw new Error("生成任务尚未确认，不会调用付费算力。");
   const version = input.version === undefined ? 1 : Number(input.version);
-  if (version !== 1 && version !== 2) throw new Error(`不支持生成任务版本：${String(input.version)}`);
+  if (![1, 2, 3].includes(version)) throw new Error(`不支持生成任务版本：${String(input.version)}`);
   const characterPrompt = cleanText(input.character?.prompt);
   if (!characterPrompt) throw new Error("缺少人物参考图提示词。");
   const inputShots = Array.isArray(input.shots) ? input.shots : [];
-  if (version === 2 && inputShots.length > 12) throw new Error("一个任务最多只能包含 12 个分镜。");
+  if (version >= 2 && inputShots.length > 12) throw new Error("一个任务最多只能包含 12 个分镜。");
   const shots = version === 1 ? inputShots.slice(0, 12) : inputShots;
   if (!shots.length) throw new Error("至少需要一个分镜。");
 
-  if (version === 2) {
+  if (version >= 2) {
     const characterId = assertAssetId(input.character?.id);
     const model = cleanText(input.settings?.videoModel);
     if (!classifyModel(model)) throw new Error(`视频复刻不支持模型：${model || "未选择"}`);
@@ -93,10 +93,22 @@ function normalizeGenerationRequest(input) {
       if (sceneIds.has(scene.id)) throw new Error(`场景 ID 重复：${scene.id}`);
       sceneIds.add(scene.id);
     }
+    const products = version >= 3 ? (Array.isArray(input.products) ? input.products : []).map((product) => {
+      const id = assertAssetId(product?.id);
+      const prompt = cleanText(product?.prompt);
+      if (!prompt) throw new Error(`产品 ${id} 缺少参考图提示词。`);
+      return { id, prompt };
+    }) : [];
+    const productIds = new Set();
+    for (const product of products) {
+      if (productIds.has(product.id)) throw new Error(`产品 ID 重复：${product.id}`);
+      productIds.add(product.id);
+    }
     return {
-      version: 2,
+      version,
       confirmed: true,
       character: { id: characterId, prompt: characterPrompt },
+      ...(version >= 3 ? { products } : {}),
       scenes,
       settings: {
         imageModel: cleanText(input.settings?.imageModel),
@@ -110,6 +122,13 @@ function normalizeGenerationRequest(input) {
         if (!sceneId) throw new Error(`镜头 ${id} 缺少场景 ID。`);
         assertAssetId(sceneId);
         if (!sceneIds.has(sceneId)) throw new Error(`镜头 ${id} 找不到场景 ID：${sceneId}`);
+        const shotProductIds = version >= 3
+          ? (Array.isArray(shot?.productIds) ? shot.productIds : []).map((productId) => assertAssetId(productId))
+          : [];
+        if (shotProductIds.length > 2) throw new Error(`镜头 ${id} 最多引用 2 个产品。`);
+        for (const productId of shotProductIds) {
+          if (!productIds.has(productId)) throw new Error(`镜头 ${id} 找不到产品 ID：${productId}`);
+        }
         const title = safeSegment(shot?.title, `镜头-${id}`);
         const imagePrompt = cleanText(shot?.imagePrompt || shot?.prompt);
         const videoPrompt = cleanText(shot?.videoPrompt || shot?.prompt);
@@ -118,6 +137,7 @@ function normalizeGenerationRequest(input) {
           id,
           title,
           sceneId,
+          ...(version >= 3 ? { productIds: shotProductIds } : {}),
           duration: Math.max(2, Math.min(15, Number(shot?.duration) || 5)),
           dialogue: cleanText(shot?.dialogue),
           plot: cleanText(shot?.plot),
@@ -165,6 +185,11 @@ function normalizeGenerationRequest(input) {
 function buildGenerationDraft(project, analysis, settings = {}) {
   if (!analysis || typeof analysis !== "object" || Array.isArray(analysis)) throw new Error("AI 分析结果格式错误。");
   const characterId = assertAssetId(analysis.character?.id || "main-character");
+  const products = (Array.isArray(analysis.products) ? analysis.products : []).map((product) => ({
+    id: assertAssetId(product?.id),
+    prompt: cleanText(product?.prompt),
+  }));
+  if (products.some((product) => !product.prompt)) throw new Error("AI 分析生成了无效产品资产。");
   const scenes = (Array.isArray(analysis.scenes) ? analysis.scenes : []).map((scene) => ({
     id: assertAssetId(scene?.id),
     prompt: cleanText(scene?.prompt),
@@ -172,12 +197,13 @@ function buildGenerationDraft(project, analysis, settings = {}) {
   if (!scenes.length || scenes.some((scene) => !scene.prompt)) throw new Error("AI 分析没有生成有效场景资产。");
   const rawShots = Array.isArray(analysis.shots) ? analysis.shots.slice(0, 12) : [];
   const draft = {
-    version: 2,
+    version: 3,
     confirmed: true,
     character: {
       id: characterId,
       prompt: cleanText(analysis.character?.prompt),
     },
+    products,
     scenes,
     settings: {
       imageModel: cleanText(settings.imageModel) || "gpt-image-2",
@@ -188,6 +214,7 @@ function buildGenerationDraft(project, analysis, settings = {}) {
     shots: rawShots.map((shot) => ({
       title: cleanText(shot?.title),
       sceneId: cleanText(shot?.sceneId),
+      productIds: Array.isArray(shot?.productIds) ? shot.productIds.map((id) => cleanText(id)).filter(Boolean) : [],
       duration: Math.max(2, Math.min(15, Number(shot?.endTime) - Number(shot?.startTime) || Number(shot?.duration) || 4)),
       dialogue: cleanText(shot?.dialogue),
       plot: cleanText(shot?.plot),
@@ -214,7 +241,10 @@ function analysisStoryboardMarkdown(project, request) {
   for (const shot of request.shots || []) {
     lines.push(`| ${shot.id}｜${safeSegment(shot.title)} | ${Number(shot.duration).toFixed(1)} 秒 | ${cleanText(shot.plot).replace(/\|/g, "\\|")} | ${cleanText(shot.dialogue).replace(/\|/g, "\\|")} | ${cleanText(shot.environment).replace(/\|/g, "\\|")} | ${cleanText(shot.camera).replace(/\|/g, "\\|")} |`);
   }
-  lines.push("", "## 人物参考提示词", "", request.character.prompt, "", "## 场景参考提示词", "");
+  lines.push("", "## 人物参考提示词", "", request.character.prompt, "", "## 产品参考提示词", "");
+  if (!(request.products || []).length) lines.push("本项目没有需要固定外观的核心产品。", "");
+  for (const product of request.products || []) lines.push(`### ${product.id}`, "", product.prompt, "");
+  lines.push("## 场景参考提示词", "");
   for (const scene of request.scenes || []) lines.push(`### ${scene.id}`, "", scene.prompt, "");
   lines.push("## 分镜生成提示词", "");
   for (const shot of request.shots || []) {
@@ -229,6 +259,7 @@ function dashboardMarkdown(project) {
   const frames = Array.isArray(project.frames) ? project.frames : [];
   const shots = Array.isArray(project.shots) ? project.shots : [];
   const sceneAssets = Array.isArray(project.sceneAssets) ? project.sceneAssets : [];
+  const productAssets = Array.isArray(project.productAssets) ? project.productAssets : [];
   const characterImagePath = project.characterAsset?.imagePath || project.characterImagePath;
   const lines = [
     "---",
@@ -260,9 +291,16 @@ function dashboardMarkdown(project) {
     "",
     characterImagePath ? `![[${characterImagePath}]]` : "等待生成人物三视图。",
     "",
-    "## 场景资产",
+    "## 产品资产",
+    "",
+  "## 场景资产",
     "",
   ];
+  const sceneHeadingIndex = lines.indexOf("## 场景资产");
+  const productLines = productAssets.length
+    ? productAssets.flatMap((asset) => [`### ${safeSegment(asset.id, "产品")}`, "", `![[${asset.imagePath}]]`, ""])
+    : ["本项目没有需要固定外观的核心产品。", ""];
+  lines.splice(sceneHeadingIndex, 0, ...productLines);
   if (!sceneAssets.length) lines.push("等待生成场景参考图。", "");
   for (const asset of sceneAssets) {
     lines.push(`### ${safeSegment(asset.id, "场景")}`, "", `![[${asset.imagePath}]]`, "");

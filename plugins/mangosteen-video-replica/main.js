@@ -712,9 +712,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     if (pending) return pending;
 
     const promise = (async () => {
-      const current = asset.kind === "character"
-        ? referenceAssets.resolveCharacterAsset(this.vaultPath(), asset.id)
-        : referenceAssets.resolveSceneAsset(this.vaultPath(), asset.id);
+      const current = referenceAssets.resolveReferenceAsset(this.vaultPath(), asset.kind, asset.id);
       if (referenceAssets.assetMatchesGenerationSpec(current, generationSpec)) return { ...current, reused: true };
       const candidate = await this.generateImage(imagePlugin, generationSpec.generationPrompt, "", imageModel);
       await this.saveImageCandidate(imagePlugin, candidate, current.imagePath);
@@ -725,9 +723,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         generationPolicyVersion: generationSpec.policyVersion,
         createdAt: new Date().toISOString(),
       });
-      const refreshed = current.kind === "character"
-        ? referenceAssets.resolveCharacterAsset(this.vaultPath(), current.id)
-        : referenceAssets.resolveSceneAsset(this.vaultPath(), current.id);
+      const refreshed = referenceAssets.resolveReferenceAsset(this.vaultPath(), current.kind, current.id);
       return { ...refreshed, reused: false };
     })();
     this.referenceAssetPromises.set(key, promise);
@@ -783,6 +779,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     const project = this.readJson(projectPath);
     const previousShots = new Map((Array.isArray(project.shots) ? project.shots : []).map((shot) => [String(shot.id), shot]));
     const sceneRequestsById = new Map((request.scenes || []).map((scene) => [String(scene.id), scene]));
+    const productRequestsById = new Map((request.products || []).map((product) => [String(product.id), product]));
     const effectiveResolution = String(request.settings.resolution || video.settings.resolution || "").trim();
     const state = { status: "processing", requestMtimeMs, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), currentStep: "人物资产" };
     this.writeState(projectFolder, state);
@@ -793,6 +790,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     project.finalVideoPath = "";
     delete project.concatError;
     project.characterAsset = null;
+    project.productAssets = [];
     project.sceneAssets = [];
     this.saveProject(projectFolder, project);
 
@@ -810,6 +808,26 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       reused: character.reused,
     };
     this.saveProject(projectFolder, project);
+
+    for (const product of request.products || []) {
+      state.currentStep = `产品资产 ${product.id}`;
+      state.updatedAt = new Date().toISOString();
+      this.writeState(projectFolder, state);
+      const resolved = await this.ensureReferenceAsset(
+        image,
+        referenceAssets.resolveProductAsset(this.vaultPath(), product.id),
+        product.prompt,
+        imageModel,
+      );
+      project.productAssets.push({
+        id: resolved.id,
+        imagePath: resolved.imagePath,
+        metadataPath: resolved.metadataPath,
+        contentHash: referenceAssets.hashAssetImage(this.vaultPath(), resolved),
+        reused: resolved.reused,
+      });
+      this.saveProject(projectFolder, project);
+    }
 
     for (const scene of request.scenes) {
       state.currentStep = `场景资产 ${scene.id}`;
@@ -832,15 +850,23 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     }
 
     const sceneAssetsById = new Map(project.sceneAssets.map((asset) => [asset.id, asset]));
+    const productAssetsById = new Map(project.productAssets.map((asset) => [asset.id, asset]));
     project.shots = request.shots.map((shot) => {
       const previous = previousShots.get(String(shot.id));
       const requirements = generationPolicy.referenceRequirements(model, shot.lastImagePrompt);
       const sceneRequest = sceneRequestsById.get(String(shot.sceneId)) || { id: shot.sceneId, prompt: "" };
       const sceneAsset = sceneAssetsById.get(String(shot.sceneId));
       if (!sceneAsset) throw new Error(`镜头 ${shot.id} 找不到场景资产：${shot.sceneId}`);
+      const shotProducts = (shot.productIds || []).map((productId) => {
+        const productRequest = productRequestsById.get(String(productId));
+        const productAsset = productAssetsById.get(String(productId));
+        if (!productRequest || !productAsset) throw new Error(`镜头 ${shot.id} 找不到产品资产：${productId}`);
+        return { ...productRequest, contentHash: productAsset.contentHash };
+      });
       const generationFingerprint = generationPolicy.createGenerationFingerprint({
         character: { ...request.character, contentHash: project.characterAsset.contentHash },
         scene: { ...sceneRequest, contentHash: sceneAsset.contentHash },
+        products: shotProducts,
         shot,
         model,
         ratio: request.settings.ratio,
@@ -886,11 +912,23 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       try {
         const sceneAsset = sceneAssetsById.get(shot.sceneId);
         if (!sceneAsset) throw new Error(`镜头 ${shot.id} 找不到场景资产：${shot.sceneId}`);
-        const referencePaths = [project.characterAsset.imagePath, sceneAsset.imagePath];
+        const shotProductAssets = (shot.productIds || []).map((productId) => {
+          const asset = productAssetsById.get(productId);
+          if (!asset) throw new Error(`镜头 ${shot.id} 找不到产品资产：${productId}`);
+          return asset;
+        });
+        const referencePaths = [
+          project.characterAsset.imagePath,
+          sceneAsset.imagePath,
+          ...shotProductAssets.map((asset) => asset.imagePath),
+        ];
         const continuity = [
           "参考图1是人物设定板：人物身份、脸部、发型、发色、年龄与服装必须严格一致。",
-          "参考图2是纯环境场景板：只参考空间、陈设、道具与光线，不得从中创造或替换人物。",
-          "将参考图1中的人物自然放入参考图2的环境，保持全片人物与场景连续。",
+          "参考图2是纯环境场景板：只参考空间、固定陈设、光线、天气与环境质感，不得从中创造人物或核心产品。",
+          ...shotProductAssets.map((asset, index) => `参考图${index + 3}是产品设定板（${asset.id}）：产品外形、颜色、材质、比例、包装和标识位置必须严格一致。`),
+          shotProductAssets.length
+            ? "将参考图1中的人物和产品设定板中的产品自然放入参考图2的环境，保持全片人物、产品与场景连续。"
+            : "将参考图1中的人物自然放入参考图2的环境，保持全片人物与场景连续。",
         ].join("\n");
         const firstPrompt = `${shot.imagePrompt}\n${continuity}`;
         if (!shot.firstImagePath) {
@@ -964,7 +1002,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     if (!model) {
       throw this.unavailableGenerationModel("video", requestedModel, models);
     }
-    if (request.version === 2) return this.runAssetGeneration(projectFolder, request, requestMtimeMs, { image, video, imageModel, model });
+    if (request.version >= 2) return this.runAssetGeneration(projectFolder, request, requestMtimeMs, { image, video, imageModel, model });
     const projectPath = path.join(this.absolute(projectFolder), "project.json");
     const project = this.readJson(projectPath);
     const state = { status: "processing", requestMtimeMs, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), currentStep: "人物三视图" };

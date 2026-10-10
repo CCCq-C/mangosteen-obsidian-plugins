@@ -19,12 +19,17 @@ function referenceRequirements(model, lastImagePrompt = "") {
   };
 }
 
-function createGenerationFingerprint({ character = {}, scene = {}, shot = {}, model, ratio, resolution } = {}) {
+function createGenerationFingerprint({ character = {}, scene = {}, products = [], shot = {}, model, ratio, resolution } = {}) {
   const requirements = referenceRequirements(model, shot.lastImagePrompt);
   const canonical = {
-    version: 1,
+    version: 2,
     character: { id: clean(character.id), prompt: clean(character.prompt), contentHash: clean(character.contentHash) },
     scene: { id: clean(scene.id), prompt: clean(scene.prompt), contentHash: clean(scene.contentHash) },
+    products: (Array.isArray(products) ? products : []).map((product) => ({
+      id: clean(product?.id),
+      prompt: clean(product?.prompt),
+      contentHash: clean(product?.contentHash),
+    })),
     imagePrompt: clean(shot.imagePrompt),
     lastImagePrompt: clean(shot.lastImagePrompt),
     videoPrompt: clean(shot.videoPrompt),

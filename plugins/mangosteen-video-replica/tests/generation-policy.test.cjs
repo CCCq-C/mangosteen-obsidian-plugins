@@ -88,6 +88,7 @@ for (const model of ["KlingO3", "wan3.0-r2v-k1", "future-video-model"]) {
 const fingerprintInput = {
   character: { id: "hero-v1", prompt: "短发女性，蓝色工装", contentHash: "sha256:character-a" },
   scene: { id: "harbor-v1", prompt: "海边集装箱码头", contentHash: "sha256:scene-a" },
+  products: [{ id: "headphones-v1", prompt: "白色头戴式耳机", contentHash: "sha256:product-a" }],
   shot: {
     imagePrompt: "人物站在红色集装箱前",
     lastImagePrompt: "人物转身看海",
@@ -107,6 +108,7 @@ for (const changed of [
   { scene: { ...fingerprintInput.scene, id: "studio-v1" } },
   { scene: { ...fingerprintInput.scene, prompt: "白色摄影棚" } },
   { scene: { ...fingerprintInput.scene, contentHash: "sha256:scene-b" } },
+  { products: [{ ...fingerprintInput.products[0], contentHash: "sha256:product-b" }] },
   { shot: { ...fingerprintInput.shot, imagePrompt: "人物坐在集装箱前" } },
   { shot: { ...fingerprintInput.shot, lastImagePrompt: "" } },
   { shot: { ...fingerprintInput.shot, videoPrompt: "人物快步跑向镜头" } },

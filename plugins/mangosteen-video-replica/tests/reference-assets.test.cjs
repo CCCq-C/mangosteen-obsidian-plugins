@@ -24,12 +24,22 @@ assert.strictEqual(scene.metadataPath, "山竹视频资产库/场景/harbor/scen
 assert.strictEqual(scene.exists, false);
 
 const emptySceneSpec = assets.createGenerationSpec(scene, "海边集装箱场景。女主在前景，男主坐在后方。关键物件为白色耳机盒。");
-assert.strictEqual(emptySceneSpec.policyVersion, 2);
+assert.strictEqual(emptySceneSpec.policyVersion, 3);
 assert.match(emptySceneSpec.generationPrompt, /纯环境空镜/);
 assert.match(emptySceneSpec.generationPrompt, /海边集装箱场景/);
-assert.match(emptySceneSpec.generationPrompt, /关键物件为白色耳机盒/);
+assert.doesNotMatch(emptySceneSpec.generationPrompt, /关键物件为白色耳机盒|耳机盒/);
 assert.doesNotMatch(emptySceneSpec.generationPrompt, /女主在前景|男主坐在后方/);
 assert.strictEqual(assets.assetMatchesGenerationSpec(scene, emptySceneSpec), false);
+
+const product = assets.resolveProductAsset(vault, "headphones");
+assert.strictEqual(product.folderPath, "山竹视频资产库/产品/headphones");
+assert.strictEqual(product.imagePath, "山竹视频资产库/产品/headphones/产品参考板.png");
+assert.strictEqual(product.metadataPath, "山竹视频资产库/产品/headphones/product.json");
+assert.strictEqual(product.exists, false);
+const productSpec = assets.createGenerationSpec(product, "白色索尼 WH-1000XM5 头戴式耳机和白色包装盒，产品外观固定。");
+assert.match(productSpec.generationPrompt, /纯产品参考板/);
+assert.match(productSpec.generationPrompt, /正面、侧面、背面/);
+assert.match(productSpec.generationPrompt, /禁止出现人物|不得出现人物/);
 
 fs.mkdirSync(path.dirname(path.join(vault, ...scene.imagePath.split("/"))), { recursive: true });
 fs.writeFileSync(path.join(vault, ...scene.imagePath.split("/")), "scene");
@@ -66,6 +76,20 @@ assert.strictEqual(
   true,
   "scene asset must be reused only when its source prompt and generation policy match",
 );
+
+fs.mkdirSync(path.dirname(path.join(vault, ...product.imagePath.split("/"))), { recursive: true });
+fs.writeFileSync(path.join(vault, ...product.imagePath.split("/")), "product");
+assets.writeAssetMetadata(vault, product, {
+  prompt: productSpec.sourcePrompt,
+  sourcePrompt: productSpec.sourcePrompt,
+  generationPrompt: productSpec.generationPrompt,
+  generationPolicyVersion: productSpec.policyVersion,
+});
+const resolvedProduct = assets.resolveProductAsset(vault, "headphones");
+assert.strictEqual(resolvedProduct.exists, true);
+assert.strictEqual(resolvedProduct.metadata.kind, "product");
+assert.strictEqual(assets.assetMatchesGenerationSpec(resolvedProduct, productSpec), true);
+assert.match(assets.hashAssetImage(vault, resolvedProduct), /^sha256:[a-f0-9]{64}$/);
 
 const legacyFolder = path.join(vault, "山竹视频资产库", "人物", "legacy");
 fs.mkdirSync(legacyFolder, { recursive: true });

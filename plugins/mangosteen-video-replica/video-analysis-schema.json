@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["character", "scenes", "shots"],
+  "required": ["character", "products", "scenes", "shots"],
   "properties": {
     "character": {
       "type": "object",
@@ -11,6 +11,19 @@
       "properties": {
         "id": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$" },
         "prompt": { "type": "string", "minLength": 20 }
+      }
+    },
+    "products": {
+      "type": "array",
+      "maxItems": 12,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "prompt"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$" },
+          "prompt": { "type": "string", "minLength": 20 }
+        }
       }
     },
     "scenes": {
@@ -34,10 +47,15 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["title", "sceneId", "startTime", "endTime", "dialogue", "plot", "environment", "camera", "imagePrompt", "lastImagePrompt", "videoPrompt"],
+        "required": ["title", "sceneId", "productIds", "startTime", "endTime", "dialogue", "plot", "environment", "camera", "imagePrompt", "lastImagePrompt", "videoPrompt"],
         "properties": {
           "title": { "type": "string", "minLength": 1 },
           "sceneId": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$" },
+          "productIds": {
+            "type": "array",
+            "maxItems": 2,
+            "items": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$" }
+          },
           "startTime": { "type": "number", "minimum": 0 },
           "endTime": { "type": "number", "exclusiveMinimum": 0 },
           "dialogue": { "type": "string" },

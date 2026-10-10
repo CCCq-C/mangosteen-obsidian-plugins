@@ -565,6 +565,50 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   assert.strictEqual(submittedV2Options.length, 13, "a Seedance effective ratio change must invalidate both saved videos");
   assert(afterRatioChange.shots.every((shot, index) => shot.generationFingerprint !== characterFingerprints[index]), "ratio changes must persist new deterministic fingerprints");
 
+  const generatedV3Folder = "山竹视频复刻/产品资产生成";
+  const generatedV3 = path.join(vault, ...generatedV3Folder.split("/"));
+  fs.mkdirSync(generatedV3, { recursive: true });
+  fs.writeFileSync(path.join(generatedV3, "project.json"), JSON.stringify({ folder: generatedV3Folder, title: "产品资产生成", frames: [], shots: [] }));
+  const generatedV3Prompts = [];
+  const generatedV3Edits = [];
+  const imageV3 = generationImage({
+    generateText: async (prompt) => {
+      generatedV3Prompts.push(prompt);
+      return { candidate: { kind: "base64", value: Buffer.from(`v3:${prompt}`).toString("base64") } };
+    },
+    generateEditMulti: async (prompt, images) => {
+      generatedV3Edits.push({ prompt, references: images.map((file) => file.buffer.toString()) });
+      return { candidate: { kind: "base64", value: Buffer.from(`v3-edit:${prompt}`).toString("base64") } };
+    },
+    extractResults: (response) => response?.candidate ? [response.candidate] : [],
+  });
+  const videoV3 = {
+    settings: { model: "MiniMax-H3", resolution: "768p" },
+    refreshAgentAccess: async () => ({ videoModelKeys: { "MiniMax-H3": "test-key" } }),
+    submitVideo: async () => ({ id: "task-v3" }),
+  };
+  plugin.getGenerationPlugins = () => ({ image: imageV3, video: videoV3 });
+  await plugin.runGeneration(generatedV3Folder, {
+    version: 3,
+    confirmed: true,
+    character: { id: "v3-hero", prompt: "固定人物参考板" },
+    products: [{ id: "headphones", prompt: "白色头戴式耳机与白色包装盒，产品外观固定" }],
+    scenes: [{ id: "v3-studio", prompt: "纯白摄影棚，弧形背景墙和左侧柔光灯。关键产品是白色耳机盒。" }],
+    settings: { ratio: "9:16", resolution: "768p", videoModel: "MiniMax-H3" },
+    shots: [{ id: "001", title: "产品展示", sceneId: "v3-studio", productIds: ["headphones"], duration: 4, imagePrompt: "人物手持白色耳机盒", videoPrompt: "人物举起耳机盒" }],
+  }, 470);
+  assert.strictEqual(generatedV3Prompts.length, 3);
+  assert.match(generatedV3Prompts[0], /固定人物参考板/);
+  assert.match(generatedV3Prompts[1], /纯产品参考板/);
+  assert.match(generatedV3Prompts[2], /纯环境空镜/);
+  assert.doesNotMatch(generatedV3Prompts[2], /关键产品|耳机盒/);
+  assert.strictEqual(generatedV3Edits.length, 1);
+  assert.strictEqual(generatedV3Edits[0].references.length, 3);
+  assert.match(generatedV3Edits[0].prompt, /参考图3是产品设定板/);
+  const completedV3 = JSON.parse(fs.readFileSync(path.join(generatedV3, "project.json"), "utf8"));
+  assert.strictEqual(completedV3.productAssets[0].imagePath, "山竹视频资产库/产品/headphones/产品参考板.png");
+  assert(fs.existsSync(path.join(vault, "山竹视频资产库", "产品", "headphones", "product.json")));
+
   const concurrentFolders = ["山竹视频复刻/并发任务一", "山竹视频复刻/并发任务二"];
   for (const folder of concurrentFolders) {
     const absoluteFolder = path.join(vault, ...folder.split("/"));

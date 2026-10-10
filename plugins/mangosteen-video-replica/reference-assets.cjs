@@ -3,10 +3,17 @@ const path = require("path");
 const crypto = require("crypto");
 
 const ROOT = "山竹视频资产库";
-const SCENE_GENERATION_POLICY_VERSION = 2;
+const SCENE_GENERATION_POLICY_VERSION = 3;
+const PRODUCT_GENERATION_POLICY_VERSION = 1;
 const WINDOWS_RESERVED_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
 const SAFE_ID = /^[\p{L}\p{N}][\p{L}\p{N}_-]{0,63}$/u;
 const HUMAN_CLAUSE = /(女主|男主|人物|两人|二人|女孩|男孩|女子|男子|女生|男生|哥哥|妹妹|情侣|行人|人群|模特|角色)/;
+const PRODUCT_CLAUSE = /(关键物件|关键产品|核心产品|产品(?:展示|特写|信息)|(?:包装盒|耳机盒|品牌商品).*(?:清晰可见|特写|关键|展示))/;
+const KIND_CONFIG = {
+  character: { folder: "人物", image: "人物参考板.png", metadata: "character.json", label: "人物" },
+  product: { folder: "产品", image: "产品参考板.png", metadata: "product.json", label: "产品" },
+  scene: { folder: "场景", image: "场景参考图.png", metadata: "scene.json", label: "场景" },
+};
 
 function assertAssetId(value) {
   const id = String(value ?? "").trim().normalize("NFKC");
@@ -26,15 +33,28 @@ function environmentOnlyDescription(value) {
     .split(/(?<=[。！？；;])|[，,]/u)
     .map((part) => part.trim())
     .filter(Boolean)
-    .filter((part) => !HUMAN_CLAUSE.test(part));
+    .filter((part) => !HUMAN_CLAUSE.test(part) && !PRODUCT_CLAUSE.test(part));
   return clauses.join("，").replace(/，([。！？；;])/gu, "$1").trim();
 }
 
 function createGenerationSpec(asset, prompt) {
   const sourcePrompt = cleanPrompt(prompt);
-  if (!sourcePrompt) throw new Error(`${asset?.kind === "scene" ? "场景" : "人物"}资产缺少生成提示词。`);
-  if (asset?.kind !== "scene") {
+  const kind = KIND_CONFIG[asset?.kind] ? asset.kind : "character";
+  if (!sourcePrompt) throw new Error(`${KIND_CONFIG[kind].label}资产缺少生成提示词。`);
+  if (kind === "character") {
     return { sourcePrompt, generationPrompt: sourcePrompt, policyVersion: 1 };
+  }
+  if (kind === "product") {
+    return {
+      sourcePrompt,
+      policyVersion: PRODUCT_GENERATION_POLICY_VERSION,
+      generationPrompt: [
+        "纯产品参考板。使用简洁中性背景，禁止出现人物、手、身体、生活场景或无关道具。",
+        "在同一张图中清楚展示产品正面、侧面、背面和关键细节，固定外形、颜色、材质、比例、包装与明确写出的品牌标识位置。",
+        sourcePrompt,
+        "这是后续镜头复用的产品身份板，不要改变产品型号，不要添加原描述没有的配件、文字或装饰。",
+      ].join("\n"),
+    };
   }
   const environment = environmentOnlyDescription(sourcePrompt) || "保留原描述中的建筑、陈设、自然环境、光线、道具与空间关系。";
   return {
@@ -42,7 +62,7 @@ function createGenerationSpec(asset, prompt) {
     policyVersion: SCENE_GENERATION_POLICY_VERSION,
     generationPrompt: [
       "纯环境空镜参考图。画面中禁止出现任何人、人体、脸、手、剪影、倒影或人物照片。",
-      "只生成建筑、自然环境、陈设、光线、道具与空间布局；忽略原描述中的人物位置、动作、服装和关系。",
+      "只生成建筑、自然环境、固定陈设、光线、天气与空间布局；忽略人物以及可单独引用的核心产品、品牌包装和产品位置。",
       environment,
       "这是后续合成人物使用的干净场景板，保持写实、空间清楚、光线统一。",
     ].join("\n"),
@@ -53,7 +73,7 @@ function assetMatchesGenerationSpec(asset, spec) {
   if (!asset?.exists || !asset.metadata || !spec) return false;
   const storedSource = cleanPrompt(asset.metadata.sourcePrompt || asset.metadata.prompt);
   if (storedSource !== spec.sourcePrompt) return false;
-  if (asset.kind === "scene") {
+  if (asset.kind === "scene" || asset.kind === "product") {
     return Number(asset.metadata.generationPolicyVersion) === Number(spec.policyVersion);
   }
   return true;
@@ -95,13 +115,12 @@ function checkedAssetPath(vaultRoot, vaultPath) {
 }
 
 function resolveAsset(vaultRoot, kind, value) {
+  const config = KIND_CONFIG[kind];
+  if (!config) throw new Error(`不支持的资产类型：${String(kind || "未填写")}`);
   const id = assertAssetId(value);
-  const typeFolder = kind === "character" ? "人物" : "场景";
-  const imageName = kind === "character" ? "人物参考板.png" : "场景参考图.png";
-  const metadataName = kind === "character" ? "character.json" : "scene.json";
-  const folderPath = `${ROOT}/${typeFolder}/${id}`;
-  const imagePath = `${folderPath}/${imageName}`;
-  const canonicalMetadataPath = `${folderPath}/${metadataName}`;
+  const folderPath = `${ROOT}/${config.folder}/${id}`;
+  const imagePath = `${folderPath}/${config.image}`;
+  const canonicalMetadataPath = `${folderPath}/${config.metadata}`;
   const legacyMetadataPath = `${folderPath}/metadata.json`;
   const imageAbsolutePath = checkedAssetPath(vaultRoot, imagePath);
   const canonicalMetadataAbsolutePath = checkedAssetPath(vaultRoot, canonicalMetadataPath);
@@ -129,10 +148,16 @@ function resolveSceneAsset(vaultRoot, id) {
   return resolveAsset(vaultRoot, "scene", id);
 }
 
+function resolveProductAsset(vaultRoot, id) {
+  return resolveAsset(vaultRoot, "product", id);
+}
+
+function resolveReferenceAsset(vaultRoot, kind, id) {
+  return resolveAsset(vaultRoot, kind, id);
+}
+
 function writeAssetMetadata(vaultRoot, asset, metadata = {}) {
-  const canonical = asset?.kind === "character"
-    ? resolveCharacterAsset(vaultRoot, asset.id)
-    : resolveSceneAsset(vaultRoot, asset?.id);
+  const canonical = resolveReferenceAsset(vaultRoot, asset?.kind, asset?.id);
   const payload = {
     ...metadata,
     version: 1,
@@ -140,7 +165,7 @@ function writeAssetMetadata(vaultRoot, asset, metadata = {}) {
     id: canonical.id,
     imagePath: canonical.imagePath,
   };
-  const canonicalMetadataPath = `${canonical.folderPath}/${canonical.kind === "character" ? "character.json" : "scene.json"}`;
+  const canonicalMetadataPath = `${canonical.folderPath}/${KIND_CONFIG[canonical.kind].metadata}`;
   let metadataPath = checkedAssetPath(vaultRoot, canonicalMetadataPath);
   fs.mkdirSync(path.dirname(metadataPath), { recursive: true });
   metadataPath = checkedAssetPath(vaultRoot, canonicalMetadataPath);
@@ -153,9 +178,7 @@ function writeAssetMetadata(vaultRoot, asset, metadata = {}) {
 }
 
 function hashAssetImage(vaultRoot, asset) {
-  const resolved = asset?.kind === "character"
-    ? resolveCharacterAsset(vaultRoot, asset.id)
-    : resolveSceneAsset(vaultRoot, asset?.id);
+  const resolved = resolveReferenceAsset(vaultRoot, asset?.kind, asset?.id);
   const absolutePath = checkedAssetPath(vaultRoot, resolved.imagePath);
   if (!fs.statSync(absolutePath, { throwIfNoEntry: false })?.isFile()) throw new Error(`资产图片不存在：${resolved.imagePath}`);
   return `sha256:${crypto.createHash("sha256").update(fs.readFileSync(absolutePath)).digest("hex")}`;
@@ -168,6 +191,8 @@ module.exports = {
   createGenerationSpec,
   hashAssetImage,
   resolveCharacterAsset,
+  resolveProductAsset,
+  resolveReferenceAsset,
   resolveSceneAsset,
   writeAssetMetadata,
 };
