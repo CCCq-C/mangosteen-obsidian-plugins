@@ -539,8 +539,8 @@ class VideoReplicaWorkbenchView extends ItemView {
       this.setFeedback(validation.errors.map((error) => `${error.path}：${error.message}`).join("；"));
       return false;
     }
-    await this.plugin.saveWorkbenchDraft(this.selectedFolder, validation.value);
-    this.draft = clone(validation.value);
+    const savedDraft = await this.plugin.saveWorkbenchDraft(this.selectedFolder, this.draft);
+    this.draft = clone(savedDraft || this.draft);
     this.dirty = false;
     this.feedback = "草案已保存。";
     await this.refresh({ force: true });

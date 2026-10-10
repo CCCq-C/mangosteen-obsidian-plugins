@@ -381,12 +381,14 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       })),
     };
     const project = this.readJson(paths.projectPath);
-    const currentShots = Array.isArray(project.shots) ? project.shots : [];
+    const currentShots = Array.isArray(project.shots)
+      ? withWorkbenchShotIds({ shots: project.shots }).shots
+      : [];
     const currentShotsByWorkbenchId = new Map();
     for (const shot of currentShots) {
       if (!shot || typeof shot !== "object" || Array.isArray(shot)) continue;
-      const workbenchId = String(shot.workbenchId || shot.id || "").trim();
-      if (workbenchId && !currentShotsByWorkbenchId.has(workbenchId)) currentShotsByWorkbenchId.set(workbenchId, shot);
+      const workbenchId = String(shot.workbenchId || "").trim();
+      if (workbenchId) currentShotsByWorkbenchId.set(workbenchId, shot);
     }
     project.shots = savedRequest.shots.map((shot) => {
       const previous = currentShotsByWorkbenchId.get(shot.workbenchId);

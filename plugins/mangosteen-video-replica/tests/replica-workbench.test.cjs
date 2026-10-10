@@ -284,6 +284,71 @@ function createView(plugin) {
   assert.deepStrictEqual(clearedTimers, [1]);
   assert.strictEqual(resizeObservers[0].disconnected, true);
 
+  const duplicateIdentityRequest = {
+    ...clone(request),
+    shots: [
+      { ...clone(request.shots[0]), id: "001", workbenchId: "001", title: "A 草案" },
+      { ...clone(request.shots[0]), id: "001", workbenchId: "001~2", title: "B 草案", dialogue: "B 台词" },
+    ],
+  };
+  const duplicateIdentityPlugin = createPlugin({
+    ...clone(readySnapshot),
+    request: duplicateIdentityRequest,
+    project: {
+      ...clone(readySnapshot.project),
+      shots: [
+        { id: "001", workbenchId: "001", title: "A 草案" },
+        { id: "001", workbenchId: "001~2", title: "B 草案" },
+      ],
+    },
+  });
+  const duplicateIdentityView = createView(duplicateIdentityPlugin);
+  await duplicateIdentityView.onOpen();
+  duplicateIdentityView.reorderShot(1, "up");
+  await duplicateIdentityView.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "分镜").dispatch("click");
+  const reorderedTitleInput = duplicateIdentityView.contentEl.find((element) => (
+    element.tagName === "INPUT"
+      && element.dataset.section === "shot"
+      && element.dataset.index === "0"
+      && element.dataset.field === "title"
+  ));
+  assert(reorderedTitleInput, "the reordered first shot title input should render");
+  reorderedTitleInput.value = "B 视图编辑";
+  await reorderedTitleInput.dispatch("input");
+  await duplicateIdentityView.saveDraft();
+  assert.deepStrictEqual(
+    duplicateIdentityPlugin.saveCalls[0].request.shots.map((shot) => ({
+      id: shot.id,
+      workbenchId: shot.workbenchId,
+      title: shot.title,
+    })),
+    [
+      { id: "001", workbenchId: "001~2", title: "B 视图编辑" },
+      { id: "002", workbenchId: "001", title: "A 草案" },
+    ],
+    "the real View save route must pass the original enriched draft to the plugin",
+  );
+  assert.deepStrictEqual(
+    duplicateIdentityView.draft.shots.map((shot) => shot.workbenchId),
+    ["001~2", "001"],
+    "the reloaded View draft must retain stable identities after save",
+  );
+  const secondViewTitleInput = duplicateIdentityView.contentEl.find((element) => (
+    element.tagName === "INPUT"
+      && element.dataset.section === "shot"
+      && element.dataset.index === "0"
+      && element.dataset.field === "title"
+  ));
+  secondViewTitleInput.value = "B 视图二次编辑";
+  await secondViewTitleInput.dispatch("input");
+  await duplicateIdentityView.saveDraft();
+  assert.deepStrictEqual(
+    duplicateIdentityPlugin.saveCalls[1].request.shots.map((shot) => shot.workbenchId),
+    ["001~2", "001"],
+    "a second real View save must retain the same stable identities",
+  );
+  await duplicateIdentityView.onClose();
+
   const unavailablePlugin = createPlugin();
   const unavailableView = createView(unavailablePlugin);
   await unavailableView.onOpen();

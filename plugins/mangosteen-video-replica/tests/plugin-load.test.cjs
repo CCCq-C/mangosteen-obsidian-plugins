@@ -21,6 +21,8 @@ Module._load = function patchedLoad(request, parent, isMain) {
 };
 
 const ReplicaPlugin = require("../main.js");
+const replicaCore = require("../replica-core.cjs");
+const replicaEditor = require("../replica-editor.cjs");
 const plugin = new ReplicaPlugin();
 assert.strictEqual(typeof ReplicaPlugin, "function");
 assert.strictEqual(typeof plugin.prepareVideo, "function");
@@ -131,7 +133,7 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
         generationFingerprint: "fingerprint-A",
       },
       {
-        id: "002",
+        id: "001",
         title: "B 旧标题",
         firstImagePath: `${workbenchFolder}/02-分镜脚本/B.png`,
         videoPath: `${workbenchFolder}/03-视频片段/B.mp4`,
@@ -163,7 +165,7 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
         videoPrompt: "A 视频",
       },
       {
-        id: "002",
+        id: "001",
         title: "B 草案",
         duration: 5,
         sceneId: "studio",
@@ -190,8 +192,8 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   assert.strictEqual(loadedWorkbenchProject.project.title, "驾驶舱草案");
   assert.deepStrictEqual(
     loadedWorkbenchProject.request.shots.map((shot) => shot.workbenchId),
-    ["001", "002"],
-    "legacy request IDs must become stable internal workbench identities",
+    ["001", "001~2"],
+    "duplicate legacy request IDs must become deterministic per-occurrence workbench identities",
   );
 
   const malformedFolder = "山竹视频复刻/损坏项目";
@@ -203,14 +205,45 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   const malformed = await plugin.loadWorkbenchProject(malformedFolder);
   assert.deepStrictEqual(Object.keys(malformed.readErrors).sort(), ["generationState", "project", "request"]);
 
-  const reorderedWorkbenchDraft = {
-    ...loadedWorkbenchProject.request,
-    shots: [
-      { ...loadedWorkbenchProject.request.shots[1], id: "001", title: "B 新标题", dialogue: "B 已编辑" },
-      { ...loadedWorkbenchProject.request.shots[0], id: "002", title: "A 新标题", dialogue: "A 已编辑" },
-    ],
+  const integratedWorkbenchView = registeredViews[0].creator({});
+  integratedWorkbenchView.selectedFolder = workbenchFolder;
+  integratedWorkbenchView.snapshot = loadedWorkbenchProject;
+  integratedWorkbenchView.draft = loadedWorkbenchProject.request;
+  integratedWorkbenchView.viewModel = { empty: false, locked: false, canConfirm: true };
+  integratedWorkbenchView.render = () => {};
+  integratedWorkbenchView.buildRenderSignature = () => "integration-test";
+  let integratedViewReloads = 0;
+  integratedWorkbenchView.refresh = async () => {
+    const reloaded = await plugin.loadWorkbenchProject(workbenchFolder);
+    integratedWorkbenchView.snapshot = reloaded;
+    integratedWorkbenchView.draft = reloaded.request;
+    integratedWorkbenchView.viewModel = { empty: false, locked: false, canConfirm: true };
+    integratedViewReloads += 1;
   };
-  await plugin.saveWorkbenchDraft(workbenchFolder, reorderedWorkbenchDraft);
+  integratedWorkbenchView.reorderShot(1, "up");
+  integratedWorkbenchView.draft = replicaEditor.updateDraftField(
+    integratedWorkbenchView.draft,
+    { section: "shot", index: 0, field: "title" },
+    "B 新标题",
+  );
+  integratedWorkbenchView.draft = replicaEditor.updateDraftField(
+    integratedWorkbenchView.draft,
+    { section: "shot", index: 0, field: "dialogue" },
+    "B 已编辑",
+  );
+  integratedWorkbenchView.draft = replicaEditor.updateDraftField(
+    integratedWorkbenchView.draft,
+    { section: "shot", index: 1, field: "title" },
+    "A 新标题",
+  );
+  integratedWorkbenchView.draft = replicaEditor.updateDraftField(
+    integratedWorkbenchView.draft,
+    { section: "shot", index: 1, field: "dialogue" },
+    "A 已编辑",
+  );
+  integratedWorkbenchView.dirty = true;
+  await integratedWorkbenchView.saveDraft();
+  assert.strictEqual(integratedViewReloads, 1, "the real View save route must reload the persisted draft");
   const savedWorkbenchRequest = JSON.parse(fs.readFileSync(workbenchRequestPath, "utf8"));
   assert.strictEqual(savedWorkbenchRequest.confirmed, false);
   assert.deepStrictEqual(savedWorkbenchRequest.shots.map((shot) => ({
@@ -218,7 +251,7 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
     title: shot.title,
     workbenchId: shot.workbenchId,
   })), [
-    { id: "001", title: "B 新标题", workbenchId: "002" },
+    { id: "001", title: "B 新标题", workbenchId: "001~2" },
     { id: "002", title: "A 新标题", workbenchId: "001" },
   ]);
   const savedWorkbenchProject = JSON.parse(fs.readFileSync(path.join(workbenchRoot, "project.json"), "utf8"));
@@ -233,7 +266,7 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
     {
       title: "B 新标题",
       dialogue: "B 已编辑",
-      workbenchId: "002",
+      workbenchId: "001~2",
       firstImagePath: `${workbenchFolder}/02-分镜脚本/B.png`,
       videoPath: `${workbenchFolder}/03-视频片段/B.mp4`,
       generationFingerprint: "fingerprint-B",
@@ -247,6 +280,64 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
       generationFingerprint: "fingerprint-A",
     },
   ], "reordering and editing must keep each logical shot's artifacts attached to its stable identity");
+
+  const normalizedGenerationRequest = replicaCore.normalizeGenerationRequest({ ...savedWorkbenchRequest, confirmed: true });
+  assert.deepStrictEqual(
+    normalizedGenerationRequest.shots.map((shot) => shot.id),
+    ["001", "002"],
+    "internal workbench identity must not alter user-visible generation shot IDs",
+  );
+  assert(
+    normalizedGenerationRequest.shots.every((shot) => !Object.prototype.hasOwnProperty.call(shot, "workbenchId")),
+    "internal workbench identity must not enter normalized generation inputs",
+  );
+
+  const reloadedWorkbenchProject = await plugin.loadWorkbenchProject(workbenchFolder);
+  assert.deepStrictEqual(
+    reloadedWorkbenchProject.request.shots.map((shot) => shot.workbenchId),
+    ["001~2", "001"],
+    "saved workbench identities must survive reload in reordered order",
+  );
+  integratedWorkbenchView.draft = replicaEditor.updateDraftField(
+    integratedWorkbenchView.draft,
+    { section: "shot", index: 0, field: "title" },
+    "B 二次编辑",
+  );
+  integratedWorkbenchView.dirty = true;
+  await integratedWorkbenchView.saveDraft();
+  assert.strictEqual(integratedViewReloads, 2, "the second real View save must reload the same stable identities");
+  const secondSavedWorkbenchRequest = JSON.parse(fs.readFileSync(workbenchRequestPath, "utf8"));
+  assert.deepStrictEqual(
+    secondSavedWorkbenchRequest.shots.map((shot) => ({ id: shot.id, workbenchId: shot.workbenchId })),
+    [
+      { id: "001", workbenchId: "001~2" },
+      { id: "002", workbenchId: "001" },
+    ],
+    "a second save must persist stable identities without renumbering them",
+  );
+  const secondSavedWorkbenchProject = JSON.parse(fs.readFileSync(path.join(workbenchRoot, "project.json"), "utf8"));
+  assert.deepStrictEqual(secondSavedWorkbenchProject.shots.map((shot) => ({
+    title: shot.title,
+    workbenchId: shot.workbenchId,
+    firstImagePath: shot.firstImagePath,
+    videoPath: shot.videoPath,
+    generationFingerprint: shot.generationFingerprint,
+  })), [
+    {
+      title: "B 二次编辑",
+      workbenchId: "001~2",
+      firstImagePath: `${workbenchFolder}/02-分镜脚本/B.png`,
+      videoPath: `${workbenchFolder}/03-视频片段/B.mp4`,
+      generationFingerprint: "fingerprint-B",
+    },
+    {
+      title: "A 新标题",
+      workbenchId: "001",
+      firstImagePath: `${workbenchFolder}/02-分镜脚本/A.png`,
+      videoPath: `${workbenchFolder}/03-视频片段/A.mp4`,
+      generationFingerprint: "fingerprint-A",
+    },
+  ], "reload and second save must keep artifacts with each duplicate-ID logical shot");
 
   fs.writeFileSync(workbenchRequestPath, JSON.stringify({ ...savedWorkbenchRequest, confirmed: true }));
   await assert.rejects(() => plugin.saveWorkbenchDraft(workbenchFolder, savedWorkbenchRequest), /已确认|不能编辑/);
