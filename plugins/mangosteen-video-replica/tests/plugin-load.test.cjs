@@ -37,6 +37,7 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   global.window = { setInterval: () => 1, setTimeout: () => 1 };
   await plugin.onload();
   assert(commandIds.includes("analyze-latest-project"));
+  assert(commandIds.includes("select-analysis-model"));
   assert(commandIds.includes("confirm-latest-generation"));
   assert(commandIds.includes("concat-latest-project"));
   plugin.app.plugins = { getPlugin: () => ({ settings: { model: "MiniMax-H3", resolution: "720p" } }) };
@@ -75,17 +76,29 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
     }],
   }, model: "山竹当前模型" };
   const agent = {
+    getLanguageModelCatalog: () => ({
+      ready: true,
+      activeGroup: "default",
+      activeModel: "fallback-model",
+      groups: [
+        { id: "default", label: "默认", ratio: 1, models: ["fallback-model"] },
+        { id: "gpt_plus", label: "GPT", ratio: 1, models: ["gpt-5.6-sol", "gpt-5.6-terra"] },
+      ],
+    }),
     analyzeStructured: async (options) => {
       structuredCalls.push(options);
       return agentResult;
     },
   };
   plugin.app.plugins = { getPlugin: (id) => id === "mangosteen-agent" ? agent : id === "mangosteen-video" ? { settings: { model: "MiniMax-H3", resolution: "768p" } } : null };
+  plugin.settings = { analysisGroup: "gpt_plus", analysisModel: "gpt-5.6-sol" };
   plugin.openVaultPath = async () => true;
   const analyzedByAgent = await plugin.analyzeProject(analysisFolder);
   assert.strictEqual(structuredCalls.length, 1, "analysis must call the Mangosteen Agent exactly once");
   assert.strictEqual(structuredCalls[0].images.length, 2, "analysis must pass sampled local frames to the Mangosteen Agent");
   assert.strictEqual(structuredCalls[0].schemaName, "video_replica_analysis");
+  assert.strictEqual(structuredCalls[0].group, "gpt_plus");
+  assert.strictEqual(structuredCalls[0].model, "gpt-5.6-sol");
   assert.match(structuredCalls[0].prompt, /你好/, "analysis must include the local Whisper transcript in the model prompt");
   assert.strictEqual(analyzedByAgent.request.confirmed, false);
   assert.strictEqual(analyzedByAgent.project.analysisProvider, "mangosteen-agent");
@@ -94,6 +107,21 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
     agentResult.data,
     "the latest model response must be retained for diagnosis",
   );
+
+  const unavailableModel = Object.assign(new Error("模型路由不存在"), {
+    code: "REMOTE_REJECTED",
+    status: 404,
+    changeModel: true,
+  });
+  plugin.app.plugins = { getPlugin: (id) => id === "mangosteen-agent"
+    ? { getLanguageModelCatalog: agent.getLanguageModelCatalog, analyzeStructured: async () => { throw unavailableModel; } }
+    : id === "mangosteen-video" ? { settings: { model: "MiniMax-H3", resolution: "768p" } } : null };
+  await assert.rejects(() => plugin.analyzeProject(analysisFolder), /请更换分析模型后重试/);
+  const modelErrorProject = JSON.parse(fs.readFileSync(path.join(analysisRoot, "project.json"), "utf8"));
+  assert.strictEqual(modelErrorProject.status, "analysis_model_error");
+  assert.strictEqual(modelErrorProject.analysisErrorCode, "REMOTE_REJECTED");
+  assert.match(modelErrorProject.statusText, /gpt-5\.6-sol.*请更换分析模型/);
+  plugin.app.plugins = { getPlugin: (id) => id === "mangosteen-agent" ? agent : id === "mangosteen-video" ? { settings: { model: "MiniMax-H3", resolution: "768p" } } : null };
 
   plugin.concatProject = async (value) => {
     const output = `${value.folder}/04-最终成片/最终成片.mp4`;

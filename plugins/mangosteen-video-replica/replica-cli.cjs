@@ -310,7 +310,7 @@ function analysisPrompt(project, transcriptText = "") {
   ].join("\n");
 }
 
-function applyAnalysis({ projectFolder, vaultPath, analysis, settings = {}, analysisProvider = "mangosteen-agent", analysisModel = "" } = {}) {
+function applyAnalysis({ projectFolder, vaultPath, analysis, settings = {}, analysisProvider = "mangosteen-agent", analysisGroup = "", analysisModel = "" } = {}) {
   const vault = path.resolve(String(vaultPath || ""));
   if (!fs.statSync(vault, { throwIfNoEntry: false })?.isDirectory()) throw new Error("找不到 Obsidian 知识库目录。");
   const folder = core.normalizeVaultPath(projectFolder);
@@ -326,7 +326,11 @@ function applyAnalysis({ projectFolder, vaultPath, analysis, settings = {}, anal
   project.statusText = "山竹智能体分析完成，等待确认生成";
   project.videoModel = request.settings.videoModel;
   project.analysisProvider = analysisProvider;
+  project.analysisGroup = String(analysisGroup || "");
   project.analysisModel = String(analysisModel || "");
+  delete project.analysisErrorCode;
+  delete project.analysisErrorStatus;
+  delete project.analysisErrorAt;
   project.shots = request.shots.map((shot) => ({ ...shot, status: "等待确认", imagePath: "", videoPath: "", error: "" }));
   writeJson(outputPath, analysis);
   writeJson(projectPath, project);

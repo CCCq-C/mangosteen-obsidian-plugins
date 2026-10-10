@@ -67,6 +67,10 @@ assert.match(patched, /item\?\.type === "function_call"/);
 assert.match(patched, /const text = responseText\(result\.response\.json\)/);
 assert.doesNotMatch(patched, /function structuredResponseText/);
 assert.match(patched, /plugin\.analyzeStructured = analyzeStructured/);
+assert.match(patched, /function getLanguageModelCatalog/);
+assert.match(patched, /const requestedGroup = String\(options\.group/);
+assert.match(patched, /function structuredAnalysisError/);
+assert.match(patched, /plugin\.getLanguageModelCatalog = getLanguageModelCatalog/);
 assert.strictEqual(patchMangosteenAgentMain(patched), patched, "patch must be idempotent");
 assert.throws(() => patchMangosteenAgentMain("unrelated bundle"), /无法定位山竹智能体/);
 
@@ -77,7 +81,11 @@ const retryUpload = `    for (let index = 0; index < images.length; index += 1) 
         if (uploaded.ok || uploaded.code !== "NETWORK_UNAVAILABLE" || attempt === 3) break;
         await new Promise((resolve) => setTimeout(resolve, attempt * 350));
       }
-      if (!uploaded?.ok) throw new Error("第 " + (index + 1) + " 张参考图上传失败：" + structuredAnalysisFailureMessage(uploaded));
+      if (!uploaded?.ok) {
+        const uploadError = structuredAnalysisError(uploaded, false);
+        uploadError.message = "第 " + (index + 1) + " 张参考图上传失败：" + uploadError.message;
+        throw uploadError;
+      }
       content.push({ type: "input_image", image_url: uploaded.url });
     }`;
 const simpleUpload = `    for (const image of images) {
@@ -96,7 +104,7 @@ const retryModel = `    let result;
       if (result.ok || result.code !== "NETWORK_UNAVAILABLE" || attempt === 2) break;
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
-    if (!result?.ok) throw new Error(structuredAnalysisFailureMessage(result));`;
+    if (!result?.ok) throw structuredAnalysisError(result);`;
 const simpleModel = `    const result = await api.createLanguageResponse(
       key,
       model,
@@ -119,7 +127,7 @@ const tolerantParser = `  function parseStructuredAnalysis(text) {
         if (value && typeof value === "object" && !Array.isArray(value)) return value;
       } catch (_) {}
     }
-    throw new Error("山竹模型已返回内容，但结构化结果无法读取，请重新分析。");
+    throw structuredAnalysisError({ code: "INVALID_RESPONSE", detail: "结构化结果无法读取" }, true);
   }`;
 const strictParser = `  function parseStructuredAnalysis(text) {
     const fence = String.fromCharCode(96).repeat(3);
@@ -181,26 +189,26 @@ const legacyStructuredHelper = `  function structuredResponseText(value) {
 
 `;
 const legacyV6 = patched
-  .replace("/* mangosteen-structured-analysis-v7 */", `/* mangosteen-structured-analysis-v6 */\n${legacyStructuredHelper.trimEnd()}`)
+  .replace("/* mangosteen-structured-analysis-v8 */", `/* mangosteen-structured-analysis-v6 */\n${legacyStructuredHelper.trimEnd()}`)
   .replace(functionCallResponseReader, regularResponseReader)
   .replace("const text = responseText(result.response.json);", "const text = structuredResponseText(result.response.json);");
 const upgradedV6 = patchMangosteenAgentMain(legacyV6);
-assert.match(upgradedV6, /mangosteen-structured-analysis-v7/);
+assert.match(upgradedV6, /mangosteen-structured-analysis-v8/);
 assert.match(upgradedV6, /item\?\.type === "function_call"/);
 assert.doesNotMatch(upgradedV6, /function structuredResponseText/);
 
 const legacyV5 = patched
-  .replace("/* mangosteen-structured-analysis-v7 */", "/* mangosteen-structured-analysis-v5 */")
+  .replace("/* mangosteen-structured-analysis-v8 */", "/* mangosteen-structured-analysis-v5 */")
   .replace(functionCallResponseReader, regularResponseReader);
 const upgradedV5 = patchMangosteenAgentMain(legacyV5);
-assert.match(upgradedV5, /mangosteen-structured-analysis-v7/);
+assert.match(upgradedV5, /mangosteen-structured-analysis-v8/);
 assert.match(upgradedV5, /item\?\.type === "function_call"/);
 
 const legacyV4 = legacyV5
   .replace("/* mangosteen-structured-analysis-v5 */", "/* mangosteen-structured-analysis-v4 */")
   .replace(tolerantParser, strictParser);
 const upgradedV4 = patchMangosteenAgentMain(legacyV4);
-assert.match(upgradedV4, /mangosteen-structured-analysis-v7/);
+assert.match(upgradedV4, /mangosteen-structured-analysis-v8/);
 assert.match(upgradedV4, /const candidates = \[cleaned\]/);
 
 const legacyV3 = legacyV4
@@ -208,7 +216,7 @@ const legacyV3 = legacyV4
   .replace('images.length > 10', 'images.length > 12')
   .replace('最多支持 10 张参考图', '最多支持 12 张参考图');
 const upgradedV3 = patchMangosteenAgentMain(legacyV3);
-assert.match(upgradedV3, /mangosteen-structured-analysis-v7/);
+assert.match(upgradedV3, /mangosteen-structured-analysis-v8/);
 assert.match(upgradedV3, /images\.length > 10/);
 
 const legacyV2 = legacyV3
@@ -216,7 +224,7 @@ const legacyV2 = legacyV3
   .replace(retryUpload, simpleUpload)
   .replace(retryModel, simpleModel);
 const upgradedV2 = patchMangosteenAgentMain(legacyV2);
-assert.match(upgradedV2, /mangosteen-structured-analysis-v7/);
+assert.match(upgradedV2, /mangosteen-structured-analysis-v8/);
 assert.match(upgradedV2, /attempt <= 3/);
 
 const legacyV1 = legacyV2.replace("/* mangosteen-structured-analysis-v2 */", "/* mangosteen-structured-analysis-v1 */")
@@ -235,7 +243,7 @@ const legacyV1 = legacyV2.replace("/* mangosteen-structured-analysis-v2 */", "/*
   .replaceAll('structuredAnalysisFailureMessage(uploaded)', 'structuredAnalysisFailureMessage(uploaded.code)')
   .replaceAll('structuredAnalysisFailureMessage(result)', 'structuredAnalysisFailureMessage(result.code)');
 const upgradedV1 = patchMangosteenAgentMain(legacyV1);
-assert.match(upgradedV1, /mangosteen-structured-analysis-v7/);
+assert.match(upgradedV1, /mangosteen-structured-analysis-v8/);
 assert.match(upgradedV1, /method: "POST", throw: false/);
 assert.match(upgradedV1, /structuredAnalysisFailureMessage\(result\)/);
 

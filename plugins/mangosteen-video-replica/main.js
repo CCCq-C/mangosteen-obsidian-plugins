@@ -12,6 +12,7 @@ const ROOT = "山竹视频复刻";
 const REQUEST_FILE = "generation-request.json";
 const STATE_FILE = ".work/generation-state.json";
 const PROCESSING_LEASE_MS = 2 * 60 * 1000;
+const DEFAULT_SETTINGS = { analysisGroup: "", analysisModel: "" };
 
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
@@ -32,6 +33,12 @@ class PrepareModal extends Modal {
     contentEl.addClass("mangosteen-replica-modal");
     contentEl.createEl("h2", { text: "新建视频复刻项目" });
     contentEl.createEl("p", { text: "选择 3 分钟以内的 MP4、MOV 或 M4V。处理在本机完成，不上传整条源视频。" });
+    const modelRow = contentEl.createDiv({ cls: "mangosteen-replica-model-row" });
+    const modelLabel = modelRow.createEl("span", { text: `分析模型：${this.plugin.analysisSelectionLabel()}` });
+    const modelButton = modelRow.createEl("button", { text: "选择模型" });
+    modelButton.addEventListener("click", () => new AnalysisModelModal(this.plugin, () => {
+      modelLabel.setText(`分析模型：${this.plugin.analysisSelectionLabel()}`);
+    }).open());
     const picker = contentEl.createEl("input", { attr: { type: "file", accept: ".mp4,.mov,.m4v,video/mp4,video/quicktime" } });
     const status = contentEl.createDiv({ cls: "mangosteen-replica-status", text: "等待选择视频" });
     const button = contentEl.createEl("button", { cls: "mod-cta", text: "开始本地拆解" });
@@ -70,6 +77,48 @@ class PrepareModal extends Modal {
   }
 }
 
+class AnalysisModelModal extends Modal {
+  constructor(plugin, onSaved = null) { super(plugin.app); this.plugin = plugin; this.onSaved = onSaved; }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.addClass("mangosteen-replica-modal");
+    contentEl.createEl("h2", { text: "选择视频分析模型" });
+    contentEl.createEl("p", { text: "这里只影响人物、场景和分镜分析，不会修改聊天框当前模型。" });
+    const catalog = this.plugin.analysisModelCatalog();
+    if (!catalog.groups.length) {
+      contentEl.createEl("p", { text: "暂未读取到可用模型。请先登录山竹账号，或打开山竹账号中心刷新模型。" });
+      return;
+    }
+    const selection = this.plugin.resolveAnalysisSelection(catalog);
+    const groupLabel = contentEl.createEl("label", { text: "模型分组" });
+    const groupSelect = groupLabel.createEl("select");
+    for (const group of catalog.groups) groupSelect.createEl("option", {
+      text: `${group.label} · ×${group.ratio}`,
+      attr: { value: group.id },
+    });
+    groupSelect.value = selection.group;
+    const modelLabel = contentEl.createEl("label", { text: "语言模型" });
+    const modelSelect = modelLabel.createEl("select");
+    const renderModels = (groupId, preferred = "") => {
+      modelSelect.empty();
+      const group = catalog.groups.find((item) => item.id === groupId) || catalog.groups[0];
+      for (const model of group.models) modelSelect.createEl("option", { text: model, attr: { value: model } });
+      modelSelect.value = group.models.includes(preferred) ? preferred : String(group.models[0] || "");
+    };
+    renderModels(selection.group, selection.model);
+    groupSelect.addEventListener("change", () => renderModels(groupSelect.value));
+    const saveButton = contentEl.createEl("button", { cls: "mod-cta", text: "保存分析模型" });
+    saveButton.addEventListener("click", async () => {
+      const saved = await this.plugin.setAnalysisSelection(groupSelect.value, modelSelect.value, catalog);
+      if (!saved) { new Notice("所选模型已不可用，请刷新后重新选择。", 6000); return; }
+      this.onSaved?.();
+      new Notice(`视频分析模型已切换为 ${modelSelect.value}。`, 5000);
+      this.close();
+    });
+  }
+}
+
 module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
   async onload() {
     const pluginRoot = path.join(this.vaultPath(), ...String(this.manifest.dir || "").split(/[\\/]/).filter(Boolean));
@@ -81,8 +130,11 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     this.instanceId = crypto.randomUUID();
     this.processing = new Set();
     this.referenceAssetPromises = new Map();
+    const savedSettings = typeof this.loadData === "function" ? await this.loadData() : null;
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, savedSettings && typeof savedSettings === "object" ? savedSettings : {});
     this.addRibbonIcon("clapperboard", "山竹视频复刻", () => new PrepareModal(this).open());
     this.addCommand({ id: "prepare-local-video", name: "从本地视频新建复刻项目", callback: () => new PrepareModal(this).open() });
+    this.addCommand({ id: "select-analysis-model", name: "选择视频分析语言模型", callback: () => new AnalysisModelModal(this).open() });
     this.addCommand({ id: "analyze-latest-project", name: "分析最近的视频复刻项目", callback: () => void this.analyzeLatestProject() });
     this.addCommand({ id: "confirm-latest-generation", name: "确认并开始付费生成最近项目", callback: () => void this.confirmLatestGeneration() });
     this.addCommand({ id: "concat-latest-project", name: "拼接最近已完成项目", callback: () => void this.concatLatestProject() });
@@ -143,6 +195,66 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     };
   }
 
+  analysisModelCatalog() {
+    const agent = this.app.plugins?.getPlugin?.("mangosteen-agent");
+    if (typeof agent?.getLanguageModelCatalog !== "function") return { ready: false, activeGroup: "", activeModel: "", groups: [] };
+    try {
+      const catalog = agent.getLanguageModelCatalog() || {};
+      const groups = (Array.isArray(catalog.groups) ? catalog.groups : []).map((group) => ({
+        id: String(group?.id || ""),
+        label: String(group?.label || group?.id || ""),
+        ratio: Number(group?.ratio) || 1,
+        models: (Array.isArray(group?.models) ? group.models : []).map(String).filter(Boolean),
+      })).filter((group) => group.id && group.models.length);
+      return {
+        ready: catalog.ready === true,
+        activeGroup: String(catalog.activeGroup || ""),
+        activeModel: String(catalog.activeModel || ""),
+        groups,
+      };
+    } catch (_) {
+      return { ready: false, activeGroup: "", activeModel: "", groups: [] };
+    }
+  }
+
+  resolveAnalysisSelection(catalog = this.analysisModelCatalog()) {
+    const groups = catalog.groups || [];
+    const preferredGroup = String(this.settings?.analysisGroup || "");
+    const group = groups.find((item) => item.id === preferredGroup)
+      || groups.find((item) => item.id === catalog.activeGroup)
+      || groups[0];
+    if (!group) return { catalog, group: "", model: "" };
+    const preferredModel = String(this.settings?.analysisModel || "");
+    const activeModel = group.id === catalog.activeGroup ? String(catalog.activeModel || "") : "";
+    const model = group.models.includes(preferredModel) ? preferredModel
+      : group.models.includes(activeModel) ? activeModel
+        : String(group.models[0] || "");
+    return { catalog, group: group.id, model };
+  }
+
+  analysisSelectionLabel() {
+    const selection = this.resolveAnalysisSelection();
+    return selection.model ? `${selection.group} / ${selection.model}` : "尚未读取到可用模型";
+  }
+
+  async setAnalysisSelection(group, model, catalog = this.analysisModelCatalog()) {
+    const selectedGroup = catalog.groups.find((item) => item.id === String(group || ""));
+    if (!selectedGroup || !selectedGroup.models.includes(String(model || ""))) return false;
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, this.settings, {
+      analysisGroup: selectedGroup.id,
+      analysisModel: String(model),
+    });
+    if (typeof this.saveData === "function") await this.saveData(this.settings);
+    return true;
+  }
+
+  isAnalysisModelError(error) {
+    const code = String(error?.code || "");
+    const status = Number(error?.status || 0);
+    return error?.changeModel === true || status === 404
+      || ["MODELS_UNAVAILABLE", "REMOTE_REJECTED", "INVALID_RESPONSE"].includes(code);
+  }
+
   async analyzeProject(projectFolder) {
     const projectPath = path.join(this.absolute(projectFolder), "project.json");
     if (!fs.existsSync(projectPath)) throw new Error("找不到视频复刻项目的 project.json。");
@@ -151,6 +263,9 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     if (!frames.length) throw new Error("项目还没有提取画面，请先完成本地拆解。");
     const agent = this.app.plugins?.getPlugin?.("mangosteen-agent");
     if (typeof agent?.analyzeStructured !== "function") throw new Error("山竹智能体版本过低或未启用，请先更新并启用山竹智能体。");
+    if (typeof agent?.getLanguageModelCatalog !== "function") throw new Error("山竹智能体版本过低，暂不支持选择视频分析模型，请先更新插件。");
+    const selection = this.resolveAnalysisSelection();
+    if (!selection.group || !selection.model) throw new Error("没有读取到可用的语言分析模型，请先登录山竹账号并选择模型。");
     const schemaPath = path.join(this.pluginRoot, "video-analysis-schema.json");
     if (!fs.existsSync(schemaPath)) throw new Error("缺少视频分析规则文件，请重新安装山竹视频复刻插件。");
     const transcriptPath = project.transcriptPath ? this.absolute(project.transcriptPath) : "";
@@ -163,10 +278,16 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     project.status = "analyzing";
     project.statusText = "山竹智能体正在分析人物、场景和分镜";
     project.analysisProvider = "mangosteen-agent";
-    project.analysisModel = "";
+    project.analysisGroup = selection.group;
+    project.analysisModel = selection.model;
+    delete project.analysisErrorCode;
+    delete project.analysisErrorStatus;
+    delete project.analysisErrorAt;
     this.saveProject(projectFolder, project);
     try {
       const response = await agent.analyzeStructured({
+        group: selection.group,
+        model: selection.model,
         prompt: workflow.analysisPrompt(project, transcriptText),
         images,
         schema: this.readJson(schemaPath),
@@ -182,20 +303,35 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         analysis,
         settings: this.analysisSettings(),
         analysisProvider: "mangosteen-agent",
-        analysisModel: response?.model,
+        analysisGroup: response?.group || selection.group,
+        analysisModel: response?.model || selection.model,
       });
       await this.openVaultPath(`${projectFolder}/00-项目总览.md`);
       return result;
     } catch (error) {
-      project.status = "analysis_failed";
-      project.statusText = `山竹智能体分析失败：${String(error?.message || error)}`;
+      const message = String(error?.message || error);
+      if (this.isAnalysisModelError(error)) {
+        project.status = "analysis_model_error";
+        project.analysisErrorCode = String(error?.code || "MODEL_UNAVAILABLE");
+        project.analysisErrorStatus = Number(error?.status || 0) || undefined;
+        project.analysisErrorAt = new Date().toISOString();
+        project.statusText = `分析模型 ${selection.model} 返回错误：${message}。请更换分析模型后重试。`;
+      } else {
+        project.status = "analysis_failed";
+        project.statusText = `山竹智能体分析失败：${message}`;
+      }
       this.saveProject(projectFolder, project);
-      throw error;
+      if (project.status !== "analysis_model_error") throw error;
+      const surfaced = new Error(project.statusText);
+      surfaced.code = project.analysisErrorCode;
+      surfaced.status = project.analysisErrorStatus;
+      surfaced.changeModel = true;
+      throw surfaced;
     }
   }
 
   async analyzeLatestProject() {
-    const record = this.latestProject((project) => ["prepared", "analysis_failed", "analysis_ready"].includes(project.status));
+    const record = this.latestProject((project) => ["prepared", "analysis_failed", "analysis_model_error", "analysis_ready"].includes(project.status));
     if (!record) { new Notice("没有找到可分析的视频复刻项目。", 6000); return; }
     try {
       new Notice("AI 正在分析最近项目，通常需要 2–8 分钟。", 6000);

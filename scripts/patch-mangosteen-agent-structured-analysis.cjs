@@ -2,7 +2,8 @@
 
 const fs = require("fs");
 
-const MARKER = "/* mangosteen-structured-analysis-v7 */";
+const MARKER = "/* mangosteen-structured-analysis-v8 */";
+const LEGACY_MARKER_V7 = "/* mangosteen-structured-analysis-v7 */";
 const LEGACY_MARKER_V6 = "/* mangosteen-structured-analysis-v6 */";
 const LEGACY_MARKER_V5 = "/* mangosteen-structured-analysis-v5 */";
 const LEGACY_MARKER_V4 = "/* mangosteen-structured-analysis-v4 */";
@@ -55,8 +56,102 @@ function patchMangosteenAgentMain(contents) {
   return typeof compatible === "string" ? compatible.trim() : "";
 }`;
 
+  if (output.includes(LEGACY_MARKER_V7)) {
+    output = replaceOnce(output, LEGACY_MARKER_V7, MARKER, "无法升级山竹智能体模型选择接口。");
+    if (!output.includes("  function getLanguageModelCatalog() {")) {
+      output = replaceOnce(
+        output,
+        "  function parseStructuredAnalysis(text) {",
+        `  function getLanguageModelCatalog() {
+    return {
+      ready: catalogReady,
+      activeGroup: activeGroup(),
+      activeModel: String(state.activeModel || ""),
+      groups: languageGroups().map((group) => {
+        const info = state.groupRatios?.[group] || {};
+        return {
+          id: group,
+          label: String(info.label || group),
+          ratio: Number(info.ratio) || 1,
+          models: Array.from(state.modelsByGroup?.[group] || []),
+        };
+      }),
+    };
+  }
+
+  function structuredAnalysisError(result, changeModel) {
+    const code = typeof result === "string" ? result : String(result?.code || "");
+    const status = typeof result === "object" ? Number(result?.status || 0) : 0;
+    const error = new Error(structuredAnalysisFailureMessage(result));
+    error.code = code || "STRUCTURED_ANALYSIS_FAILED";
+    if (status) error.status = status;
+    error.changeModel = typeof changeModel === "boolean" ? changeModel
+      : status === 404 || ["MODELS_UNAVAILABLE", "REMOTE_REJECTED", "INVALID_RESPONSE"].includes(code);
+    return error;
+  }
+
+  function parseStructuredAnalysis(text) {`,
+        "无法定位山竹智能体结构化结果解析入口。",
+      );
+    }
+    if (output.includes(`    throw new Error("山竹模型已返回内容，但结构化结果无法读取，请重新分析。");`)) {
+      output = replaceOnce(
+        output,
+        `    throw new Error("山竹模型已返回内容，但结构化结果无法读取，请重新分析。");`,
+        `    throw structuredAnalysisError({ code: "INVALID_RESPONSE", detail: "结构化结果无法读取" }, true);`,
+        "无法升级山竹智能体结构化解析错误。",
+      );
+    }
+    const legacyModelSelection = `      if (!catalog.ok) throw new Error(structuredAnalysisFailureMessage(catalog));
+    }
+    const key = activeKey();
+    const model = String(state.activeModel || "").trim();
+    if (!key || !model) throw new Error(structuredAnalysisFailureMessage("MODELS_UNAVAILABLE"));`;
+    if (output.includes(legacyModelSelection)) {
+      output = replaceOnce(
+        output,
+        legacyModelSelection,
+        `      if (!catalog.ok) throw structuredAnalysisError(catalog);
+    }
+    const requestedGroup = String(options.group || "").trim();
+    const requestedModel = String(options.model || "").trim();
+    const group = requestedGroup || activeGroup();
+    const models = state.modelsByGroup?.[group] || [];
+    const model = requestedModel || (group === activeGroup() ? String(state.activeModel || "").trim() : String(models[0] || ""));
+    const key = String(state.groupKeys?.[group] || "");
+    if (!languageGroups().includes(group) || !models.includes(model) || !key) {
+      throw structuredAnalysisError({ code: "MODELS_UNAVAILABLE", status: 404, detail: "所选模型已下架或当前账号不可用" }, true);
+    }`,
+        "无法升级山竹智能体模型选择流程。",
+      );
+    }
+    const legacyUploadError = `      if (!uploaded?.ok) throw new Error("第 " + (index + 1) + " 张参考图上传失败：" + structuredAnalysisFailureMessage(uploaded));`;
+    if (output.includes(legacyUploadError)) {
+      output = replaceOnce(
+        output,
+        legacyUploadError,
+        `      if (!uploaded?.ok) {
+        const uploadError = structuredAnalysisError(uploaded, false);
+        uploadError.message = "第 " + (index + 1) + " 张参考图上传失败：" + uploadError.message;
+        throw uploadError;
+      }`,
+        "无法升级山竹智能体参考图错误类型。",
+      );
+    }
+    if (output.includes(`    if (!result?.ok) throw new Error(structuredAnalysisFailureMessage(result));`)) {
+      output = replaceOnce(output, `    if (!result?.ok) throw new Error(structuredAnalysisFailureMessage(result));`, `    if (!result?.ok) throw structuredAnalysisError(result);`, "无法升级山竹智能体模型错误类型。");
+    }
+    if (output.includes(`    return { data, model, provider: "mangosteen-agent" };`)) {
+      output = replaceOnce(output, `    return { data, model, provider: "mangosteen-agent" };`, `    return { data, group, model, provider: "mangosteen-agent" };`, "无法升级山竹智能体结构化分析返回值。");
+    }
+    if (!output.includes("    plugin.getLanguageModelCatalog = getLanguageModelCatalog;")) {
+      output = replaceOnce(output, "    plugin.analyzeStructured = analyzeStructured;", "    plugin.getLanguageModelCatalog = getLanguageModelCatalog;\n    plugin.analyzeStructured = analyzeStructured;", "无法公开山竹智能体模型目录接口。");
+    }
+    return output;
+  }
+
   if (output.includes(LEGACY_MARKER_V6)) {
-    output = replaceOnce(output, LEGACY_MARKER_V6, MARKER, "无法升级山竹智能体结构化响应兼容层。");
+    output = replaceOnce(output, LEGACY_MARKER_V6, LEGACY_MARKER_V7, "无法升级山竹智能体结构化响应兼容层。");
     output = replaceOnce(
       output,
       `  function structuredResponseText(value) {
@@ -80,7 +175,7 @@ function patchMangosteenAgentMain(contents) {
       "      const text = responseText(result.response.json);",
       "无法修正山竹智能体响应读取调用。",
     );
-    return output;
+    return patchMangosteenAgentMain(output);
   }
 
   if (output.includes(LEGACY_MARKER_V5)) {
@@ -279,9 +374,9 @@ function patchMangosteenAgentMain(contents) {
       "无法定位山竹智能体结构化错误提示。",
     );
     output = output
-      .replace("structuredAnalysisFailureMessage(catalog.code)", "structuredAnalysisFailureMessage(catalog)")
-      .replace("structuredAnalysisFailureMessage(uploaded.code)", "structuredAnalysisFailureMessage(uploaded)")
-      .replace("structuredAnalysisFailureMessage(result.code)", "structuredAnalysisFailureMessage(result)");
+      .replaceAll("structuredAnalysisFailureMessage(catalog.code)", "structuredAnalysisFailureMessage(catalog)")
+      .replaceAll("structuredAnalysisFailureMessage(uploaded.code)", "structuredAnalysisFailureMessage(uploaded)")
+      .replaceAll("structuredAnalysisFailureMessage(result.code)", "structuredAnalysisFailureMessage(result)");
     return patchMangosteenAgentMain(output);
   }
 
@@ -382,6 +477,34 @@ function patchMangosteenAgentMain(contents) {
     return "山竹大语言模型分析失败" + suffix;
   }
 
+  function getLanguageModelCatalog() {
+    return {
+      ready: catalogReady,
+      activeGroup: activeGroup(),
+      activeModel: String(state.activeModel || ""),
+      groups: languageGroups().map((group) => {
+        const info = state.groupRatios?.[group] || {};
+        return {
+          id: group,
+          label: String(info.label || group),
+          ratio: Number(info.ratio) || 1,
+          models: Array.from(state.modelsByGroup?.[group] || []),
+        };
+      }),
+    };
+  }
+
+  function structuredAnalysisError(result, changeModel) {
+    const code = typeof result === "string" ? result : String(result?.code || "");
+    const status = typeof result === "object" ? Number(result?.status || 0) : 0;
+    const error = new Error(structuredAnalysisFailureMessage(result));
+    error.code = code || "STRUCTURED_ANALYSIS_FAILED";
+    if (status) error.status = status;
+    error.changeModel = typeof changeModel === "boolean" ? changeModel
+      : status === 404 || ["MODELS_UNAVAILABLE", "REMOTE_REJECTED", "INVALID_RESPONSE"].includes(code);
+    return error;
+  }
+
   function parseStructuredAnalysis(text) {
     const fence = String.fromCharCode(96).repeat(3);
     let cleaned = String(text || "").trim();
@@ -397,7 +520,7 @@ function patchMangosteenAgentMain(contents) {
         if (value && typeof value === "object" && !Array.isArray(value)) return value;
       } catch (_) {}
     }
-    throw new Error("山竹模型已返回内容，但结构化结果无法读取，请重新分析。");
+    throw structuredAnalysisError({ code: "INVALID_RESPONSE", detail: "结构化结果无法读取" }, true);
   }
 
   async function analyzeStructured(options = {}) {
@@ -409,11 +532,17 @@ function patchMangosteenAgentMain(contents) {
     if (!state.account?.userId) throw new Error(structuredAnalysisFailureMessage("AUTH_REQUIRED"));
     if (!catalogReady) {
       const catalog = await refreshAvailableGroups();
-      if (!catalog.ok) throw new Error(structuredAnalysisFailureMessage(catalog));
+      if (!catalog.ok) throw structuredAnalysisError(catalog);
     }
-    const key = activeKey();
-    const model = String(state.activeModel || "").trim();
-    if (!key || !model) throw new Error(structuredAnalysisFailureMessage("MODELS_UNAVAILABLE"));
+    const requestedGroup = String(options.group || "").trim();
+    const requestedModel = String(options.model || "").trim();
+    const group = requestedGroup || activeGroup();
+    const models = state.modelsByGroup?.[group] || [];
+    const model = requestedModel || (group === activeGroup() ? String(state.activeModel || "").trim() : String(models[0] || ""));
+    const key = String(state.groupKeys?.[group] || "");
+    if (!languageGroups().includes(group) || !models.includes(model) || !key) {
+      throw structuredAnalysisError({ code: "MODELS_UNAVAILABLE", status: 404, detail: "所选模型已下架或当前账号不可用" }, true);
+    }
     const content = [{ type: "input_text", text: prompt }];
     for (let index = 0; index < images.length; index += 1) {
       let uploaded;
@@ -422,7 +551,11 @@ function patchMangosteenAgentMain(contents) {
         if (uploaded.ok || uploaded.code !== "NETWORK_UNAVAILABLE" || attempt === 3) break;
         await new Promise((resolve) => setTimeout(resolve, attempt * 350));
       }
-      if (!uploaded?.ok) throw new Error("第 " + (index + 1) + " 张参考图上传失败：" + structuredAnalysisFailureMessage(uploaded));
+      if (!uploaded?.ok) {
+        const uploadError = structuredAnalysisError(uploaded, false);
+        uploadError.message = "第 " + (index + 1) + " 张参考图上传失败：" + uploadError.message;
+        throw uploadError;
+      }
       content.push({ type: "input_image", image_url: uploaded.url });
     }
     let result;
@@ -436,16 +569,16 @@ function patchMangosteenAgentMain(contents) {
       if (result.ok || result.code !== "NETWORK_UNAVAILABLE" || attempt === 2) break;
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
-    if (!result?.ok) throw new Error(structuredAnalysisFailureMessage(result));
+    if (!result?.ok) throw structuredAnalysisError(result);
     const data = parseStructuredAnalysis(result.text);
     writeOperation("结构化分析", "山竹模型已完成视频分镜分析");
-    return { data, model, provider: "mangosteen-agent" };
+    return { data, group, model, provider: "mangosteen-agent" };
   }`;
   output = replaceOnce(output, activeKeyBlock, structuredAnalysis, "无法定位山竹智能体账号模型状态。");
   output = replaceOnce(
     output,
     "    plugin.getAihubkitVideoBridge = () => getVideoBridge();",
-    "    plugin.getAihubkitVideoBridge = () => getVideoBridge();\n    plugin.analyzeStructured = analyzeStructured;",
+    "    plugin.getAihubkitVideoBridge = () => getVideoBridge();\n    plugin.getLanguageModelCatalog = getLanguageModelCatalog;\n    plugin.analyzeStructured = analyzeStructured;",
     "无法定位山竹智能体插件初始化入口。",
   );
   return output;
