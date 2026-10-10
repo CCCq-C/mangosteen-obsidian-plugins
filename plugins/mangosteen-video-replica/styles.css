@@ -14,3 +14,363 @@
   background: var(--background-secondary);
   color: var(--text-muted);
 }
+
+.mangosteen-replica-workbench {
+  container-type: inline-size;
+  --replica-gap: clamp(8px, 1.2cqi, 18px);
+  --replica-pad: clamp(10px, 1.8cqi, 24px);
+  height: 100%;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.mangosteen-replica-frame {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  background: var(--background-primary);
+  color: var(--text-normal);
+}
+
+.mangosteen-replica-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--replica-gap);
+  min-width: 0;
+  padding: 10px var(--replica-pad);
+  border-bottom: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+}
+
+.mangosteen-replica-toolbar-group,
+.mangosteen-replica-toolbar-actions,
+.mangosteen-replica-inline-actions,
+.mangosteen-replica-card-heading,
+.mangosteen-replica-save-row,
+.mangosteen-replica-form-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.mangosteen-replica-toolbar-group {
+  flex: 1 1 260px;
+}
+
+.mangosteen-replica-toolbar-actions {
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.mangosteen-replica-project-select {
+  width: min(320px, 100%);
+  min-width: 0;
+}
+
+.mangosteen-replica-eyebrow {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  font-weight: var(--font-semibold);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.mangosteen-replica-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 5px 9px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 999px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.mangosteen-replica-width-label:empty {
+  display: none;
+}
+
+.mangosteen-replica-shell {
+  display: grid;
+  grid-template-columns: minmax(168px, 220px) minmax(0, 1fr);
+  flex: 1 1 auto;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+}
+
+.mangosteen-replica-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: var(--replica-pad);
+  overflow: auto;
+  border-right: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary-alt);
+}
+
+.mangosteen-replica-nav button {
+  width: 100%;
+  margin: 0;
+  text-align: left;
+}
+
+.mangosteen-replica-nav button.is-active {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+
+.mangosteen-replica-content {
+  min-height: 0;
+  min-width: 0;
+  padding: var(--replica-pad);
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.mangosteen-replica-page-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--replica-gap);
+  margin-bottom: var(--replica-gap);
+}
+
+.mangosteen-replica-page-header h2,
+.mangosteen-replica-card h3 {
+  margin: 0 0 6px;
+}
+
+.mangosteen-replica-page-header p,
+.mangosteen-replica-card p {
+  margin: 0;
+}
+
+.mangosteen-replica-card,
+.mangosteen-replica-shot-card,
+.mangosteen-replica-metric,
+.mangosteen-replica-empty,
+.mangosteen-replica-empty-inline {
+  min-width: 0;
+  padding: var(--replica-pad);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+  background: var(--background-secondary);
+}
+
+.mangosteen-replica-progress-card {
+  margin-bottom: var(--replica-gap);
+}
+
+.mangosteen-replica-card-heading {
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.mangosteen-replica-progress-track {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--background-modifier-border);
+}
+
+.mangosteen-replica-progress-bar {
+  height: 100%;
+  min-width: 2px;
+  border-radius: inherit;
+  background: var(--interactive-accent);
+  transition: width 180ms ease;
+}
+
+.mangosteen-replica-progress-bar.is-indeterminate {
+  animation: mangosteen-replica-pulse 1.2s ease-in-out infinite alternate;
+}
+
+@keyframes mangosteen-replica-pulse {
+  from { opacity: 0.45; }
+  to { opacity: 1; }
+}
+
+.mangosteen-replica-summary-grid,
+.mangosteen-replica-asset-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--replica-gap);
+}
+
+.mangosteen-replica-asset-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.mangosteen-replica-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mangosteen-replica-metric span,
+.mangosteen-replica-muted,
+.mangosteen-replica-save-row,
+.mangosteen-replica-shot-status {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+}
+
+.mangosteen-replica-shot-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--replica-gap);
+}
+
+.mangosteen-replica-shot-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.mangosteen-replica-shot-card.is-failed {
+  border-color: var(--color-red);
+}
+
+.mangosteen-replica-field {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+}
+
+.mangosteen-replica-workbench input,
+.mangosteen-replica-workbench select,
+.mangosteen-replica-workbench textarea {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.mangosteen-replica-workbench textarea {
+  min-height: 72px;
+  resize: vertical;
+}
+
+.mangosteen-replica-details {
+  min-width: 0;
+  padding-top: 4px;
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.mangosteen-replica-details summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  font-weight: var(--font-semibold);
+}
+
+.mangosteen-replica-details[open] summary {
+  margin-bottom: 10px;
+}
+
+.mangosteen-replica-details .mangosteen-replica-field + .mangosteen-replica-field {
+  margin-top: 8px;
+}
+
+.mangosteen-replica-save-row {
+  justify-content: flex-end;
+  margin-top: var(--replica-gap);
+}
+
+.mangosteen-replica-output-card,
+.mangosteen-replica-settings {
+  max-width: 780px;
+}
+
+.mangosteen-replica-feedback,
+.mangosteen-replica-error {
+  margin-bottom: var(--replica-gap);
+  padding: 10px 12px;
+  border-radius: var(--radius-s);
+}
+
+.mangosteen-replica-feedback {
+  background: var(--background-modifier-message);
+  color: var(--text-normal);
+}
+
+.mangosteen-replica-error {
+  background: rgba(var(--color-red-rgb), 0.12);
+  color: var(--text-error);
+  overflow-wrap: anywhere;
+}
+
+.mangosteen-replica-empty {
+  display: grid;
+  justify-items: start;
+  gap: 10px;
+  max-width: 560px;
+  margin: clamp(24px, 8cqi, 96px) auto;
+}
+
+.mangosteen-replica-empty h2,
+.mangosteen-replica-empty p {
+  margin: 0;
+}
+
+@container (max-width: 1099px) {
+  .mangosteen-replica-shot-grid,
+  .mangosteen-replica-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .mangosteen-replica-asset-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@container (max-width: 759px) {
+  .mangosteen-replica-toolbar,
+  .mangosteen-replica-page-header { align-items: stretch; flex-direction: column; }
+  .mangosteen-replica-toolbar-actions { justify-content: flex-start; }
+  .mangosteen-replica-shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .mangosteen-replica-nav { display: flex; flex-direction: row; flex-wrap: wrap; overflow: visible; border-right: 0; border-bottom: 1px solid var(--background-modifier-border); }
+  .mangosteen-replica-nav button { width: auto; flex: 1 1 auto; text-align: center; }
+  .mangosteen-replica-shot-grid,
+  .mangosteen-replica-asset-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+@container (max-width: 519px) {
+  .mangosteen-replica-toolbar,
+  .mangosteen-replica-form-row { align-items: stretch; flex-direction: column; }
+  .mangosteen-replica-toolbar-group { flex-basis: auto; align-items: stretch; flex-direction: column; }
+  .mangosteen-replica-toolbar-actions { display: grid; grid-template-columns: minmax(0, 1fr); width: 100%; }
+  .mangosteen-replica-toolbar button { width: 100%; }
+  .mangosteen-replica-summary-grid { grid-template-columns: minmax(0, 1fr); }
+  .mangosteen-replica-inline-actions { align-items: stretch; flex-direction: column; }
+  .mangosteen-replica-workbench input,
+  .mangosteen-replica-workbench select,
+  .mangosteen-replica-workbench textarea { max-width: 100%; min-width: 0; }
+}
+
+@media (max-width: 759px) {
+  .mangosteen-replica-shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .mangosteen-replica-nav { flex-direction: row; flex-wrap: wrap; overflow: visible; }
+  .mangosteen-replica-shot-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+@media (max-width: 519px) {
+  .mangosteen-replica-toolbar,
+  .mangosteen-replica-form-row { align-items: stretch; flex-direction: column; }
+  .mangosteen-replica-toolbar button { width: 100%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mangosteen-replica-workbench * {
+    scroll-behavior: auto;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
