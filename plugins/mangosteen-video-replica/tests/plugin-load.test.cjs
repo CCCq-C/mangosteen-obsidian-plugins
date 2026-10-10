@@ -8,6 +8,9 @@ const originalLoad = Module._load;
 Module._load = function patchedLoad(request, parent, isMain) {
   if (request === "obsidian") {
     return {
+      ItemView: class ItemView {
+        constructor(leaf) { this.leaf = leaf; }
+      },
       Modal: class Modal {},
       Notice: class Notice {},
       Plugin: class Plugin {},
@@ -29,18 +32,62 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
 
 (async () => {
   const realVault = path.resolve(__dirname, "../../..");
-  plugin.app = { vault: { adapter: { getBasePath: () => realVault }, on: () => ({}) } };
+  const vaultEvents = {};
+  const registeredViews = [];
+  const workbenchLeaves = [];
+  const workbenchView = {
+    refreshCalls: 0,
+    requestRefresh() { this.refreshCalls += 1; },
+  };
+  let openedViewState = null;
+  let revealedLeaf = null;
+  let setViewStateCalls = 0;
+  const workbenchLeaf = {
+    view: workbenchView,
+    async setViewState(state) {
+      setViewStateCalls += 1;
+      openedViewState = state;
+      workbenchLeaves.push(this);
+    },
+  };
+  const workspace = {
+    getLeavesOfType: (type) => type === "mangosteen-video-replica-workbench" ? workbenchLeaves : [],
+    getLeaf: () => workbenchLeaf,
+    revealLeaf: async (leaf) => { revealedLeaf = leaf; },
+  };
+  plugin.app = {
+    vault: {
+      adapter: { getBasePath: () => realVault },
+      on: (event, handler) => { vaultEvents[event] = handler; return {}; },
+    },
+    workspace,
+  };
   plugin.manifest = { dir: "plugins/mangosteen-video-replica" };
   const commandIds = [];
   plugin.addRibbonIcon = plugin.registerInterval = plugin.registerEvent = () => {};
   plugin.addCommand = (command) => { commandIds.push(command.id); };
+  plugin.registerView = (type, creator) => { registeredViews.push({ type, creator }); };
   global.window = { setInterval: () => 1, setTimeout: () => 1 };
   await plugin.onload();
+  assert.strictEqual(registeredViews.length, 1);
+  assert.strictEqual(registeredViews[0].type, "mangosteen-video-replica-workbench");
+  assert(commandIds.includes("open-video-replica-workbench"));
   assert(commandIds.includes("analyze-latest-project"));
   assert(commandIds.includes("select-analysis-model"));
   assert(commandIds.includes("select-generation-models"));
   assert(commandIds.includes("confirm-latest-generation"));
   assert(commandIds.includes("concat-latest-project"));
+  await plugin.activateWorkbench();
+  assert.deepStrictEqual(openedViewState, {
+    type: "mangosteen-video-replica-workbench",
+    active: true,
+  });
+  assert.strictEqual(revealedLeaf, workbenchLeaf);
+  await plugin.activateWorkbench();
+  assert.strictEqual(setViewStateCalls, 1, "opening the cockpit twice must reuse its native ItemView leaf");
+  const refreshCallsBeforeModify = workbenchView.refreshCalls;
+  vaultEvents.modify({ name: "project.json", path: "山竹视频复刻/事件刷新/project.json" });
+  assert.strictEqual(workbenchView.refreshCalls, refreshCallsBeforeModify + 1);
   plugin.app.plugins = { getPlugin: (id) => id === "mangosteen-image"
     ? { settings: { model: "gpt-image-2-w" } }
     : { settings: { model: "MiniMax-H3", resolution: "720p" } } };
@@ -63,8 +110,140 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   fs.mkdirSync(project, { recursive: true });
   fs.writeFileSync(path.join(project, "generation-request.json"), JSON.stringify({ confirmed: false }));
   fs.writeFileSync(path.join(project, "project.json"), JSON.stringify({ folder: "山竹视频复刻/失败任务", shots: [] }));
-  plugin.app = { vault: { adapter: { getBasePath: () => vault } } };
+  plugin.app = { vault: { adapter: { getBasePath: () => vault } }, workspace };
   plugin.processing = new Set();
+
+  const workbenchFolder = "山竹视频复刻/驾驶舱草案";
+  const workbenchRoot = path.join(vault, ...workbenchFolder.split("/"));
+  const workbenchRequestPath = path.join(workbenchRoot, "generation-request.json");
+  const workbenchStatePath = path.join(workbenchRoot, ".work/generation-state.json");
+  fs.mkdirSync(path.dirname(workbenchStatePath), { recursive: true });
+  fs.writeFileSync(path.join(workbenchRoot, "project.json"), JSON.stringify({
+    folder: workbenchFolder,
+    title: "驾驶舱草案",
+    status: "analysis_ready",
+    shots: [{
+      id: "001",
+      title: "旧标题",
+      firstImagePath: `${workbenchFolder}/02-分镜脚本/已有首帧.png`,
+      generationFingerprint: "keep-existing-artifact",
+    }],
+  }));
+  const workbenchDraft = {
+    version: 3,
+    confirmed: false,
+    character: { id: "hero", prompt: "固定人物参考板", voiceProfile: "轻微四川口音" },
+    products: [],
+    scenes: [{ id: "studio", prompt: "纯环境摄影棚" }],
+    settings: { imageModel: "gpt-image-2-w", videoModel: "MiniMax-H3", ratio: "9:16", resolution: "768p" },
+    shots: [{
+      id: "001",
+      title: "新标题",
+      duration: 4,
+      sceneId: "studio",
+      productIds: [],
+      dialogue: "你好",
+      voiceDirection: "亲切，语速中等",
+      plot: "人物挥手",
+      environment: "摄影棚",
+      camera: "中景固定",
+      imagePrompt: "人物面对镜头挥手",
+      lastImagePrompt: "",
+      videoPrompt: "人物自然挥手并说话",
+    }],
+  };
+  fs.writeFileSync(workbenchRequestPath, JSON.stringify(workbenchDraft));
+
+  const listedWorkbenchProject = plugin.listWorkbenchProjects().find((item) => item.folder === workbenchFolder);
+  assert.deepStrictEqual(
+    { folder: listedWorkbenchProject.folder, title: listedWorkbenchProject.title, status: listedWorkbenchProject.status },
+    { folder: workbenchFolder, title: "驾驶舱草案", status: "analysis_ready" },
+  );
+  const loadedWorkbenchProject = await plugin.loadWorkbenchProject(workbenchFolder);
+  assert.strictEqual(loadedWorkbenchProject.project.title, "驾驶舱草案");
+  assert.strictEqual(loadedWorkbenchProject.request.shots[0].dialogue, "你好");
+
+  const malformedFolder = "山竹视频复刻/损坏项目";
+  const malformedRoot = path.join(vault, ...malformedFolder.split("/"));
+  fs.mkdirSync(path.join(malformedRoot, ".work"), { recursive: true });
+  fs.writeFileSync(path.join(malformedRoot, "project.json"), "{");
+  fs.writeFileSync(path.join(malformedRoot, "generation-request.json"), "{");
+  fs.writeFileSync(path.join(malformedRoot, ".work/generation-state.json"), "{");
+  const malformed = await plugin.loadWorkbenchProject(malformedFolder);
+  assert.deepStrictEqual(Object.keys(malformed.readErrors).sort(), ["generationState", "project", "request"]);
+
+  await plugin.saveWorkbenchDraft(workbenchFolder, workbenchDraft);
+  assert.strictEqual(JSON.parse(fs.readFileSync(workbenchRequestPath, "utf8")).confirmed, false);
+  const savedWorkbenchProject = JSON.parse(fs.readFileSync(path.join(workbenchRoot, "project.json"), "utf8"));
+  assert.strictEqual(savedWorkbenchProject.shots[0].title, "新标题");
+  assert.strictEqual(savedWorkbenchProject.shots[0].voiceDirection, "亲切，语速中等");
+  assert.strictEqual(savedWorkbenchProject.shots[0].firstImagePath, `${workbenchFolder}/02-分镜脚本/已有首帧.png`);
+  assert.strictEqual(savedWorkbenchProject.shots[0].generationFingerprint, "keep-existing-artifact");
+
+  fs.writeFileSync(workbenchRequestPath, JSON.stringify({ ...workbenchDraft, confirmed: true }));
+  await assert.rejects(() => plugin.saveWorkbenchDraft(workbenchFolder, workbenchDraft), /已确认|不能编辑/);
+  fs.writeFileSync(workbenchRequestPath, JSON.stringify(workbenchDraft));
+  fs.writeFileSync(workbenchStatePath, JSON.stringify({ status: "processing" }));
+  await assert.rejects(() => plugin.saveWorkbenchDraft(workbenchFolder, workbenchDraft), /生成中|不能编辑/);
+  fs.writeFileSync(workbenchStatePath, JSON.stringify({ status: "ready" }));
+  await assert.rejects(() => plugin.saveWorkbenchDraft("其他目录/越界项目", workbenchDraft), /山竹视频复刻/);
+
+  let releaseCatalog;
+  let catalogStarted;
+  const waitForCatalog = new Promise((resolve) => { catalogStarted = resolve; });
+  const catalogGate = new Promise((resolve) => { releaseCatalog = resolve; });
+  plugin.refreshGenerationModelCatalog = async () => {
+    catalogStarted();
+    await catalogGate;
+    return { imageModels: ["gpt-image-2-w"], videoModels: ["MiniMax-H3"] };
+  };
+  fs.writeFileSync(workbenchRequestPath, JSON.stringify(workbenchDraft));
+  const staleConfirmation = plugin.confirmWorkbenchDraft(workbenchFolder);
+  await waitForCatalog;
+  fs.writeFileSync(workbenchStatePath, JSON.stringify({ status: "processing" }));
+  releaseCatalog();
+  await assert.rejects(() => staleConfirmation, /生成中|不能确认/);
+  assert.strictEqual(JSON.parse(fs.readFileSync(workbenchRequestPath, "utf8")).confirmed, false);
+
+  fs.writeFileSync(workbenchStatePath, JSON.stringify({ status: "ready" }));
+  fs.writeFileSync(workbenchRequestPath, JSON.stringify(workbenchDraft));
+  let releaseConcurrentCatalog;
+  let concurrentCatalogStarted;
+  const waitForConcurrentCatalog = new Promise((resolve) => { concurrentCatalogStarted = resolve; });
+  const concurrentCatalogGate = new Promise((resolve) => { releaseConcurrentCatalog = resolve; });
+  plugin.refreshGenerationModelCatalog = async () => {
+    concurrentCatalogStarted();
+    await concurrentCatalogGate;
+    return { imageModels: ["gpt-image-2-w"], videoModels: ["MiniMax-H3"] };
+  };
+  let processingTriggers = 0;
+  plugin.processRequest = async (requestPath, notify) => {
+    processingTriggers += 1;
+    assert.strictEqual(requestPath, workbenchRequestPath);
+    assert.strictEqual(notify, true);
+  };
+  const originalRenameSync = fs.renameSync;
+  let confirmedRequestWrites = 0;
+  fs.renameSync = function trackedRename(source, destination) {
+    if (destination === workbenchRequestPath) confirmedRequestWrites += 1;
+    return originalRenameSync.call(this, source, destination);
+  };
+  try {
+    const firstConfirmation = plugin.confirmWorkbenchDraft(workbenchFolder);
+    await waitForConcurrentCatalog;
+    await assert.rejects(() => plugin.confirmWorkbenchDraft(workbenchFolder), /正在确认/);
+    releaseConcurrentCatalog();
+    await firstConfirmation;
+  } finally {
+    fs.renameSync = originalRenameSync;
+  }
+  assert.strictEqual(JSON.parse(fs.readFileSync(workbenchRequestPath, "utf8")).confirmed, true);
+  assert.strictEqual(confirmedRequestWrites, 1, "fast double confirmation must atomically write once");
+  assert.strictEqual(processingTriggers, 1, "fast double confirmation must trigger processing once");
+  await assert.rejects(() => plugin.confirmWorkbenchDraft(workbenchFolder), /已确认|重复确认/);
+  assert(workbenchView.refreshCalls > 0, "project writes must request a refresh from the open workbench view");
+  delete plugin.refreshGenerationModelCatalog;
+  delete plugin.processRequest;
 
   const analysisFolder = "山竹视频复刻/山竹模型分析";
   const analysisRoot = path.join(vault, ...analysisFolder.split("/"));
@@ -630,13 +809,14 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   const sceneStarted = new Promise((resolve) => { markSceneStarted = resolve; });
   const concurrentImage = generationImage({
     generateText: async (prompt) => {
-      concurrentPrompts[prompt] += 1;
-      const count = concurrentPrompts[prompt];
-      if (prompt === "并发人物参考板" && count === 1) {
+      const promptKey = prompt.includes("并发场景参考图") ? "并发场景参考图" : prompt;
+      concurrentPrompts[promptKey] += 1;
+      const count = concurrentPrompts[promptKey];
+      if (promptKey === "并发人物参考板" && count === 1) {
         markCharacterStarted();
         await characterGate;
       }
-      if (prompt === "并发场景参考图" && count === 1) {
+      if (promptKey === "并发场景参考图" && count === 1) {
         markSceneStarted();
         await sceneGate;
       }

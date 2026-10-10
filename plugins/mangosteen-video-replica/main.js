@@ -6,6 +6,7 @@ const crypto = require("crypto");
 let core;
 let generationPolicy;
 let referenceAssets;
+let replicaEditor;
 let workflow;
 
 const ROOT = "山竹视频复刻";
@@ -13,6 +14,21 @@ const REQUEST_FILE = "generation-request.json";
 const STATE_FILE = ".work/generation-state.json";
 const PROCESSING_LEASE_MS = 2 * 60 * 1000;
 const DEFAULT_SETTINGS = { analysisGroup: "", analysisModel: "", imageModel: "", videoModel: "" };
+const WORKBENCH_SHOT_FIELDS = [
+  "id",
+  "title",
+  "duration",
+  "sceneId",
+  "productIds",
+  "dialogue",
+  "voiceDirection",
+  "plot",
+  "environment",
+  "camera",
+  "imagePrompt",
+  "lastImagePrompt",
+  "videoPrompt",
+];
 
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
@@ -168,24 +184,34 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     core = require(path.join(pluginRoot, "replica-core.cjs"));
     generationPolicy = require(path.join(pluginRoot, "generation-policy.cjs"));
     referenceAssets = require(path.join(pluginRoot, "reference-assets.cjs"));
+    replicaEditor = require(path.join(pluginRoot, "replica-editor.cjs"));
     workflow = require(path.join(pluginRoot, "replica-cli.cjs"));
+    const workbench = require(path.join(pluginRoot, "replica-workbench.cjs"));
     this.pluginRoot = pluginRoot;
+    this.workbenchViewType = workbench.VIEW_TYPE;
     this.instanceId = crypto.randomUUID();
     this.processing = new Set();
+    this.confirmingProjects = new Set();
     this.referenceAssetPromises = new Map();
     const savedSettings = typeof this.loadData === "function" ? await this.loadData() : null;
     this.settings = Object.assign({}, DEFAULT_SETTINGS, savedSettings && typeof savedSettings === "object" ? savedSettings : {});
-    this.addRibbonIcon("clapperboard", "山竹视频复刻", () => new PrepareModal(this).open());
-    this.addCommand({ id: "prepare-local-video", name: "从本地视频新建复刻项目", callback: () => new PrepareModal(this).open() });
-    this.addCommand({ id: "select-analysis-model", name: "选择视频分析语言模型", callback: () => new AnalysisModelModal(this).open() });
-    this.addCommand({ id: "select-generation-models", name: "选择视频复刻的图片与视频模型", callback: () => new GenerationModelModal(this).open() });
+    this.registerView(this.workbenchViewType, (leaf) => new workbench.VideoReplicaWorkbenchView(leaf, this));
+    this.addRibbonIcon("clapperboard", "山竹视频复刻", () => void this.activateWorkbench());
+    this.addCommand({ id: "open-video-replica-workbench", name: "打开视频复刻制作驾驶舱", callback: () => void this.activateWorkbench() });
+    this.addCommand({ id: "prepare-local-video", name: "从本地视频新建复刻项目", callback: () => this.openPrepareModal() });
+    this.addCommand({ id: "select-analysis-model", name: "选择视频分析语言模型", callback: () => this.openAnalysisModelModal() });
+    this.addCommand({ id: "select-generation-models", name: "选择视频复刻的图片与视频模型", callback: () => this.openGenerationModelModal() });
     this.addCommand({ id: "analyze-latest-project", name: "分析最近的视频复刻项目", callback: () => void this.analyzeLatestProject() });
     this.addCommand({ id: "confirm-latest-generation", name: "确认并开始付费生成最近项目", callback: () => void this.confirmLatestGeneration() });
     this.addCommand({ id: "concat-latest-project", name: "拼接最近已完成项目", callback: () => void this.concatLatestProject() });
     this.addCommand({ id: "scan-generation-requests", name: "检查已确认的视频复刻任务", callback: () => void this.scanRequests(true) });
     this.registerInterval(window.setInterval(() => void this.scanRequests(false), 5000));
-    this.registerEvent(this.app.vault.on("create", (file) => { if (file?.name === REQUEST_FILE) void this.processRequestByVaultPath(file.path, true); }));
-    this.registerEvent(this.app.vault.on("modify", (file) => { if (file?.name === REQUEST_FILE) void this.processRequestByVaultPath(file.path, true); }));
+    const handleProjectFileChange = (file) => {
+      if (this.isWorkbenchDataFile(file)) this.requestWorkbenchRefresh();
+      if (file?.name === REQUEST_FILE) void this.processRequestByVaultPath(file.path, true);
+    };
+    this.registerEvent(this.app.vault.on("create", handleProjectFileChange));
+    this.registerEvent(this.app.vault.on("modify", handleProjectFileChange));
     window.setTimeout(() => void this.scanRequests(false), 1500);
   }
 
@@ -204,6 +230,132 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
 
   async prepareVideo(sourcePath) {
     return workflow.prepareProject({ sourcePath, vaultPath: this.vaultPath(), pluginRoot: this.pluginRoot });
+  }
+
+  openPrepareModal() { return new PrepareModal(this).open(); }
+
+  openAnalysisModelModal() { return new AnalysisModelModal(this).open(); }
+
+  openGenerationModelModal() { return new GenerationModelModal(this).open(); }
+
+  async activateWorkbench() {
+    const existing = this.app.workspace.getLeavesOfType(this.workbenchViewType)[0];
+    const leaf = existing || this.app.workspace.getLeaf(true);
+    if (!existing) await leaf.setViewState({ type: this.workbenchViewType, active: true });
+    await this.app.workspace.revealLeaf(leaf);
+    return leaf;
+  }
+
+  isWorkbenchDataFile(file) {
+    const vaultPath = String(file?.path || "").replace(/\\/g, "/");
+    return vaultPath.startsWith(`${ROOT}/`)
+      && ["project.json", REQUEST_FILE, path.basename(STATE_FILE)].includes(String(file?.name || path.basename(vaultPath)));
+  }
+
+  requestWorkbenchRefresh() {
+    if (!this.workbenchViewType || typeof this.app.workspace?.getLeavesOfType !== "function") return;
+    for (const leaf of this.app.workspace.getLeavesOfType(this.workbenchViewType)) {
+      if (typeof leaf?.view?.requestRefresh === "function") void leaf.view.requestRefresh();
+      else if (typeof leaf?.view?.refresh === "function") void leaf.view.refresh();
+    }
+  }
+
+  workbenchProjectPaths(folder) {
+    const normalized = core.normalizeVaultPath(folder);
+    if (!normalized.startsWith(`${ROOT}/`)) throw new Error(`项目必须位于 ${ROOT}/ 下。`);
+    const absoluteFolder = this.absolute(normalized);
+    return {
+      folder: normalized,
+      projectPath: path.join(absoluteFolder, "project.json"),
+      requestPath: path.join(absoluteFolder, REQUEST_FILE),
+      statePath: path.join(absoluteFolder, STATE_FILE),
+    };
+  }
+
+  listWorkbenchProjects() {
+    return this.projectRecords().map(({ project, mtimeMs }) => ({
+      folder: project.folder,
+      title: project.title || path.basename(project.folder || ""),
+      status: project.status || "unknown",
+      mtimeMs,
+    }));
+  }
+
+  loadWorkbenchProject(folder) {
+    const paths = this.workbenchProjectPaths(folder);
+    const output = { project: {}, request: {}, generationState: {}, readErrors: {} };
+    for (const [key, filePath] of [
+      ["project", paths.projectPath],
+      ["request", paths.requestPath],
+      ["generationState", paths.statePath],
+    ]) {
+      try {
+        output[key] = this.readJson(filePath);
+      } catch (error) {
+        output.readErrors[key] = String(error?.message || error);
+      }
+    }
+    return output;
+  }
+
+  currentWorkbenchLock(paths) {
+    const request = this.readJson(paths.requestPath);
+    let generationState = {};
+    if (fs.existsSync(paths.statePath)) generationState = this.readJson(paths.statePath);
+    if (request.confirmed === true) throw new Error("草案已确认，不能再编辑或重复确认。");
+    if (generationState?.status === "processing") throw new Error("项目正在生成中，不能编辑或重复确认。");
+    return { request, generationState };
+  }
+
+  async saveWorkbenchDraft(folder, draft) {
+    const paths = this.workbenchProjectPaths(folder);
+    if (this.confirmingProjects?.has(paths.folder)) throw new Error("项目正在确认，不能编辑草案。");
+    this.currentWorkbenchLock(paths);
+    const validation = replicaEditor.validateDraft(draft, core.normalizeGenerationRequest);
+    if (!validation.ok) {
+      const details = validation.errors.map((error) => `${error.path}：${error.message}`).join("；");
+      throw new Error(`草案校验失败：${details}`);
+    }
+    const project = this.readJson(paths.projectPath);
+    const currentShots = Array.isArray(project.shots) ? project.shots : [];
+    project.shots = validation.value.shots.map((shot, index) => {
+      const next = { ...(currentShots[index] && typeof currentShots[index] === "object" ? currentShots[index] : {}) };
+      for (const field of WORKBENCH_SHOT_FIELDS) {
+        if (Object.prototype.hasOwnProperty.call(shot, field)) next[field] = shot[field];
+      }
+      return next;
+    });
+    writeJson(paths.requestPath, validation.value);
+    this.saveProject(paths.folder, project);
+    this.requestWorkbenchRefresh();
+    return validation.value;
+  }
+
+  async confirmWorkbenchDraft(folder) {
+    const paths = this.workbenchProjectPaths(folder);
+    this.confirmingProjects ||= new Set();
+    if (this.confirmingProjects.has(paths.folder)) throw new Error("项目正在确认，请勿重复操作。");
+    this.confirmingProjects.add(paths.folder);
+    try {
+      this.currentWorkbenchLock(paths);
+      const catalog = await this.refreshGenerationModelCatalog();
+      const selection = this.resolveGenerationSelection(catalog);
+      if (!selection.imageModel || !selection.videoModel) {
+        throw new Error("当前账号没有可用的图片或视频模型，请打开模型选择后重试。");
+      }
+      await this.setGenerationSelection(selection.imageModel, selection.videoModel, catalog);
+
+      const { request } = this.currentWorkbenchLock(paths);
+      request.settings = Object.assign({}, request.settings, selection);
+      request.confirmed = true;
+      writeJson(paths.requestPath, request);
+      this.requestWorkbenchRefresh();
+      new Notice(`已确认：${selection.imageModel} + ${selection.videoModel}，开始调用生成算力。`, 7000);
+      await this.processRequest(paths.requestPath, true);
+      return request;
+    } finally {
+      this.confirmingProjects.delete(paths.folder);
+    }
   }
 
   projectRecords() {
@@ -420,6 +572,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         analysisGroup: response?.group || selection.group,
         analysisModel: response?.model || selection.model,
       });
+      this.requestWorkbenchRefresh();
       await this.openVaultPath(`${projectFolder}/00-项目总览.md`);
       return result;
     } catch (error) {
@@ -544,6 +697,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     const absoluteFolder = this.absolute(projectFolder);
     writeJson(path.join(absoluteFolder, "project.json"), project);
     atomicWrite(path.join(absoluteFolder, "00-项目总览.md"), core.dashboardMarkdown(project));
+    this.requestWorkbenchRefresh();
   }
 
   writeState(projectFolder, state) {
@@ -555,6 +709,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       state.leaseExpiresAt = new Date(now.getTime() + PROCESSING_LEASE_MS).toISOString();
     }
     writeJson(path.join(this.absolute(projectFolder), STATE_FILE), state);
+    this.requestWorkbenchRefresh();
   }
 
   requestAlreadyHandled(projectFolder, requestMtimeMs, nowMs = Date.now()) {
