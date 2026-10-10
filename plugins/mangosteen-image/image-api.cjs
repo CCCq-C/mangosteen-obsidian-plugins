@@ -19,6 +19,27 @@ function assertLocalImageUploadSize(file, maxBytes = MAX_LOCAL_IMAGE_UPLOAD_BYTE
   if (Number.isFinite(size) && size > maxBytes) throw new Error("所选图片超过 20 MB，请压缩后重试。");
 }
 
+function buildImageEditMultipart(fields, boundary) {
+  const input = fields?.images ?? fields?.image;
+  const images = input === undefined || input === null ? [] : Array.isArray(input) ? input : [input];
+  if (images.length < 1 || images.length > 4) throw new Error("请选择 1–4 张参考图片");
+
+  const chunks = [];
+  const pushText = (name, value) => chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`));
+  for (const [name, value] of Object.entries(fields || {})) {
+    if (name !== "image" && name !== "images" && value !== undefined && value !== null) pushText(name, value);
+  }
+  for (const image of images) {
+    chunks.push(
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="image[]"; filename="${image.name.replaceAll('"', '')}"\r\nContent-Type: ${image.type}\r\n\r\n`),
+      image.buffer,
+      Buffer.from("\r\n"),
+    );
+  }
+  chunks.push(Buffer.from(`--${boundary}--\r\n`));
+  return Buffer.concat(chunks);
+}
+
 function generationProgressText(previous = "", random = Math.random) {
   let index = Math.floor(Math.max(0, Math.min(0.999999, Number(random()) || 0)) * PROGRESS_ACTIONS.length * PROGRESS_COMPANIONS.length);
   let message = `${PROGRESS_ACTIONS[Math.floor(index / PROGRESS_COMPANIONS.length)]}，${PROGRESS_COMPANIONS[index % PROGRESS_COMPANIONS.length]}`;
@@ -184,4 +205,4 @@ function isRetryableImageError(error) {
   return /\b(?:408|429|50[0-4])\b|timeout|network|failed to fetch|enotfound|econn|socket|temporar|overload/i.test(message);
 }
 
-module.exports = { IMAGE_PROGRESS_INTERVAL_MS, accountProgressText, assertImageDownloadSize, assertLocalImageUploadSize, buildImageModelKeyMap, calculateCost, createAccountBalanceRequest, createBalanceRequest, createHistoryEntry, createImageKeyPayload, createLocalImagePreview, createSessionTokenRequest, createTextToImagePayload, describeAvailableGroups, extractImageResults, extractImageTaskId, generationProgressText, imageBatchResultText, isRetryableImageError, localImageMimeType, readImageTaskProgress, readImageTaskState, readQuota, selectAvailableGroups, selectImageGroups, withTimeout };
+module.exports = { IMAGE_PROGRESS_INTERVAL_MS, accountProgressText, assertImageDownloadSize, assertLocalImageUploadSize, buildImageEditMultipart, buildImageModelKeyMap, calculateCost, createAccountBalanceRequest, createBalanceRequest, createHistoryEntry, createImageKeyPayload, createLocalImagePreview, createSessionTokenRequest, createTextToImagePayload, describeAvailableGroups, extractImageResults, extractImageTaskId, generationProgressText, imageBatchResultText, isRetryableImageError, localImageMimeType, readImageTaskProgress, readImageTaskState, readQuota, selectAvailableGroups, selectImageGroups, withTimeout };

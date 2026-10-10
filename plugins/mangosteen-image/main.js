@@ -666,11 +666,15 @@ module.exports = class MangosteenImagePlugin extends Plugin {
     return response;
   }
   async generateEdit(prompt, image) {
+    return this.generateEditMulti(prompt, [image]);
+  }
+  async generateEditMulti(prompt, images) {
     await this.refreshAgentAccess();
     this.requireKey();
     if (!String(prompt || "").trim()) throw new Error("请先输入如何修改图片");
-    this.api.assertLocalImageUploadSize(image);
-    const fields = { model: this.settings.model, prompt: String(prompt).trim(), image, size: this.settings.size, quality: "high", output_format: "png" };
+    if (!Array.isArray(images) || images.length < 1 || images.length > 4) throw new Error("请选择 1–4 张参考图片");
+    for (const image of images) this.api.assertLocalImageUploadSize(image);
+    const fields = { model: this.settings.model, prompt: String(prompt).trim(), images, size: this.settings.size, quality: "high", output_format: "png" };
     return this.submitImageTask({ taskPath: "/v1/images/edits/tasks", fallbackPath: "/v1/images/edits", mode: "图生图", prompt: fields.prompt, submit: (path) => this.postMultipart(path, fields), fallbackSubmit: async (path) => {
       const response = await this.postMultipart(path, fields);
       if (response.status >= 400) throw new Error(this.extractApiError(response.json, response.status));
@@ -697,14 +701,7 @@ module.exports = class MangosteenImagePlugin extends Plugin {
   async postMultipart(pathname, fields) {
     const https = require("https");
     const boundary = `----Mangosteen${Date.now().toString(16)}`;
-    const pushText = (items, name, value) => items.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`));
-    const chunks = [];
-    for (const [name, value] of Object.entries(fields)) {
-      if (name !== "image" && value !== undefined && value !== null) pushText(chunks, name, value);
-    }
-    const image = fields.image;
-    chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="image[]"; filename="${image.name.replaceAll('"', '')}"\r\nContent-Type: ${image.type}\r\n\r\n`), image.buffer, Buffer.from("\r\n"), Buffer.from(`--${boundary}--\r\n`));
-    const body = Buffer.concat(chunks);
+    const body = this.api.buildImageEditMultipart(fields, boundary);
     return this.requestWithImageKeyFallback((apiKey) => new Promise((resolve, reject) => {
       const request = https.request(`${API_BASE}${pathname}`, { method: "POST", headers: Object.assign({}, this.headers(false, apiKey), { "Content-Type": `multipart/form-data; boundary=${boundary}`, "Content-Length": body.length }) }, (response) => {
         const output = [];
