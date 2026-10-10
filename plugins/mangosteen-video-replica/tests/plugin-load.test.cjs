@@ -376,6 +376,25 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   fs.writeFileSync(path.join(escapedRootProject, ".work/generation-state.json"), rootExternalStateBytes);
   fs.symlinkSync(escapedRootOutside, path.join(rootSymlinkVault, "山竹视频复刻"), "dir");
 
+  const workSymlinkVault = fs.mkdtempSync(path.join(os.tmpdir(), "mangosteen-workbench-work-link-"));
+  const workSymlinkFolder = "山竹视频复刻/工作目录越界";
+  const workSymlinkProject = path.join(workSymlinkVault, ...workSymlinkFolder.split("/"));
+  const escapedWorkOutside = fs.mkdtempSync(path.join(os.tmpdir(), "mangosteen-workbench-work-outside-"));
+  const workLinkProjectBytes = JSON.stringify({ folder: workSymlinkFolder, title: "工作目录越界", shots: [] });
+  const workLinkRequestBytes = JSON.stringify(savedWorkbenchRequest);
+  const workOutsideProjectBytes = JSON.stringify({ folder: "outside-work-project", untouched: true });
+  const workOutsideRequestBytes = JSON.stringify({ outside: "request", untouched: true });
+  const workOutsideStateBytes = JSON.stringify({ status: "processing", requestMtimeMs: 903, untouched: true });
+  const workOutsideStopBytes = JSON.stringify({ requestMtimeMs: 1, requestedAt: "2026-10-11T00:00:00Z", untouched: true });
+  fs.mkdirSync(workSymlinkProject, { recursive: true });
+  fs.writeFileSync(path.join(workSymlinkProject, "project.json"), workLinkProjectBytes);
+  fs.writeFileSync(path.join(workSymlinkProject, "generation-request.json"), workLinkRequestBytes);
+  fs.writeFileSync(path.join(escapedWorkOutside, "project.json"), workOutsideProjectBytes);
+  fs.writeFileSync(path.join(escapedWorkOutside, "generation-request.json"), workOutsideRequestBytes);
+  fs.writeFileSync(path.join(escapedWorkOutside, "generation-state.json"), workOutsideStateBytes);
+  fs.writeFileSync(path.join(escapedWorkOutside, "stop-request.json"), workOutsideStopBytes);
+  fs.symlinkSync(escapedWorkOutside, path.join(workSymlinkProject, ".work"), "dir");
+
   const normalApp = plugin.app;
   try {
     plugin.app = { vault: { adapter: { getBasePath: () => projectSymlinkVault } }, workspace };
@@ -398,6 +417,20 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
     assert.strictEqual(fs.readFileSync(path.join(escapedRootProject, "generation-request.json"), "utf8"), rootExternalRequestBytes);
     assert.strictEqual(fs.readFileSync(path.join(escapedRootProject, ".work/generation-state.json"), "utf8"), rootExternalStateBytes);
     assert.strictEqual(fs.existsSync(path.join(escapedRootProject, ".work/stop-request.json")), false);
+
+    plugin.app = { vault: { adapter: { getBasePath: () => workSymlinkVault } }, workspace };
+    assert.throws(() => plugin.loadWorkbenchProject(workSymlinkFolder), /工作目录|符号链接|范围|不安全/);
+    await assert.rejects(() => plugin.stopWorkbenchGeneration(workSymlinkFolder), /工作目录|符号链接|范围|不安全/);
+    assert.throws(
+      () => plugin.writeState(workSymlinkFolder, { status: "processing", requestMtimeMs: 903 }),
+      /工作目录|符号链接|范围|不安全/,
+    );
+    assert.strictEqual(fs.readFileSync(path.join(workSymlinkProject, "project.json"), "utf8"), workLinkProjectBytes);
+    assert.strictEqual(fs.readFileSync(path.join(workSymlinkProject, "generation-request.json"), "utf8"), workLinkRequestBytes);
+    assert.strictEqual(fs.readFileSync(path.join(escapedWorkOutside, "project.json"), "utf8"), workOutsideProjectBytes);
+    assert.strictEqual(fs.readFileSync(path.join(escapedWorkOutside, "generation-request.json"), "utf8"), workOutsideRequestBytes);
+    assert.strictEqual(fs.readFileSync(path.join(escapedWorkOutside, "generation-state.json"), "utf8"), workOutsideStateBytes);
+    assert.strictEqual(fs.readFileSync(path.join(escapedWorkOutside, "stop-request.json"), "utf8"), workOutsideStopBytes);
   } finally {
     plugin.app = normalApp;
   }
@@ -612,7 +645,16 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
     status: "processing", requestMtimeMs, instanceId: plugin.instanceId,
     leaseStartedAt: new Date(now - 1000).toISOString(), leaseUpdatedAt: new Date(now).toISOString(), leaseExpiresAt: new Date(now + 60000).toISOString(),
   });
-  const leaseStopPath = path.join(leaseRoot, ".work/stop-request.json");
+  fs.writeFileSync(path.join(leaseRoot, ".work/stop-request.json"), JSON.stringify({
+    requestMtimeMs: requestMtimeMs - 1,
+    requestedAt: "2026-10-11T00:00:00Z",
+  }));
+  assert.strictEqual(plugin.isGenerationStopRequested(leaseFolder, requestMtimeMs), false);
+  assert.doesNotThrow(
+    () => plugin.assertGenerationActive(leaseFolder, requestMtimeMs),
+    "a stop marker for an older request must not stop the current request",
+  );
+  const leaseStopPath = plugin.stopRequestPath(leaseFolder);
   const originalRenameForStop = fs.renameSync;
   let stopMarkerWrites = 0;
   fs.renameSync = function trackedStopRename(source, destination) {
@@ -621,7 +663,34 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   };
   try {
     assert.strictEqual(plugin.requestGenerationStop(leaseFolder), true, "an active project must accept a graceful stop request");
+    const firstStopRequest = JSON.parse(fs.readFileSync(leaseStopPath, "utf8"));
+    writeLease({
+      status: "processing", requestMtimeMs, instanceId: plugin.instanceId,
+      leaseStartedAt: new Date(now - 1000).toISOString(), leaseUpdatedAt: new Date(now).toISOString(), leaseExpiresAt: new Date(now + 60000).toISOString(),
+    });
+    fs.writeFileSync(path.join(leaseRoot, "project.json"), JSON.stringify({
+      folder: leaseFolder,
+      title: "租约恢复",
+      status: "generating",
+      statusText: "半完成停止前的旧状态",
+      shots: [],
+    }));
     assert.strictEqual(plugin.requestGenerationStop(leaseFolder), true, "repeated stop requests must remain successful and idempotent");
+    const repairedState = JSON.parse(fs.readFileSync(path.join(leaseRoot, ".work/generation-state.json"), "utf8"));
+    assert.strictEqual(repairedState.stopRequestedAt, firstStopRequest.requestedAt);
+    assert(Number.isFinite(Date.parse(repairedState.updatedAt)));
+    assert(Date.parse(repairedState.updatedAt) >= Date.parse(firstStopRequest.requestedAt));
+    assert.match(JSON.parse(fs.readFileSync(path.join(leaseRoot, "project.json"), "utf8")).statusText, /当前已提交.*完成后停止/);
+    writeLease({
+      status: "processing",
+      requestMtimeMs,
+      instanceId: plugin.instanceId,
+      stopRequestedAt: firstStopRequest.requestedAt,
+    });
+    assert.strictEqual(plugin.requestGenerationStop(leaseFolder), true, "a matching marker must also repair a missing updatedAt");
+    const repairedTimestampState = JSON.parse(fs.readFileSync(path.join(leaseRoot, ".work/generation-state.json"), "utf8"));
+    assert.strictEqual(repairedTimestampState.stopRequestedAt, firstStopRequest.requestedAt);
+    assert(Number.isFinite(Date.parse(repairedTimestampState.updatedAt)));
   } finally {
     fs.renameSync = originalRenameForStop;
   }
@@ -778,6 +847,74 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
 
   await runMockEndToEnd({ model: "MiniMax-H3", family: "minimax-h3", resolution: "768p" });
   await runMockEndToEnd({ model: "seedance-2.5", family: "seedance", resolution: "720p" });
+
+  const stoppedVault = fs.mkdtempSync(path.join(os.tmpdir(), "mangosteen-replica-stopped-path-"));
+  const stoppedFolder = "山竹视频复刻/首镜完成后停止";
+  const stoppedRoot = path.join(stoppedVault, ...stoppedFolder.split("/"));
+  const stoppedVideoRoot = path.join(stoppedVault, "山竹视频");
+  fs.mkdirSync(stoppedRoot, { recursive: true });
+  fs.mkdirSync(stoppedVideoRoot, { recursive: true });
+  fs.writeFileSync(path.join(stoppedRoot, "project.json"), JSON.stringify({
+    folder: stoppedFolder,
+    title: "首镜完成后停止",
+    frames: [],
+    shots: [],
+  }));
+  const stoppedRequest = {
+    version: 2,
+    confirmed: true,
+    character: { id: "stop-hero", prompt: "停止测试人物" },
+    scenes: [{ id: "stop-scene", prompt: "停止测试场景" }],
+    settings: { imageModel: "gpt-image-2-w", videoModel: "MiniMax-H3", ratio: "9:16", resolution: "768p" },
+    shots: [
+      { id: "001", title: "已提交镜头", sceneId: "stop-scene", duration: 4, imagePrompt: "首镜首帧", videoPrompt: "首镜视频" },
+      { id: "002", title: "不得提交镜头", sceneId: "stop-scene", duration: 4, imagePrompt: "次镜首帧", videoPrompt: "次镜视频" },
+    ],
+  };
+  const stoppedRequestPath = path.join(stoppedRoot, "generation-request.json");
+  fs.writeFileSync(stoppedRequestPath, JSON.stringify(stoppedRequest));
+  const stoppedImage = generationImage({
+    generateText: async (prompt) => ({ candidate: { kind: "base64", value: Buffer.from(`asset:${prompt}`).toString("base64") } }),
+    generateEdit: async () => { throw new Error("version 2 must use generateEditMulti"); },
+    generateEditMulti: async (prompt) => ({ candidate: { kind: "base64", value: Buffer.from(`frame:${prompt}`).toString("base64") } }),
+    extractResults: (response) => response?.candidate ? [response.candidate] : [],
+  });
+  let stoppedVideoSubmissions = 0;
+  const stoppedVideo = {
+    settings: { model: "MiniMax-H3", resolution: "768p" },
+    refreshAgentAccess: async () => ({ videoModelKeys: { "MiniMax-H3": "test-key" } }),
+    submitVideo: async () => {
+      stoppedVideoSubmissions += 1;
+      const id = `stopped-video-${stoppedVideoSubmissions}`;
+      fs.writeFileSync(path.join(stoppedVideoRoot, `${id}.mp4`), `video:${id}`);
+      return { id };
+    },
+  };
+  plugin.app = { vault: { adapter: { getBasePath: () => stoppedVault } } };
+  plugin.processing = new Set();
+  plugin.referenceAssetPromises = new Map();
+  plugin.getGenerationPlugins = () => ({ image: stoppedImage, video: stoppedVideo });
+  plugin.waitForVideo = async (_video, taskId) => {
+    assert.strictEqual(plugin.requestGenerationStop(stoppedFolder), true);
+    return { localPath: `山竹视频/${taskId}.mp4` };
+  };
+  plugin.openVaultPath = async () => true;
+  try {
+    await plugin.processRequest(stoppedRequestPath);
+    const stoppedProject = JSON.parse(fs.readFileSync(path.join(stoppedRoot, "project.json"), "utf8"));
+    const stoppedState = JSON.parse(fs.readFileSync(path.join(stoppedRoot, ".work/generation-state.json"), "utf8"));
+    assert.strictEqual(stoppedVideoSubmissions, 1, "stop after the current completion must prevent the next provider submission");
+    assert.strictEqual(stoppedState.status, "stopped");
+    assert.strictEqual(stoppedProject.status, "stopped");
+    assert(stoppedProject.shots[0].videoPath, "the completed current provider artifact must remain attached");
+    assert.strictEqual(
+      fs.readFileSync(path.join(stoppedVault, ...stoppedProject.shots[0].videoPath.split("/")), "utf8"),
+      "video:stopped-video-1",
+    );
+    assert.strictEqual(stoppedProject.shots[1].videoPath, "", "the next shot must remain unsubmitted");
+  } finally {
+    fs.rmSync(stoppedVault, { recursive: true, force: true });
+  }
   plugin.app = { vault: { adapter: { getBasePath: () => vault } } };
   plugin.processing = new Set();
   plugin.referenceAssetPromises = new Map();
@@ -1193,6 +1330,8 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   fs.rmSync(escapedProjectOutside, { recursive: true, force: true });
   fs.rmSync(rootSymlinkVault, { recursive: true, force: true });
   fs.rmSync(escapedRootOutside, { recursive: true, force: true });
+  fs.rmSync(workSymlinkVault, { recursive: true, force: true });
+  fs.rmSync(escapedWorkOutside, { recursive: true, force: true });
   fs.rmSync(escapedMediaOutside, { recursive: true, force: true });
   delete global.window;
   Module._load = originalLoad;

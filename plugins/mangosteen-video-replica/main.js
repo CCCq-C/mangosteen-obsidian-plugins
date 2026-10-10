@@ -316,18 +316,45 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     if (!isInsidePath(realVault, realRoot) || !isInsidePath(realRoot, realFolder)) {
       throw new Error("项目路径通过符号链接超出山竹视频复刻范围，已拒绝访问。");
     }
-    return { folder: normalized, absoluteFolder };
+    return { folder: normalized, absoluteFolder, realFolder };
   }
 
-  workbenchProjectPaths(folder) {
+  checkedWorkbenchWorkDirectory(folder, { create = false } = {}) {
     const checked = this.checkedWorkbenchProjectFolder(folder);
+    const workDirectory = path.join(checked.realFolder, ".work");
+    let workStat = fs.lstatSync(workDirectory, { throwIfNoEntry: false });
+    if (!workStat && create) {
+      try {
+        fs.mkdirSync(workDirectory);
+      } catch (error) {
+        if (error?.code !== "EEXIST") throw error;
+      }
+      workStat = fs.lstatSync(workDirectory, { throwIfNoEntry: false });
+    }
+    if (!workStat) return { ...checked, workDirectory };
+    if (workStat.isSymbolicLink()) throw new Error("项目 .work 工作目录不能是符号链接，已拒绝访问。");
+    if (!workStat.isDirectory()) throw new Error("项目 .work 工作目录不是有效目录，已拒绝访问。");
+    let realWorkDirectory;
+    try {
+      realWorkDirectory = fs.realpathSync(workDirectory);
+    } catch (_) {
+      throw new Error("项目 .work 工作目录无法解析，已拒绝访问。");
+    }
+    if (!isInsidePath(checked.realFolder, realWorkDirectory)) {
+      throw new Error("项目 .work 工作目录超出项目范围，已拒绝访问。");
+    }
+    return { ...checked, workDirectory: realWorkDirectory };
+  }
+
+  workbenchProjectPaths(folder, { createWorkDirectory = false } = {}) {
+    const checked = this.checkedWorkbenchWorkDirectory(folder, { create: createWorkDirectory });
     if (checked.folder === ROOT) throw new Error(`请选择 ${ROOT}/ 下的具体项目。`);
     return {
       folder: checked.folder,
       projectPath: path.join(checked.absoluteFolder, "project.json"),
       requestPath: path.join(checked.absoluteFolder, REQUEST_FILE),
-      statePath: path.join(checked.absoluteFolder, STATE_FILE),
-      stopPath: path.join(checked.absoluteFolder, STOP_FILE),
+      statePath: path.join(checked.workDirectory, path.basename(STATE_FILE)),
+      stopPath: path.join(checked.workDirectory, path.basename(STOP_FILE)),
     };
   }
 
@@ -786,7 +813,8 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       state.leaseUpdatedAt = now.toISOString();
       state.leaseExpiresAt = new Date(now.getTime() + PROCESSING_LEASE_MS).toISOString();
     }
-    writeJson(path.join(this.absolute(projectFolder), STATE_FILE), state);
+    const paths = this.workbenchProjectPaths(projectFolder, { createWorkDirectory: true });
+    writeJson(paths.statePath, state);
     this.requestWorkbenchRefresh();
   }
 
@@ -815,28 +843,47 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     if (!fs.existsSync(paths.statePath)) return false;
     const state = this.readJson(paths.statePath);
     if (state.status !== "processing" || !Number.isFinite(Number(state.requestMtimeMs))) return false;
+    let markerMatches = false;
+    let requestedAt = "";
     if (fs.existsSync(paths.stopPath)) {
       try {
         const existing = this.readJson(paths.stopPath);
-        if (Number(existing.requestMtimeMs) === Number(state.requestMtimeMs)) return true;
+        if (Number(existing.requestMtimeMs) === Number(state.requestMtimeMs)) {
+          markerMatches = true;
+          requestedAt = String(existing.requestedAt || "").trim();
+        }
       } catch (_) { /* replace an unreadable marker atomically */ }
     }
-    const requestedAt = new Date().toISOString();
-    writeJson(paths.stopPath, {
-      requestMtimeMs: Number(state.requestMtimeMs),
-      requestedAt,
-    });
-    state.stopRequestedAt = requestedAt;
-    state.updatedAt = requestedAt;
-    writeJson(paths.statePath, state);
-    this.requestWorkbenchRefresh();
+    requestedAt ||= new Date().toISOString();
+    if (!markerMatches) {
+      writeJson(paths.stopPath, {
+        requestMtimeMs: Number(state.requestMtimeMs),
+        requestedAt,
+      });
+    }
+    let repaired = !markerMatches;
+    const stateUpdatedAtMs = Date.parse(String(state.updatedAt || ""));
+    const requestedAtMs = Date.parse(requestedAt);
+    const stateNeedsRepair = state.stopRequestedAt !== requestedAt
+      || !Number.isFinite(stateUpdatedAtMs)
+      || (Number.isFinite(requestedAtMs) && stateUpdatedAtMs < requestedAtMs);
+    if (stateNeedsRepair) {
+      state.stopRequestedAt = requestedAt;
+      state.updatedAt = new Date().toISOString();
+      writeJson(paths.statePath, state);
+      repaired = true;
+    }
+    const stoppedStatusText = "已请求停止：当前已提交的平台任务完成后停止，不再提交新的付费任务。";
     try {
       const project = this.readJson(paths.projectPath);
-      project.statusText = "已请求停止：当前已提交的平台任务完成后停止，不再提交新的付费任务。";
-      writeJson(paths.projectPath, project);
-      atomicWrite(path.join(path.dirname(paths.projectPath), "00-项目总览.md"), core.dashboardMarkdown(project));
-      this.requestWorkbenchRefresh();
+      if (project.statusText !== stoppedStatusText) {
+        project.statusText = stoppedStatusText;
+        writeJson(paths.projectPath, project);
+        atomicWrite(path.join(path.dirname(paths.projectPath), "00-项目总览.md"), core.dashboardMarkdown(project));
+        repaired = true;
+      }
     } catch (_) { /* stop marker remains authoritative */ }
+    if (repaired) this.requestWorkbenchRefresh();
     return true;
   }
 
@@ -848,18 +895,19 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
 
   async stopLatestGeneration() {
     const record = this.projectRecords().find((item) => {
-      const statePath = path.join(path.dirname(item.projectPath), STATE_FILE);
-      if (!fs.existsSync(statePath)) return false;
-      try { return this.readJson(statePath).status === "processing"; } catch (_) { return false; }
+      try {
+        const { statePath } = this.workbenchProjectPaths(item.project.folder);
+        return fs.existsSync(statePath) && this.readJson(statePath).status === "processing";
+      } catch (_) { return false; }
     });
     if (!record) { new Notice("当前没有正在运行的视频复刻任务。", 6000); return false; }
     return this.stopWorkbenchGeneration(record.project.folder);
   }
 
   requestAlreadyHandled(projectFolder, requestMtimeMs, nowMs = Date.now()) {
-    const statePath = path.join(this.absolute(projectFolder), STATE_FILE);
-    if (!fs.existsSync(statePath)) return false;
     try {
+      const { statePath } = this.workbenchProjectPaths(projectFolder);
+      if (!fs.existsSync(statePath)) return false;
       const state = this.readJson(statePath);
       if (Number(state.requestMtimeMs) !== Number(requestMtimeMs)) return false;
       if (["completed", "completed_with_errors", "failed", "stopped"].includes(state.status)) return true;
@@ -887,7 +935,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       this.processing.add(requestPath);
       leaseTimer = setInterval(() => {
         try {
-          const statePath = path.join(this.absolute(projectFolder), STATE_FILE);
+          const { statePath } = this.workbenchProjectPaths(projectFolder);
           if (!fs.existsSync(statePath)) return;
           const state = this.readJson(statePath);
           if (state.status === "processing" && Number(state.requestMtimeMs) === Number(requestMtimeMs) && state.instanceId === this.instanceId) {
