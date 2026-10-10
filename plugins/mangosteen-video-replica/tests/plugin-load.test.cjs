@@ -86,7 +86,7 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   assert.strictEqual(state.requestMtimeMs, fs.statSync(requestPath).mtimeMs);
   assert.strictEqual(plugin.requestAlreadyHandled("山竹视频复刻/失败任务", state.requestMtimeMs), true);
 
-  async function runMockEndToEnd(model, family) {
+  async function runMockEndToEnd({ model, family, resolution }) {
     const caseVault = fs.mkdtempSync(path.join(os.tmpdir(), `mangosteen-replica-e2e-${family}-`));
     const projectFolder = "山竹视频复刻/双镜头端到端";
     const projectRoot = path.join(caseVault, ...projectFolder.split("/"));
@@ -105,7 +105,7 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
       confirmed: true,
       character: { id: "hero", prompt: "固定人物参考板" },
       scenes: [{ id: "studio", prompt: "固定摄影棚场景" }],
-      settings: { ratio: "9:16", resolution: "720p", videoModel: model },
+      settings: { ratio: "9:16", resolution, videoModel: model },
       shots: [
         { title: "入场", sceneId: "studio", duration: 4, imagePrompt: "人物走入摄影棚", videoPrompt: "人物向前走" },
         { title: "定格", sceneId: "studio", duration: 4, imagePrompt: "人物转身", lastImagePrompt: "人物停在灯光下", videoPrompt: "镜头缓慢推进" },
@@ -128,7 +128,7 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
       extractResults: (response) => response?.candidate ? [response.candidate] : [],
     };
     const video = {
-      settings: { model, resolution: "720p" },
+      settings: { model, resolution },
       refreshAgentAccess: async () => ({ videoModelKeys: { [model]: "mock-key-never-used" } }),
       submitVideo: async (options) => {
         submittedOptions.push(options);
@@ -168,10 +168,36 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
       ], `${family}: retained videos must match both mock tasks`);
 
       assert.strictEqual(submittedOptions.length, 2, `${family}: both shots must submit video calls`);
+      const expectedResolution = family === "minimax-h3" ? "768p" : "720p";
+      assert.deepStrictEqual(submittedOptions.map((options) => options.resolution), [
+        expectedResolution,
+        expectedResolution,
+      ], `${family}: every video call must use its model-valid resolution`);
       if (family === "minimax-h3") {
-        assert(submittedOptions.every((options) => options.firstImageFile?.buffer), "MiniMax-H3: every call must contain a local first frame");
+        assert.deepStrictEqual(submittedOptions.map((options) => ({
+          first: options.firstImageFile?.name,
+          last: options.lastImageFile?.name || null,
+        })), [
+          { first: "镜头-001-入场-首帧.png", last: null },
+          { first: "镜头-002-定格-首帧.png", last: "镜头-002-定格-尾帧.png" },
+        ], "MiniMax-H3: first/last local files must stay in shot order");
+        const submittedKeyframes = [
+          submittedOptions[0].firstImageFile,
+          submittedOptions[1].firstImageFile,
+          submittedOptions[1].lastImageFile,
+        ];
+        assert(submittedKeyframes.every((file) => Buffer.isBuffer(file?.buffer)), "MiniMax-H3: every submitted keyframe must contain local file bytes");
+        const savedKeyframePaths = [
+          completed.shots[0].firstImagePath,
+          completed.shots[1].firstImagePath,
+          completed.shots[1].lastImagePath,
+        ];
+        submittedKeyframes.forEach((file, index) => {
+          const savedBytes = fs.readFileSync(path.join(caseVault, ...savedKeyframePaths[index].split("/")));
+          assert(file.buffer.equals(savedBytes), `MiniMax-H3: submitted keyframe ${index + 1} must match its saved shot file`);
+        });
+        assert.strictEqual(new Set(submittedKeyframes.map((file) => file.buffer.toString("hex"))).size, 3, "MiniMax-H3: shot keyframes must not be swapped or reused");
         assert.strictEqual(Object.hasOwn(submittedOptions[0], "lastImageFile"), false, "MiniMax-H3: last frame must stay optional");
-        assert(submittedOptions[1].lastImageFile?.buffer, "MiniMax-H3: second call must contain its local last frame");
         assert(submittedOptions.every((options) => !Object.hasOwn(options, "referenceImageFiles")), "MiniMax-H3: reference image arrays must not be sent");
       } else {
         assert(submittedOptions.every((options) => !Object.hasOwn(options, "firstImageFile") && !Object.hasOwn(options, "lastImageFile")), "Seedance: first/last frame fields must not be sent");
@@ -186,8 +212,8 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
     }
   }
 
-  await runMockEndToEnd("MiniMax-H3", "minimax-h3");
-  await runMockEndToEnd("seedance-2.5", "seedance");
+  await runMockEndToEnd({ model: "MiniMax-H3", family: "minimax-h3", resolution: "768p" });
+  await runMockEndToEnd({ model: "seedance-2.5", family: "seedance", resolution: "720p" });
   plugin.app = { vault: { adapter: { getBasePath: () => vault } } };
   plugin.processing = new Set();
   plugin.referenceAssetPromises = new Map();
