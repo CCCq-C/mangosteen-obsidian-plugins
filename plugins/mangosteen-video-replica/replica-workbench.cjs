@@ -148,6 +148,9 @@ class VideoReplicaWorkbenchView extends ItemView {
       const nextSnapshot = {
         project: loaded?.project && typeof loaded.project === "object" ? loaded.project : {},
         request: loaded?.request && typeof loaded.request === "object" ? loaded.request : {},
+        requestMtimeMs: typeof loaded?.requestMtimeMs === "number" && Number.isFinite(loaded.requestMtimeMs)
+          ? loaded.requestMtimeMs
+          : null,
         generationState: loaded?.generationState && typeof loaded.generationState === "object"
           ? loaded.generationState
           : {},

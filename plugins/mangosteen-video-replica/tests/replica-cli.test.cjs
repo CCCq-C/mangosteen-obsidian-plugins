@@ -10,6 +10,7 @@ const {
   resolveRuntimes,
   sampleFrames,
   transcriptSegments,
+  whisperArguments,
 } = require("../replica-cli.cjs");
 
 const promptForVoiceAnalysis = analysisPrompt({
@@ -23,6 +24,26 @@ assert.match(promptForVoiceAnalysis, /voiceProfile/);
 assert.match(promptForVoiceAnalysis, /voiceDirection/);
 assert.match(promptForVoiceAnalysis, /无法实际听到原声音频/);
 assert.match(promptForVoiceAnalysis, /口音/);
+assert.match(promptForVoiceAnalysis, /背景歌曲歌词不得当成人物对白/);
+assert.match(promptForVoiceAnalysis, /画外背景歌曲/);
+
+const whisperRoot = fs.mkdtempSync(path.join(os.tmpdir(), "mangosteen-whisper-priority-"));
+fs.mkdirSync(path.join(whisperRoot, "models"), { recursive: true });
+fs.writeFileSync(path.join(whisperRoot, "models/ggml-base.bin"), "base");
+fs.writeFileSync(path.join(whisperRoot, "models/ggml-small.bin"), "small");
+assert.strictEqual(resolveRuntimes(whisperRoot).whisperModel, path.join(whisperRoot, "models/ggml-small.bin"));
+assert.deepStrictEqual(
+  whisperArguments(
+    { whisperModel: "/models/small.bin" },
+    "/work/audio.wav",
+    "/work/whisper-result",
+    "  品牌   名称  ",
+    4,
+  ).slice(0, 10),
+  ["-m", "/models/small.bin", "-f", "/work/audio.wav", "-l", "zh", "--prompt", "品牌 名称", "--carry-initial-prompt", "-oj"],
+  "Whisper must receive the source-name prompt and carry it across segments",
+);
+fs.rmSync(whisperRoot, { recursive: true, force: true });
 
 assert.deepStrictEqual(transcriptSegments({
   transcription: [{ timestamps: { from: "00:00:00,000", to: "00:00:07,000" }, text: "(字幕製作:貝爾)" }],

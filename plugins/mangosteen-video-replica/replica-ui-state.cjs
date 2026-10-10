@@ -61,11 +61,21 @@ function deriveWorkbenchState(options = {}) {
   const input = plainObject(options);
   const project = plainObject(input.project);
   const request = plainObject(input.request);
-  const generationState = plainObject(input.generationState);
+  const loadedGenerationState = plainObject(input.generationState);
+  const requestMtimeMs = typeof input.requestMtimeMs === "number" ? input.requestMtimeMs : Number.NaN;
+  const generationRequestMtimeMs = typeof loadedGenerationState.requestMtimeMs === "number"
+    ? loadedGenerationState.requestMtimeMs
+    : Number.NaN;
+  const generationState = Number.isFinite(requestMtimeMs)
+    && Number.isFinite(generationRequestMtimeMs)
+    && generationRequestMtimeMs === requestMtimeMs
+    ? loadedGenerationState
+    : {};
   const empty = Object.keys(project).length === 0;
   const shots = records(project.shots);
   const processing = generationState.status === "processing";
-  const locked = empty || request.confirmed === true || processing || project.status === "generating";
+  const locked = empty || request.confirmed === true || processing
+    || (!generationState.status && project.status === "generating");
   const requestedSettings = plainObject(request.settings);
   const startedAtMs = Date.parse(text(generationState.startedAt));
   const currentNowMs = Number.isFinite(input.nowMs) ? input.nowMs : Date.now();
@@ -78,17 +88,20 @@ function deriveWorkbenchState(options = {}) {
     : "";
   const shotError = shots.map((shot) => text(shot.error)).find(Boolean) || "";
   const characterAsset = plainObject(project.characterAsset);
+  const authoritativeStatusText = text(generationState.statusText)
+    || (["stopped", "failed"].includes(generationState.status) ? stateError : "");
+  const progressProject = generationState.status ? { ...project, status: generationState.status } : project;
 
   return {
     empty,
     folder: text(project.folder),
     title: text(project.title),
-    status: text(project.status || generationState.status),
-    statusText: text(project.statusText),
+    status: text(generationState.status || project.status),
+    statusText: authoritativeStatusText || text(project.statusText),
     locked,
     canConfirm: !locked && project.status === "analysis_ready" && request.confirmed === false,
     canStop: processing && !text(generationState.stopRequestedAt),
-    progress: calculateStageProgress({ project, request, generationState }),
+    progress: calculateStageProgress({ project: progressProject, request, generationState }),
     current: {
       step: text(generationState.currentStep),
       model: text(generationState.model || project.videoModel || requestedSettings.videoModel || project.imageModel || requestedSettings.imageModel),

@@ -82,8 +82,10 @@ const generating = deriveWorkbenchState({
     ],
   },
   request: { confirmed: true, shots: [{}, {}, {}] },
+  requestMtimeMs: 100,
   generationState: {
     status: "processing",
+    requestMtimeMs: 100,
     currentStep: "镜头 002",
     startedAt: "2026-10-11T00:00:00Z",
   },
@@ -100,7 +102,8 @@ assert.strictEqual(generating.canStop, true);
 const stopping = deriveWorkbenchState({
   project: { status: "generating" },
   request: { confirmed: true },
-  generationState: { status: "processing", stopRequestedAt: "2026-10-11T00:01:00Z" },
+  requestMtimeMs: 101,
+  generationState: { status: "processing", requestMtimeMs: 101, stopRequestedAt: "2026-10-11T00:01:00Z" },
 });
 assert.strictEqual(stopping.canStop, false, "a recorded stop request must disable repeated stop actions");
 
@@ -127,7 +130,8 @@ const completed = deriveWorkbenchState({
     shots: [{ id: "001", status: "已完成", videoPath: "001.mp4" }],
   },
   request: { confirmed: true, shots: [{}] },
-  generationState: { status: "completed", currentStep: "完成" },
+  requestMtimeMs: 102,
+  generationState: { status: "completed", requestMtimeMs: 102, currentStep: "完成" },
   nowMs,
 });
 assert.deepStrictEqual(completed.progress, { percent: 100, indeterminate: false, label: "成片完成" });
@@ -162,10 +166,61 @@ const errors = deriveWorkbenchState({
     shots: [{ error: "镜头错误" }],
   },
   request: { confirmed: true },
-  generationState: { status: "failed", error: "结构化错误" },
+  requestMtimeMs: 103,
+  generationState: { status: "failed", requestMtimeMs: 103, error: "结构化错误" },
   nowMs,
 });
 assert.strictEqual(errors.error, "结构化错误");
+
+const stoppedSameRequest = deriveWorkbenchState({
+  project: { folder: "山竹视频复刻/停止", status: "generating", statusText: "旧的生成中状态" },
+  request: { confirmed: true },
+  requestMtimeMs: 200,
+  generationState: { status: "stopped", requestMtimeMs: 200, error: "用户停止" },
+  nowMs,
+});
+assert.strictEqual(stoppedSameRequest.status, "stopped", "same-request terminal state must override stale project generating status");
+assert.strictEqual(stoppedSameRequest.statusText, "用户停止");
+assert.strictEqual(stoppedSameRequest.error, "用户停止");
+
+const failedSameRequest = deriveWorkbenchState({
+  project: { folder: "山竹视频复刻/失败", status: "generating", statusText: "旧的生成中状态" },
+  request: { confirmed: true },
+  requestMtimeMs: 201,
+  generationState: { status: "failed", requestMtimeMs: 201, error: "本次请求失败" },
+  nowMs,
+});
+assert.strictEqual(failedSameRequest.status, "failed");
+assert.strictEqual(failedSameRequest.statusText, "本次请求失败");
+assert.strictEqual(failedSameRequest.error, "本次请求失败");
+
+const staleState = deriveWorkbenchState({
+  project: { folder: "山竹视频复刻/新草案", status: "analysis_ready", statusText: "等待确认" },
+  request: { confirmed: false },
+  requestMtimeMs: 301,
+  generationState: {
+    status: "processing",
+    requestMtimeMs: 300,
+    currentStep: "旧请求镜头",
+    error: "旧请求错误",
+  },
+  nowMs,
+});
+assert.strictEqual(staleState.status, "analysis_ready", "an old generation state must not relabel a new request");
+assert.strictEqual(staleState.locked, false, "an old generation state must not lock a new draft");
+assert.strictEqual(staleState.canConfirm, true);
+assert.strictEqual(staleState.canStop, false);
+assert.deepStrictEqual(staleState.current, { step: "", model: "", elapsedMs: 0 });
+assert.strictEqual(staleState.error, null);
+const unknownMtimeState = deriveWorkbenchState({
+  project: { folder: "山竹视频复刻/未知时间", status: "analysis_ready" },
+  request: { confirmed: false },
+  requestMtimeMs: null,
+  generationState: { status: "processing", requestMtimeMs: null, currentStep: "不得采用" },
+  nowMs,
+});
+assert.strictEqual(unknownMtimeState.canConfirm, true, "missing mtimes must not be coerced into a false state match");
+assert.strictEqual(unknownMtimeState.canStop, false);
 assert.strictEqual(deriveWorkbenchState({
   project: { status: "completed_with_errors", statusText: "项目状态错误", shots: [{ error: "镜头错误" }] },
   request: { confirmed: true },

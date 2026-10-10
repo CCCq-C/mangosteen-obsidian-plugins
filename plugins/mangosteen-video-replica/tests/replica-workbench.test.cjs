@@ -148,6 +148,7 @@ const readySnapshot = {
     shots: [{ id: "001", title: "开场", status: "等待生成" }],
   },
   request,
+  requestMtimeMs: 100,
   generationState: {},
 };
 
@@ -471,7 +472,8 @@ function createView(plugin) {
       shots: [{ id: "001", title: "开场", status: "失败", error: "上游生成失败" }],
     },
     request: { ...clone(request), confirmed: true },
-    generationState: { status: "failed", error: "上游生成失败" },
+    requestMtimeMs: 122,
+    generationState: { status: "failed", requestMtimeMs: 122, error: "上游生成失败" },
   });
   const failedView = createView(failedPlugin);
   await assert.doesNotReject(() => failedView.onOpen());
@@ -485,6 +487,7 @@ function createView(plugin) {
       statusText: "正在生成镜头",
     },
     request: { ...clone(request), confirmed: true },
+    requestMtimeMs: 123,
     generationState: { status: "processing", currentStep: "镜头 001", requestMtimeMs: 123 },
   });
   const processingView = createView(processingPlugin);
@@ -527,6 +530,7 @@ function createView(plugin) {
   const failedStopPlugin = createPlugin({
     project: { ...clone(readySnapshot.project), status: "generating" },
     request: { ...clone(request), confirmed: true },
+    requestMtimeMs: 124,
     generationState: { status: "processing", requestMtimeMs: 124 },
   });
   failedStopPlugin.stopWorkbenchGeneration = async () => { throw new Error("停止调用失败"); };

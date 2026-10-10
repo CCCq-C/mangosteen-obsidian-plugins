@@ -188,17 +188,21 @@ function transcriptMarkdown(segments, sourceName) {
   return lines.join("\n");
 }
 
+function whisperArguments(runtime, audioPath, outputPrefix, sourceName, cpuCount = os.cpus().length) {
+  const initialPrompt = String(sourceName || "").replace(/\s+/g, " ").trim().slice(0, 320);
+  return [
+    "-m", runtime.whisperModel, "-f", audioPath, "-l", "zh",
+    ...(initialPrompt ? ["--prompt", initialPrompt, "--carry-initial-prompt"] : []),
+    "-oj", "-of", outputPrefix, "-np", "-t", String(Math.max(2, Math.min(8, cpuCount - 1))),
+  ];
+}
+
 async function transcribeAudio(runtime, audioPath, workFolder, sourceName) {
   if (!fs.existsSync(audioPath)) return { segments: [], jsonPath: "", markdown: transcriptMarkdown([], sourceName) };
   if (!runtime.whisper) throw new Error("缺少 Whisper.cpp。请重新安装山竹视频复刻组件。");
   if (!runtime.whisperModel) throw new Error("缺少 Whisper 中文模型。请重新安装山竹视频复刻组件。");
   const outputPrefix = path.join(workFolder, "whisper-result");
-  const initialPrompt = String(sourceName || "").replace(/\s+/g, " ").trim().slice(0, 320);
-  await run(runtime.whisper, [
-    "-m", runtime.whisperModel, "-f", audioPath, "-l", "zh",
-    ...(initialPrompt ? ["--prompt", initialPrompt, "--carry-initial-prompt"] : []),
-    "-oj", "-of", outputPrefix, "-np", "-t", String(Math.max(2, Math.min(8, os.cpus().length - 1))),
-  ]);
+  await run(runtime.whisper, whisperArguments(runtime, audioPath, outputPrefix, sourceName));
   const jsonPath = `${outputPrefix}.json`;
   if (!fs.existsSync(jsonPath)) throw new Error("Whisper 已运行，但没有输出转写文件。");
   const json = JSON.parse(fs.readFileSync(jsonPath, "utf8"));
@@ -407,4 +411,5 @@ module.exports = {
   resolveRuntimes,
   sampleFrames,
   transcriptSegments,
+  whisperArguments,
 };

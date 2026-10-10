@@ -66,11 +66,41 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   };
   plugin.manifest = { dir: "plugins/mangosteen-video-replica" };
   const commandIds = [];
-  plugin.addRibbonIcon = plugin.registerInterval = plugin.registerEvent = () => {};
+  const registeredIntervals = [];
+  const registeredCleanups = [];
+  const timeoutCallbacks = new Map();
+  const clearedTimeouts = [];
+  let nextTimeoutId = 10;
+  plugin.addRibbonIcon = plugin.registerEvent = () => {};
+  plugin.registerInterval = (id) => { registeredIntervals.push(id); };
+  plugin.register = (cleanup) => { registeredCleanups.push(cleanup); };
   plugin.addCommand = (command) => { commandIds.push(command.id); };
   plugin.registerView = (type, creator) => { registeredViews.push({ type, creator }); };
-  global.window = { setInterval: () => 1, setTimeout: () => 1 };
+  global.window = {
+    setInterval: (_callback, delay) => ({ kind: "interval", delay }),
+    setTimeout: (callback, delay) => {
+      const id = nextTimeoutId++;
+      timeoutCallbacks.set(id, { callback, delay });
+      return id;
+    },
+    clearTimeout: (id) => { clearedTimeouts.push(id); timeoutCallbacks.delete(id); },
+  };
   await plugin.onload();
+  assert.strictEqual(registeredIntervals.length, 1);
+  assert.strictEqual(registeredIntervals[0].delay, 5000, "background scanning must keep the registered 5-second interval");
+  assert.strictEqual(timeoutCallbacks.size, 1);
+  const [[startupTimeoutId, startupTimeout]] = timeoutCallbacks.entries();
+  assert.strictEqual(startupTimeout.delay, 1500);
+  assert.strictEqual(registeredCleanups.length, 1, "startup scanning timeout must register lifecycle cleanup");
+  let startupScans = 0;
+  const originalScanRequests = plugin.scanRequests;
+  plugin.scanRequests = async () => { startupScans += 1; };
+  registeredCleanups[0]();
+  assert.deepStrictEqual(clearedTimeouts, [startupTimeoutId]);
+  timeoutCallbacks.get(startupTimeoutId)?.callback();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.strictEqual(startupScans, 0, "unloading before the startup timeout must prevent scanning and paid processing");
+  plugin.scanRequests = originalScanRequests;
   assert.strictEqual(registeredViews.length, 1);
   assert.strictEqual(registeredViews[0].type, "mangosteen-video-replica-workbench");
   assert(commandIds.includes("open-video-replica-workbench"));
@@ -191,6 +221,7 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   );
   const loadedWorkbenchProject = await plugin.loadWorkbenchProject(workbenchFolder);
   assert.strictEqual(loadedWorkbenchProject.project.title, "驾驶舱草案");
+  assert.strictEqual(loadedWorkbenchProject.requestMtimeMs, fs.statSync(workbenchRequestPath).mtimeMs);
   assert.deepStrictEqual(
     loadedWorkbenchProject.request.shots.map((shot) => shot.workbenchId),
     ["001", "001~2"],
@@ -343,8 +374,10 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   fs.writeFileSync(workbenchRequestPath, JSON.stringify({ ...savedWorkbenchRequest, confirmed: true }));
   await assert.rejects(() => plugin.saveWorkbenchDraft(workbenchFolder, savedWorkbenchRequest), /已确认|不能编辑/);
   fs.writeFileSync(workbenchRequestPath, JSON.stringify(savedWorkbenchRequest));
-  fs.writeFileSync(workbenchStatePath, JSON.stringify({ status: "processing" }));
+  fs.writeFileSync(workbenchStatePath, JSON.stringify({ status: "processing", requestMtimeMs: fs.statSync(workbenchRequestPath).mtimeMs }));
   await assert.rejects(() => plugin.saveWorkbenchDraft(workbenchFolder, savedWorkbenchRequest), /生成中|不能编辑/);
+  fs.writeFileSync(workbenchStatePath, JSON.stringify({ status: "processing", requestMtimeMs: fs.statSync(workbenchRequestPath).mtimeMs - 1 }));
+  assert.doesNotThrow(() => plugin.currentWorkbenchLock(plugin.workbenchProjectPaths(workbenchFolder)), "old processing state must not lock a newer draft request");
   fs.writeFileSync(workbenchStatePath, JSON.stringify({ status: "ready" }));
   await assert.rejects(() => plugin.saveWorkbenchDraft("其他目录/越界项目", savedWorkbenchRequest), /山竹视频复刻/);
   await assert.rejects(() => plugin.saveWorkbenchDraft("山竹视频复刻/../越界项目", savedWorkbenchRequest), /不安全|山竹视频复刻/);
@@ -410,6 +443,7 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
     plugin.app = { vault: { adapter: { getBasePath: () => rootSymlinkVault } }, workspace };
     assert.throws(() => plugin.listWorkbenchProjects(), /符号链接|范围|不安全/);
     assert.throws(() => plugin.loadWorkbenchProject("山竹视频复刻/越界项目"), /符号链接|范围|不安全/);
+    await assert.rejects(() => plugin.prepareVideo("/tmp/must-not-be-opened.mp4"), /根目录|符号链接|范围|不安全/);
     await assert.rejects(() => plugin.saveWorkbenchDraft("山竹视频复刻/越界项目", savedWorkbenchRequest), /符号链接|范围|不安全/);
     await assert.rejects(() => plugin.confirmWorkbenchDraft("山竹视频复刻/越界项目"), /符号链接|范围|不安全/);
     await assert.rejects(() => plugin.stopWorkbenchGeneration("山竹视频复刻/越界项目"), /符号链接|范围|不安全/);
@@ -435,6 +469,165 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
     plugin.app = normalApp;
   }
 
+  const projectJsonLinkFolder = "山竹视频复刻/项目文件链接";
+  const projectJsonLinkRoot = path.join(vault, ...projectJsonLinkFolder.split("/"));
+  const requestJsonLinkFolder = "山竹视频复刻/请求文件链接";
+  const requestJsonLinkRoot = path.join(vault, ...requestJsonLinkFolder.split("/"));
+  const jsonLinkOutside = fs.mkdtempSync(path.join(os.tmpdir(), "mangosteen-project-json-outside-"));
+  const outsideProjectJson = path.join(jsonLinkOutside, "project.json");
+  const outsideRequestJson = path.join(jsonLinkOutside, "generation-request.json");
+  const outsideProjectJsonBytes = JSON.stringify({ folder: "outside", untouched: true });
+  const outsideRequestJsonBytes = JSON.stringify(savedWorkbenchRequest);
+  fs.mkdirSync(projectJsonLinkRoot, { recursive: true });
+  fs.mkdirSync(requestJsonLinkRoot, { recursive: true });
+  fs.writeFileSync(outsideProjectJson, outsideProjectJsonBytes);
+  fs.writeFileSync(outsideRequestJson, outsideRequestJsonBytes);
+  fs.symlinkSync(outsideProjectJson, path.join(projectJsonLinkRoot, "project.json"));
+  fs.writeFileSync(path.join(projectJsonLinkRoot, "generation-request.json"), outsideRequestJsonBytes);
+  fs.writeFileSync(path.join(requestJsonLinkRoot, "project.json"), JSON.stringify({ folder: requestJsonLinkFolder, status: "analysis_ready", shots: [] }));
+  fs.symlinkSync(outsideRequestJson, path.join(requestJsonLinkRoot, "generation-request.json"));
+  assert.throws(() => plugin.loadWorkbenchProject(projectJsonLinkFolder), /符号链接|不安全|项目范围/, "project.json symlinks must be rejected");
+  assert.throws(() => plugin.loadWorkbenchProject(requestJsonLinkFolder), /符号链接|不安全|项目范围/, "request JSON symlinks must be rejected");
+  await assert.rejects(() => plugin.saveWorkbenchDraft(requestJsonLinkFolder, savedWorkbenchRequest), /符号链接|不安全|项目范围/);
+  assert.strictEqual(fs.readFileSync(outsideProjectJson, "utf8"), outsideProjectJsonBytes);
+  assert.strictEqual(fs.readFileSync(outsideRequestJson, "utf8"), outsideRequestJsonBytes);
+
+  const stateJsonLinkFolder = "山竹视频复刻/状态文件链接";
+  const stateJsonLinkRoot = path.join(vault, ...stateJsonLinkFolder.split("/"));
+  const stopJsonLinkFolder = "山竹视频复刻/停止文件链接";
+  const stopJsonLinkRoot = path.join(vault, ...stopJsonLinkFolder.split("/"));
+  const outsideStateJson = path.join(jsonLinkOutside, "generation-state.json");
+  const outsideStopJson = path.join(jsonLinkOutside, "stop-request.json");
+  const outsideStateJsonBytes = JSON.stringify({ status: "processing", requestMtimeMs: 911, untouched: true });
+  const outsideStopJsonBytes = JSON.stringify({ requestMtimeMs: 912, requestedAt: "2026-10-11T00:00:00Z", untouched: true });
+  fs.writeFileSync(outsideStateJson, outsideStateJsonBytes);
+  fs.writeFileSync(outsideStopJson, outsideStopJsonBytes);
+  for (const [folder, root] of [[stateJsonLinkFolder, stateJsonLinkRoot], [stopJsonLinkFolder, stopJsonLinkRoot]]) {
+    fs.mkdirSync(path.join(root, ".work"), { recursive: true });
+    fs.writeFileSync(path.join(root, "project.json"), JSON.stringify({ folder, status: "generating", shots: [] }));
+    fs.writeFileSync(path.join(root, "generation-request.json"), outsideRequestJsonBytes);
+  }
+  fs.symlinkSync(outsideStateJson, path.join(stateJsonLinkRoot, ".work/generation-state.json"));
+  fs.writeFileSync(path.join(stopJsonLinkRoot, ".work/generation-state.json"), JSON.stringify({ status: "processing", requestMtimeMs: 912 }));
+  fs.symlinkSync(outsideStopJson, path.join(stopJsonLinkRoot, ".work/stop-request.json"));
+  assert.throws(() => plugin.writeState(stateJsonLinkFolder, { status: "processing", requestMtimeMs: 911 }), /符号链接|不安全|项目范围/);
+  assert.throws(() => plugin.requestGenerationStop(stopJsonLinkFolder), /符号链接|不安全|项目范围/);
+  assert.strictEqual(fs.readFileSync(outsideStateJson, "utf8"), outsideStateJsonBytes);
+  assert.strictEqual(fs.readFileSync(outsideStopJson, "utf8"), outsideStopJsonBytes);
+
+  const childLinkFolder = "山竹视频复刻/子目录链接";
+  const childLinkRoot = path.join(vault, ...childLinkFolder.split("/"));
+  const childLinkOutside = fs.mkdtempSync(path.join(os.tmpdir(), "mangosteen-project-child-outside-"));
+  fs.mkdirSync(childLinkRoot, { recursive: true });
+  fs.writeFileSync(path.join(childLinkRoot, "project.json"), JSON.stringify({ folder: childLinkFolder, status: "analysis_ready", shots: [] }));
+  fs.writeFileSync(path.join(childLinkRoot, "generation-request.json"), outsideRequestJsonBytes);
+  fs.mkdirSync(path.join(childLinkOutside, "storyboard"), { recursive: true });
+  fs.mkdirSync(path.join(childLinkOutside, "clips"), { recursive: true });
+  const outsideImagePath = path.join(childLinkOutside, "storyboard/outside.png");
+  const outsideClipPath = path.join(childLinkOutside, "clips/outside.mp4");
+  fs.writeFileSync(outsideImagePath, "outside-image-untouched");
+  fs.writeFileSync(outsideClipPath, "outside-video-untouched");
+  fs.symlinkSync(path.join(childLinkOutside, "storyboard"), path.join(childLinkRoot, "02-分镜脚本"), "dir");
+  fs.symlinkSync(path.join(childLinkOutside, "clips"), path.join(childLinkRoot, "03-视频片段"), "dir");
+  let outsideProjectReads = 0;
+  const originalReadFileSync = fs.readFileSync;
+  fs.readFileSync = function trackedProjectRead(filePath, ...args) {
+    if (path.resolve(String(filePath)) === path.resolve(outsideImagePath)) outsideProjectReads += 1;
+    return originalReadFileSync.call(this, filePath, ...args);
+  };
+  try {
+    assert.throws(
+      () => plugin.localImage(`${childLinkFolder}/02-分镜脚本/outside.png`),
+      /符号链接|不安全|项目范围/,
+      "project image reads must reject storyboard directory symlinks before reading outside bytes",
+    );
+  } finally {
+    fs.readFileSync = originalReadFileSync;
+  }
+  assert.strictEqual(outsideProjectReads, 0, "outside storyboard files must never be read for upload");
+  let unsafeGenerationProviderLookups = 0;
+  plugin.getGenerationPlugins = () => { unsafeGenerationProviderLookups += 1; throw new Error("provider must not be reached"); };
+  await assert.rejects(() => plugin.runGeneration(childLinkFolder, {
+    version: 2,
+    confirmed: true,
+    character: { id: "safe", prompt: "safe" },
+    scenes: [{ id: "safe", prompt: "safe" }],
+    settings: { imageModel: "gpt-image-2-w", videoModel: "MiniMax-H3", ratio: "9:16", resolution: "768p" },
+    shots: [{ id: "001", title: "safe", sceneId: "safe", duration: 4, imagePrompt: "safe", videoPrompt: "safe" }],
+  }, 100), /符号链接|不安全|项目范围/);
+  assert.strictEqual(unsafeGenerationProviderLookups, 0, "unsafe project output directories must be rejected before provider access or paid submission");
+  delete plugin.getGenerationPlugins;
+  const safeProviderRoot = path.join(vault, "山竹视频");
+  fs.mkdirSync(safeProviderRoot, { recursive: true });
+  fs.writeFileSync(path.join(safeProviderRoot, "safe-source.mp4"), "safe-source");
+  assert.throws(
+    () => plugin.copyVaultFile("山竹视频/safe-source.mp4", `${childLinkFolder}/03-视频片段/outside.mp4`),
+    /符号链接|不安全|项目范围/,
+    "project video writes must reject clip directory symlinks",
+  );
+  assert.strictEqual(fs.readFileSync(outsideClipPath, "utf8"), "outside-video-untouched");
+
+  const jsonEscapeOutsidePath = path.join(vault, "山竹视频复刻", "outside-json-frame.jpg");
+  fs.writeFileSync(jsonEscapeOutsidePath, "outside-json-frame");
+  let jsonEscapeReads = 0;
+  let escapedAnalysisCalls = 0;
+  const appBeforePathAnalysis = plugin.app;
+  const settingsBeforePathAnalysis = plugin.settings;
+  const pathAnalysisAgent = {
+    getLanguageModelCatalog: () => ({
+      ready: true,
+      activeGroup: "safe",
+      activeModel: "safe-model",
+      groups: [{ id: "safe", label: "safe", ratio: 1, models: ["safe-model"] }],
+    }),
+    analyzeStructured: async () => { escapedAnalysisCalls += 1; throw new Error("unsafe provider call"); },
+  };
+  plugin.app = {
+    vault: { adapter: { getBasePath: () => vault } },
+    workspace,
+    plugins: { getPlugin: (id) => id === "mangosteen-agent" ? pathAnalysisAgent : null },
+  };
+  plugin.settings = { analysisGroup: "safe", analysisModel: "safe-model" };
+  for (const [name, framePath] of [
+    ["相对越界", "山竹视频复刻/相对越界/../outside-json-frame.jpg"],
+    ["绝对越界", path.join(childLinkOutside, "storyboard/outside.png")],
+  ]) {
+    const escapeFolder = `山竹视频复刻/${name}`;
+    const escapeRoot = path.join(vault, ...escapeFolder.split("/"));
+    fs.mkdirSync(escapeRoot, { recursive: true });
+    fs.writeFileSync(path.join(escapeRoot, "project.json"), JSON.stringify({
+      folder: escapeFolder,
+      title: name,
+      status: "prepared",
+      frames: [{ index: 1, timestamp: 0, path: framePath }],
+      shots: [],
+    }));
+    const beforeReads = jsonEscapeReads;
+    fs.readFileSync = function trackedJsonEscapeRead(filePath, ...args) {
+      if (path.resolve(String(filePath)) === path.resolve(jsonEscapeOutsidePath)
+        || path.resolve(String(filePath)) === path.resolve(outsideImagePath)) jsonEscapeReads += 1;
+      return originalReadFileSync.call(this, filePath, ...args);
+    };
+    try {
+      await assert.rejects(() => plugin.analyzeProject(escapeFolder), /绝对|不安全|项目范围|符号链接/);
+    } finally {
+      fs.readFileSync = originalReadFileSync;
+    }
+    assert.strictEqual(jsonEscapeReads, beforeReads, `${name}: project JSON escape path must not be read or uploaded`);
+  }
+  assert.strictEqual(escapedAnalysisCalls, 0, "unsafe project media must be rejected before provider upload");
+  plugin.app = appBeforePathAnalysis;
+  plugin.settings = settingsBeforePathAnalysis;
+
+  const validOutputFolder = "山竹视频复刻/合法新输出";
+  const validOutputRoot = path.join(vault, ...validOutputFolder.split("/"));
+  fs.mkdirSync(validOutputRoot, { recursive: true });
+  fs.writeFileSync(path.join(validOutputRoot, "project.json"), JSON.stringify({ folder: validOutputFolder, shots: [] }));
+  fs.writeFileSync(path.join(validOutputRoot, "generation-request.json"), outsideRequestJsonBytes);
+  const validOutputPath = `${validOutputFolder}/02-分镜脚本/新目录/首帧.png`;
+  await plugin.saveImageCandidate({}, { kind: "base64", value: Buffer.from("valid-new-output").toString("base64") }, validOutputPath);
+  assert.strictEqual(fs.readFileSync(path.join(vault, ...validOutputPath.split("/")), "utf8"), "valid-new-output", "checked paths must still permit legitimate missing output directories");
+
   let releaseCatalog;
   let catalogStarted;
   const waitForCatalog = new Promise((resolve) => { catalogStarted = resolve; });
@@ -447,7 +640,7 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   fs.writeFileSync(workbenchRequestPath, JSON.stringify(savedWorkbenchRequest));
   const staleConfirmation = plugin.confirmWorkbenchDraft(workbenchFolder);
   await waitForCatalog;
-  fs.writeFileSync(workbenchStatePath, JSON.stringify({ status: "processing" }));
+  fs.writeFileSync(workbenchStatePath, JSON.stringify({ status: "processing", requestMtimeMs: fs.statSync(workbenchRequestPath).mtimeMs }));
   releaseCatalog();
   await assert.rejects(() => staleConfirmation, /生成中|不能确认/);
   assert.strictEqual(JSON.parse(fs.readFileSync(workbenchRequestPath, "utf8")).confirmed, false);
@@ -466,13 +659,15 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   let processingTriggers = 0;
   plugin.processRequest = async (requestPath, notify) => {
     processingTriggers += 1;
-    assert.strictEqual(requestPath, workbenchRequestPath);
+    assert.strictEqual(fs.realpathSync(requestPath), fs.realpathSync(workbenchRequestPath));
     assert.strictEqual(notify, true);
   };
   const originalRenameSync = fs.renameSync;
   let confirmedRequestWrites = 0;
   fs.renameSync = function trackedRename(source, destination) {
-    if (destination === workbenchRequestPath) confirmedRequestWrites += 1;
+    const canonicalDestination = path.join(fs.realpathSync(path.dirname(destination)), path.basename(destination));
+    const canonicalRequest = path.join(fs.realpathSync(path.dirname(workbenchRequestPath)), path.basename(workbenchRequestPath));
+    if (canonicalDestination === canonicalRequest) confirmedRequestWrites += 1;
     return originalRenameSync.call(this, source, destination);
   };
   try {
@@ -491,6 +686,62 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   assert(workbenchView.refreshCalls > 0, "project writes must request a refresh from the open workbench view");
   delete plugin.refreshGenerationModelCatalog;
   delete plugin.processRequest;
+
+  const confirmLatestVault = fs.mkdtempSync(path.join(os.tmpdir(), "mangosteen-confirm-latest-"));
+  const pendingLatestFolder = "山竹视频复刻/等待确认";
+  const pendingLatestRoot = path.join(confirmLatestVault, ...pendingLatestFolder.split("/"));
+  fs.mkdirSync(pendingLatestRoot, { recursive: true });
+  fs.writeFileSync(path.join(pendingLatestRoot, "project.json"), JSON.stringify({
+    folder: pendingLatestFolder,
+    title: "等待确认",
+    status: "analysis_ready",
+    shots: [],
+  }));
+  fs.writeFileSync(path.join(pendingLatestRoot, "generation-request.json"), JSON.stringify({ confirmed: false, shots: [] }));
+  const appBeforeConfirmLatest = plugin.app;
+  const routedConfirmFolders = [];
+  plugin.app = { vault: { adapter: { getBasePath: () => confirmLatestVault } }, workspace };
+  plugin.confirmWorkbenchDraft = async (folder) => { routedConfirmFolders.push(folder); };
+  await plugin.confirmLatestGeneration();
+  assert.deepStrictEqual(routedConfirmFolders, [pendingLatestFolder], "legacy confirm command must route the exact unconfirmed folder through the guarded workbench confirmation");
+  delete plugin.confirmWorkbenchDraft;
+  fs.rmSync(confirmLatestVault, { recursive: true, force: true });
+
+  for (const terminalStatus of ["completed", "stopped", "failed"]) {
+    const terminalVault = fs.mkdtempSync(path.join(os.tmpdir(), `mangosteen-confirm-${terminalStatus}-`));
+    const terminalFolder = `山竹视频复刻/${terminalStatus}`;
+    const terminalRoot = path.join(terminalVault, ...terminalFolder.split("/"));
+    fs.mkdirSync(path.join(terminalRoot, ".work"), { recursive: true });
+    fs.writeFileSync(path.join(terminalRoot, "project.json"), JSON.stringify({
+      folder: terminalFolder,
+      title: terminalStatus,
+      status: terminalStatus,
+      shots: [],
+    }));
+    const terminalRequestPath = path.join(terminalRoot, "generation-request.json");
+    const terminalRequestBytes = JSON.stringify({ confirmed: true, settings: {}, shots: [] });
+    fs.writeFileSync(terminalRequestPath, terminalRequestBytes);
+    fs.utimesSync(terminalRequestPath, new Date("2020-01-01T00:00:00Z"), new Date("2020-01-01T00:00:00Z"));
+    const terminalMtimeMs = fs.statSync(terminalRequestPath).mtimeMs;
+    fs.writeFileSync(path.join(terminalRoot, ".work/generation-state.json"), JSON.stringify({ status: terminalStatus, requestMtimeMs: terminalMtimeMs }));
+    let terminalProcessCalls = 0;
+    let terminalProviderCalls = 0;
+    plugin.app = { vault: { adapter: { getBasePath: () => terminalVault } }, workspace };
+    plugin.refreshGenerationModelCatalog = async () => {
+      terminalProviderCalls += 1;
+      return { imageModels: ["gpt-image-2-w"], videoModels: ["MiniMax-H3"] };
+    };
+    plugin.processRequest = async () => { terminalProcessCalls += 1; };
+    await plugin.confirmLatestGeneration();
+    assert.strictEqual(fs.statSync(terminalRequestPath).mtimeMs, terminalMtimeMs, `${terminalStatus}: confirmed terminal request mtime must not change`);
+    assert.strictEqual(fs.readFileSync(terminalRequestPath, "utf8"), terminalRequestBytes, `${terminalStatus}: confirmed terminal request bytes must not change`);
+    assert.strictEqual(terminalProcessCalls, 0, `${terminalStatus}: terminal request must not trigger processing`);
+    assert.strictEqual(terminalProviderCalls, 0, `${terminalStatus}: terminal request must not inspect or invoke paid providers`);
+    fs.rmSync(terminalVault, { recursive: true, force: true });
+  }
+  delete plugin.refreshGenerationModelCatalog;
+  delete plugin.processRequest;
+  plugin.app = appBeforeConfirmLatest;
 
   const analysisFolder = "山竹视频复刻/山竹模型分析";
   const analysisRoot = path.join(vault, ...analysisFolder.split("/"));
@@ -1333,6 +1584,8 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   fs.rmSync(workSymlinkVault, { recursive: true, force: true });
   fs.rmSync(escapedWorkOutside, { recursive: true, force: true });
   fs.rmSync(escapedMediaOutside, { recursive: true, force: true });
+  fs.rmSync(jsonLinkOutside, { recursive: true, force: true });
+  fs.rmSync(childLinkOutside, { recursive: true, force: true });
   delete global.window;
   Module._load = originalLoad;
   console.log("plugin-load: ok");
