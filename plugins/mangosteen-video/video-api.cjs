@@ -19,6 +19,13 @@ const MODEL_PROFILES = {
   "wan3.0-video-prime": { resolutions: ["480p", "720p", "1080p"], maxDuration: 30, maxImages: 10, maxVideos: 5, maxAudios: 5, prices: { "480p": 0.27, "720p": 0.54, "1080p": 1.08 } },
 };
 
+const VIDEO_INPUT_CAPABILITIES = {
+  "minimax-h3": { mode: "frame", firstImage: true, lastImage: true, maxReferenceImages: 0, maxReferenceVideos: 0, maxReferenceAudios: 0, omitRatioWithFrames: true },
+  "seedance-2.0": { mode: "reference", firstImage: false, lastImage: false, maxReferenceImages: 9 },
+  "seedance-2.5": { mode: "reference", firstImage: false, lastImage: false, maxReferenceImages: 30 },
+  generic: { mode: "generic", firstImage: true, lastImage: true, omitRatioWithFrames: true },
+};
+
 const clean = (value) => String(value || "").trim();
 const isPublicUrl = (value) => /^https?:\/\/[^\s]+$/i.test(clean(value));
 
@@ -39,6 +46,14 @@ function validateUrls(values, label, limit) {
   return urls;
 }
 
+function resolveVideoModelFamily(model) {
+  const id = clean(model).toLowerCase();
+  if (id === "minimax-h3") return "minimax-h3";
+  if (/^(?:seedance|sd)-2\.0(?:$|[-_])/.test(id)) return "seedance-2.0";
+  if (/^seedance-2\.5(?:$|[-_])/.test(id)) return "seedance-2.5";
+  return "generic";
+}
+
 function createVideoPayload(options = {}) {
   const model = clean(options.model);
   const prompt = clean(options.prompt);
@@ -47,25 +62,40 @@ function createVideoPayload(options = {}) {
   const resolution = clean(options.resolution) || "720p";
   if (!model) throw new Error("请选择视频模型");
   const capabilities = videoCapabilitiesForModel(model, options.allowedResolutions);
+  const modelFamily = resolveVideoModelFamily(model);
+  const inputCapabilities = VIDEO_INPUT_CAPABILITIES[modelFamily];
   if (!prompt) throw new Error("请先描述想生成的视频");
   if (capabilities.maxPrompt && prompt.length > capabilities.maxPrompt) throw new Error(`${model} 的视频描述不能超过 ${capabilities.maxPrompt} 个字符`);
   if (!Number.isInteger(duration) || duration < capabilities.minDuration || duration > capabilities.maxDuration) throw new Error(`视频时长必须是 ${capabilities.minDuration} 到 ${capabilities.maxDuration} 秒`);
   if (!["16:9", "9:16", "1:1"].includes(ratio)) throw new Error("视频比例仅支持 16:9、9:16 或 1:1");
   if (!capabilities.resolutions.includes(resolution)) throw new Error(`${model} 的分辨率仅支持 ${capabilities.resolutions.join("、")}`);
+  const firstImage = clean(options.firstImage);
+  const lastImage = clean(options.lastImage);
+  const usedReferenceLabels = [
+    [options.referenceImages, "参考图片"],
+    [options.referenceVideos, "参考视频"],
+    [options.referenceAudios, "参考音频"],
+  ].filter(([values]) => (values || []).map(clean).some(Boolean)).map(([, label]) => label);
+  if (inputCapabilities.mode === "frame" && usedReferenceLabels.length) {
+    if (firstImage || lastImage) throw new Error(`MiniMax-H3 首尾帧不能同时使用${usedReferenceLabels.join("、")}`);
+    throw new Error(`MiniMax-H3 不支持${usedReferenceLabels.join("、")}`);
+  }
+  if ((firstImage && inputCapabilities.firstImage === false) || (lastImage && inputCapabilities.lastImage === false)) {
+    throw new Error("Seedance 仅支持参考图片模式，不能使用首尾帧");
+  }
   const payload = { model, prompt, duration, ratio, resolution };
-  const referenceImages = validateUrls(options.referenceImages, "参考图片", capabilities.maxImages);
-  const referenceVideos = validateUrls(options.referenceVideos, "参考视频", capabilities.maxVideos);
-  const referenceAudios = validateUrls(options.referenceAudios, "参考音频", capabilities.maxAudios);
+  const referenceImages = validateUrls(options.referenceImages, "参考图片", inputCapabilities.maxReferenceImages ?? capabilities.maxImages);
+  const referenceVideos = validateUrls(options.referenceVideos, "参考视频", inputCapabilities.maxReferenceVideos ?? capabilities.maxVideos);
+  const referenceAudios = validateUrls(options.referenceAudios, "参考音频", inputCapabilities.maxReferenceAudios ?? capabilities.maxAudios);
   if (referenceImages.length) payload.referenceImages = referenceImages;
   if (referenceVideos.length) payload.referenceVideos = referenceVideos;
   if (referenceAudios.length) payload.referenceAudios = referenceAudios;
   if (options.generateAudio) payload.generate_audio = true;
-  for (const [option, field] of [["firstImage", "first_image"], ["lastImage", "last_image"]]) {
-    const url = clean(options[option]);
+  for (const [url, field] of [[firstImage, "first_image"], [lastImage, "last_image"]]) {
     if (url && !isPublicUrl(url)) throw new Error("首尾帧仅支持公开 HTTP/HTTPS 图片地址");
     if (url) payload[field] = url;
   }
-  if (payload.first_image || payload.last_image) delete payload.ratio;
+  if (inputCapabilities.omitRatioWithFrames && (payload.first_image || payload.last_image)) delete payload.ratio;
   return payload;
 }
 
@@ -230,6 +260,7 @@ function videoProgressText(status, previous = "", random = Math.random) {
 }
 
 module.exports = {
+  VIDEO_INPUT_CAPABILITIES,
   VIDEO_PROGRESS_INTERVAL_MS,
   assertVideoDownloadSize,
   assertLocalImageUploadSize,
@@ -245,6 +276,7 @@ module.exports = {
   readVideoTask,
   redactLogText,
   resolutionOptionsForModel,
+  resolveVideoModelFamily,
   safeVideoFilename,
   safeVideoTaskSegment,
   selectVideoGroups,

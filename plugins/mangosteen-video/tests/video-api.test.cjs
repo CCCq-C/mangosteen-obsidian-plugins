@@ -1,0 +1,71 @@
+const assert = require("assert");
+const api = require("../video-api.cjs");
+
+const imageUrls = (count) => Array.from({ length: count }, (_, index) => `https://x/image-${index + 1}.png`);
+
+assert.deepStrictEqual(api.createVideoPayload({
+  model: "MiniMax-H3", prompt: "move", duration: 4,
+  ratio: "9:16", resolution: "768p", firstImage: "https://x/first.png"
+}), {
+  model: "MiniMax-H3", prompt: "move", duration: 4,
+  resolution: "768p", first_image: "https://x/first.png"
+});
+
+assert.throws(() => api.createVideoPayload({
+  model: "MiniMax-H3", prompt: "move", duration: 4, resolution: "768p",
+  firstImage: "https://x/first.png", referenceImages: ["https://x/person.png"]
+}), /不能同时使用/);
+
+assert.throws(() => api.createVideoPayload({
+  model: "seedance-2.5", prompt: "move", duration: 4, ratio: "9:16", resolution: "720p",
+  firstImage: "https://x/first.png"
+}), /Seedance.*参考图片/);
+
+const seedance20Payload = api.createVideoPayload({
+  model: "sd-2.0-fast", prompt: "move", duration: 4, ratio: "9:16", resolution: "720p",
+  referenceImages: imageUrls(9)
+});
+assert.strictEqual(seedance20Payload.referenceImages.length, 9);
+assert.throws(() => api.createVideoPayload({
+  model: "sd-2.0-fast", prompt: "move", duration: 4, ratio: "9:16", resolution: "720p",
+  referenceImages: imageUrls(10)
+}), /最多填写 9 个/);
+
+const seedance25Payload = api.createVideoPayload({
+  model: "seedance-2.5", prompt: "move", duration: 4, ratio: "9:16", resolution: "720p",
+  referenceImages: imageUrls(30)
+});
+assert.strictEqual(seedance25Payload.referenceImages.length, 30);
+assert.throws(() => api.createVideoPayload({
+  model: "seedance-2.5", prompt: "move", duration: 4, ratio: "9:16", resolution: "720p",
+  referenceImages: imageUrls(31)
+}), /最多填写 30 个/);
+
+for (const [field, label] of [
+  ["referenceImages", "参考图片"],
+  ["referenceVideos", "参考视频"],
+  ["referenceAudios", "参考音频"],
+]) {
+  assert.throws(() => api.createVideoPayload({
+    model: "MiniMax-H3", prompt: "move", duration: 4, resolution: "768p",
+    [field]: ["https://x/reference.png"]
+  }), new RegExp(`MiniMax-H3.*不支持.*${label}`));
+}
+
+assert.strictEqual(api.resolveVideoModelFamily(" MiniMax-H3 "), "minimax-h3");
+assert.strictEqual(api.resolveVideoModelFamily("sd-2.0-stable"), "seedance-2.0");
+assert.strictEqual(api.resolveVideoModelFamily("seedance-2.5_k1"), "seedance-2.5");
+assert.strictEqual(api.resolveVideoModelFamily("wan3.0-video-prime"), "generic");
+assert.strictEqual(api.VIDEO_INPUT_CAPABILITIES["minimax-h3"].mode, "frame");
+assert.strictEqual(api.VIDEO_INPUT_CAPABILITIES["seedance-2.0"].maxReferenceImages, 9);
+assert.strictEqual(api.VIDEO_INPUT_CAPABILITIES["seedance-2.5"].maxReferenceImages, 30);
+
+assert.deepStrictEqual(api.createVideoPayload({
+  model: "generic-model", prompt: "move", duration: 4, ratio: "9:16", resolution: "720p",
+  firstImage: "https://x/first.png", referenceImages: ["https://x/person.png"]
+}), {
+  model: "generic-model", prompt: "move", duration: 4, resolution: "720p",
+  referenceImages: ["https://x/person.png"], first_image: "https://x/first.png"
+});
+
+console.log("video-api: ok");
