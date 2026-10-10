@@ -4,6 +4,7 @@ const path = require("path");
 
 let core;
 let generationPolicy;
+let referenceAssets;
 let workflow;
 
 const ROOT = "山竹视频复刻";
@@ -65,6 +66,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     const pluginRoot = path.join(this.vaultPath(), ...String(this.manifest.dir || "").split(/[\\/]/).filter(Boolean));
     core = require(path.join(pluginRoot, "replica-core.cjs"));
     generationPolicy = require(path.join(pluginRoot, "generation-policy.cjs"));
+    referenceAssets = require(path.join(pluginRoot, "reference-assets.cjs"));
     workflow = require(path.join(pluginRoot, "replica-cli.cjs"));
     this.pluginRoot = pluginRoot;
     this.processing = new Set();
@@ -210,6 +212,28 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     return candidate;
   }
 
+  async generateImageMulti(imagePlugin, prompt, referencePaths) {
+    if (typeof imagePlugin.generateEditMulti !== "function") throw new Error("山竹生图插件版本过低，缺少多图参考能力。请先更新插件。");
+    const response = await imagePlugin.generateEditMulti(prompt, referencePaths.map((vaultPath) => this.localImage(vaultPath)));
+    const candidate = imagePlugin.extractResults(response)?.[0];
+    if (!candidate) throw new Error("多图参考生图完成，但没有返回图片。");
+    return candidate;
+  }
+
+  async ensureReferenceAsset(imagePlugin, asset, prompt) {
+    if (asset.exists) return { ...asset, reused: true };
+    const candidate = await this.generateImage(imagePlugin, prompt);
+    await this.saveImageCandidate(imagePlugin, candidate, asset.imagePath);
+    referenceAssets.writeAssetMetadata(this.vaultPath(), asset, {
+      prompt,
+      createdAt: new Date().toISOString(),
+    });
+    const refreshed = asset.kind === "character"
+      ? referenceAssets.resolveCharacterAsset(this.vaultPath(), asset.id)
+      : referenceAssets.resolveSceneAsset(this.vaultPath(), asset.id);
+    return { ...refreshed, reused: false };
+  }
+
   async waitForVideo(videoPlugin, taskId, timeoutMs = 45 * 60 * 1000) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
@@ -230,6 +254,123 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     return targetVaultPath;
   }
 
+  async runAssetGeneration(projectFolder, request, requestMtimeMs, { image, video, model }) {
+    const projectPath = path.join(this.absolute(projectFolder), "project.json");
+    const project = this.readJson(projectPath);
+    const state = { status: "processing", requestMtimeMs, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), currentStep: "人物资产" };
+    this.writeState(projectFolder, state);
+    project.status = "generating";
+    project.statusText = "正在准备人物和场景资产";
+    project.videoModel = model;
+    project.characterAsset = null;
+    project.sceneAssets = [];
+    project.shots = request.shots.map((shot) => ({
+      ...shot,
+      status: "等待生成",
+      imagePath: "",
+      firstImagePath: "",
+      lastImagePath: "",
+      videoPath: "",
+      error: "",
+    }));
+    this.saveProject(projectFolder, project);
+
+    const character = await this.ensureReferenceAsset(
+      image,
+      referenceAssets.resolveCharacterAsset(this.vaultPath(), request.character.id),
+      request.character.prompt,
+    );
+    project.characterAsset = {
+      id: character.id,
+      imagePath: character.imagePath,
+      metadataPath: character.metadataPath,
+      reused: character.reused,
+    };
+    this.saveProject(projectFolder, project);
+
+    for (const scene of request.scenes) {
+      state.currentStep = `场景资产 ${scene.id}`;
+      state.updatedAt = new Date().toISOString();
+      this.writeState(projectFolder, state);
+      const resolved = await this.ensureReferenceAsset(
+        image,
+        referenceAssets.resolveSceneAsset(this.vaultPath(), scene.id),
+        scene.prompt,
+      );
+      project.sceneAssets.push({
+        id: resolved.id,
+        imagePath: resolved.imagePath,
+        metadataPath: resolved.metadataPath,
+        reused: resolved.reused,
+      });
+      this.saveProject(projectFolder, project);
+    }
+
+    const sceneAssetsById = new Map(project.sceneAssets.map((asset) => [asset.id, asset]));
+    project.statusText = "人物和场景资产已准备，正在生成镜头";
+    this.saveProject(projectFolder, project);
+
+    for (const shot of project.shots) {
+      state.currentStep = `镜头 ${shot.id}`;
+      state.updatedAt = new Date().toISOString();
+      this.writeState(projectFolder, state);
+      shot.status = "正在生成首帧";
+      this.saveProject(projectFolder, project);
+      try {
+        const sceneAsset = sceneAssetsById.get(shot.sceneId);
+        if (!sceneAsset) throw new Error(`镜头 ${shot.id} 找不到场景资产：${shot.sceneId}`);
+        const referencePaths = [project.characterAsset.imagePath, sceneAsset.imagePath];
+        const continuity = "保持参考人物的脸部、发型、服装和年龄一致，并保持场景一致。";
+        const firstPrompt = `${shot.imagePrompt}\n${continuity}`;
+        const firstCandidate = await this.generateImageMulti(image, firstPrompt, referencePaths);
+        shot.firstImagePath = await this.saveImageCandidate(
+          image,
+          firstCandidate,
+          `${projectFolder}/02-分镜脚本/镜头-${shot.id}-${core.safeSegment(shot.title)}-首帧.png`,
+        );
+        shot.imagePath = shot.firstImagePath;
+
+        if (shot.lastImagePrompt) {
+          shot.status = "正在生成尾帧";
+          this.saveProject(projectFolder, project);
+          const lastCandidate = await this.generateImageMulti(image, `${shot.lastImagePrompt}\n${continuity}`, referencePaths);
+          shot.lastImagePath = await this.saveImageCandidate(
+            image,
+            lastCandidate,
+            `${projectFolder}/02-分镜脚本/镜头-${shot.id}-${core.safeSegment(shot.title)}-尾帧.png`,
+          );
+        }
+
+        shot.status = "正在生成视频";
+        this.saveProject(projectFolder, project);
+        const task = await video.submitVideo(generationPolicy.buildVideoOptions({
+          model,
+          prompt: shot.videoPrompt,
+          duration: shot.duration,
+          ratio: request.settings.ratio,
+          resolution: request.settings.resolution || video.settings.resolution,
+          firstImageFile: this.localImage(shot.firstImagePath),
+          lastImageFile: shot.lastImagePath ? this.localImage(shot.lastImagePath) : null,
+        }));
+        const completed = await this.waitForVideo(video, task.id);
+        shot.videoPath = this.copyVaultFile(completed.localPath, `${projectFolder}/03-视频片段/镜头-${shot.id}-${core.safeSegment(shot.title)}.mp4`);
+        shot.status = "已完成";
+      } catch (error) {
+        shot.status = "失败";
+        shot.error = String(error?.message || error);
+      }
+      this.saveProject(projectFolder, project);
+    }
+
+    const failed = project.shots.filter((shot) => shot.status === "失败").length;
+    project.status = failed ? "completed_with_errors" : "completed";
+    project.statusText = failed ? `已完成，${failed} 个镜头需要重试` : "人物、场景、关键帧和视频片段已全部生成";
+    this.saveProject(projectFolder, project);
+    Object.assign(state, { status: project.status, currentStep: "完成", updatedAt: new Date().toISOString(), completedAt: new Date().toISOString(), failedShots: failed });
+    this.writeState(projectFolder, state);
+    await this.openVaultPath(`${projectFolder}/00-项目总览.md`);
+  }
+
   async runGeneration(projectFolder, request, requestMtimeMs) {
     const { image, video } = this.getGenerationPlugins();
     const access = await video.refreshAgentAccess();
@@ -241,12 +382,14 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       const detail = models.length ? `当前可用：${models.join("、")}` : "当前账号没有可用的 MiniMax-H3 或 Seedance 模型";
       throw new Error(`视频复刻不能使用模型“${requestedModel || "未选择"}”。${detail}，请刷新山竹账号中心或选择已开通模型。`);
     }
+    if (request.version === 2) return this.runAssetGeneration(projectFolder, request, requestMtimeMs, { image, video, model });
     const projectPath = path.join(this.absolute(projectFolder), "project.json");
     const project = this.readJson(projectPath);
     const state = { status: "processing", requestMtimeMs, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), currentStep: "人物三视图" };
     this.writeState(projectFolder, state);
     project.status = "generating";
     project.statusText = "正在生成人物三视图";
+    project.videoModel = model;
     project.shots = request.shots.map((shot) => ({ ...shot, status: "等待生成", imagePath: "", videoPath: "", error: "" }));
     this.saveProject(projectFolder, project);
 

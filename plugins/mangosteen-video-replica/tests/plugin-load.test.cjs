@@ -95,6 +95,7 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   const image = {
     generateText: async () => ({}),
     generateEdit: async () => ({}),
+    generateEditMulti: async () => { throw new Error("version 1 must not require multi-image editing"); },
     extractResults: () => [{ kind: "base64", value: Buffer.from("image").toString("base64") }],
   };
   let submittedOptions;
@@ -118,6 +119,111 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   assert(fs.existsSync(path.join(generated, "03-视频片段/镜头-1-开场.mp4")));
   assert.deepStrictEqual(submittedOptions.referenceImageFiles.map((file) => file.name), ["镜头-1-开场.png"]);
   assert.strictEqual(Object.hasOwn(submittedOptions, "firstImageFile"), false);
+
+  const generatedV2Folder = "山竹视频复刻/资产生成";
+  const generatedV2 = path.join(vault, ...generatedV2Folder.split("/"));
+  const sourceFramePath = `${generatedV2Folder}/02-分镜脚本/原片画面-001.jpg`;
+  fs.mkdirSync(path.dirname(path.join(vault, ...sourceFramePath.split("/"))), { recursive: true });
+  fs.writeFileSync(path.join(vault, ...sourceFramePath.split("/")), "source-frame-must-not-be-used");
+  fs.writeFileSync(path.join(generatedV2, "project.json"), JSON.stringify({
+    folder: generatedV2Folder,
+    title: "资产生成",
+    frames: [{ index: 1, timestamp: 0, path: sourceFramePath }],
+    shots: [],
+  }));
+
+  const harborImagePath = path.join(vault, "山竹视频资产库", "场景", "harbor", "场景参考图.png");
+  fs.mkdirSync(path.dirname(harborImagePath), { recursive: true });
+  fs.writeFileSync(harborImagePath, "existing-harbor-scene");
+
+  const generatedTextPrompts = [];
+  const editCalls = [];
+  const imageV2 = {
+    generateText: async (prompt) => {
+      generatedTextPrompts.push(prompt);
+      return { candidate: { kind: "base64", value: Buffer.from(`text:${prompt}`).toString("base64") } };
+    },
+    generateEdit: async () => { throw new Error("version 2 must use generateEditMulti"); },
+    generateEditMulti: async (prompt, images) => {
+      editCalls.push({
+        prompt,
+        references: images.map((file) => file.buffer.toString()),
+      });
+      return { candidate: { kind: "base64", value: Buffer.from(`edit:${prompt}`).toString("base64") } };
+    },
+    extractResults: (response) => response?.candidate ? [response.candidate] : [],
+  };
+  const submittedV2Options = [];
+  const videoV2 = {
+    settings: { model: "seedance-2.5", resolution: "720p" },
+    refreshAgentAccess: async () => ({ videoModelKeys: { "seedance-2.5": "secret-not-read-by-replica" } }),
+    submitVideo: async (options) => {
+      submittedV2Options.push(options);
+      return { id: `task-v2-${submittedV2Options.length}` };
+    },
+  };
+  plugin.getGenerationPlugins = () => ({ image: imageV2, video: videoV2 });
+  plugin.waitForVideo = async () => ({ localPath: "山竹视频/mock.mp4" });
+  const requestV2 = {
+    version: 2,
+    confirmed: true,
+    character: { id: "hero", prompt: "固定人物参考板" },
+    scenes: [
+      { id: "harbor", prompt: "海边集装箱场景" },
+      { id: "studio", prompt: "摄影棚场景" },
+    ],
+    settings: { ratio: "9:16", resolution: "720p", videoModel: "seedance-2.5" },
+    shots: [
+      { id: "001", title: "港口", sceneId: "harbor", duration: 4, imagePrompt: "人物走在港口", videoPrompt: "人物向前走" },
+      { id: "002", title: "摄影棚", sceneId: "studio", duration: 4, imagePrompt: "人物走入摄影棚", lastImagePrompt: "人物停在灯光下", videoPrompt: "镜头缓慢推进" },
+    ],
+  };
+  await plugin.runGeneration(generatedV2Folder, requestV2, 456);
+
+  assert.deepStrictEqual(generatedTextPrompts, ["固定人物参考板", "摄影棚场景"]);
+  assert.deepStrictEqual(editCalls, [
+    {
+      prompt: "人物走在港口\n保持参考人物的脸部、发型、服装和年龄一致，并保持场景一致。",
+      references: ["text:固定人物参考板", "existing-harbor-scene"],
+    },
+    {
+      prompt: "人物走入摄影棚\n保持参考人物的脸部、发型、服装和年龄一致，并保持场景一致。",
+      references: ["text:固定人物参考板", "text:摄影棚场景"],
+    },
+    {
+      prompt: "人物停在灯光下\n保持参考人物的脸部、发型、服装和年龄一致，并保持场景一致。",
+      references: ["text:固定人物参考板", "text:摄影棚场景"],
+    },
+  ]);
+  assert(editCalls.every((call) => !call.references.includes("source-frame-must-not-be-used")));
+  assert.deepStrictEqual(submittedV2Options.map((options) => options.referenceImageFiles.map((file) => file.name)), [
+    ["镜头-001-港口-首帧.png"],
+    ["镜头-002-摄影棚-首帧.png", "镜头-002-摄影棚-尾帧.png"],
+  ]);
+
+  const completedV2 = JSON.parse(fs.readFileSync(path.join(generatedV2, "project.json"), "utf8"));
+  assert.strictEqual(completedV2.status, "completed");
+  assert.strictEqual(completedV2.videoModel, "seedance-2.5");
+  assert.strictEqual(completedV2.characterAsset.imagePath, "山竹视频资产库/人物/hero/人物参考板.png");
+  assert.deepStrictEqual(completedV2.sceneAssets.map((asset) => asset.imagePath), [
+    "山竹视频资产库/场景/harbor/场景参考图.png",
+    "山竹视频资产库/场景/studio/场景参考图.png",
+  ]);
+  assert.strictEqual(completedV2.shots[0].lastImagePath, "");
+  assert.strictEqual(completedV2.shots[1].lastImagePath, `${generatedV2Folder}/02-分镜脚本/镜头-002-摄影棚-尾帧.png`);
+  assert(fs.existsSync(path.join(vault, "山竹视频资产库", "人物", "hero", "metadata.json")));
+  assert(fs.existsSync(path.join(vault, "山竹视频资产库", "场景", "studio", "metadata.json")));
+
+  const dashboardV2 = fs.readFileSync(path.join(generatedV2, "00-项目总览.md"), "utf8");
+  assert.match(dashboardV2, /模型：`seedance-2\.5`/);
+  assert.match(dashboardV2, /山竹视频资产库\/人物\/hero\/人物参考板\.png/);
+  assert.match(dashboardV2, /山竹视频资产库\/场景\/harbor\/场景参考图\.png/);
+  assert.match(dashboardV2, /镜头-001-港口-首帧\.png/);
+  assert.match(dashboardV2, /镜头-002-摄影棚-尾帧\.png/);
+  assert.match(dashboardV2, /镜头-002-摄影棚\.mp4/);
+
+  await plugin.runGeneration(generatedV2Folder, requestV2, 457);
+  assert.deepStrictEqual(generatedTextPrompts, ["固定人物参考板", "摄影棚场景"], "existing assets must be reused");
 
   fs.rmSync(vault, { recursive: true, force: true });
   delete global.window;

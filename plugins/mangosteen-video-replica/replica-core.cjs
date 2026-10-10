@@ -1,5 +1,7 @@
 const fs = require("fs");
 const path = require("path");
+const { classifyModel } = require("./generation-policy.cjs");
+const { assertAssetId } = require("./reference-assets.cjs");
 
 const ALLOWED_VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".m4v"]);
 const WINDOWS_RESERVED_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
@@ -65,10 +67,69 @@ function formatTime(seconds) {
 function normalizeGenerationRequest(input) {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("生成任务格式错误。");
   if (input.confirmed !== true) throw new Error("生成任务尚未确认，不会调用付费算力。");
+  const version = input.version === undefined ? 1 : Number(input.version);
+  if (version !== 1 && version !== 2) throw new Error(`不支持生成任务版本：${String(input.version)}`);
   const characterPrompt = cleanText(input.character?.prompt);
   if (!characterPrompt) throw new Error("缺少人物参考图提示词。");
-  const shots = Array.isArray(input.shots) ? input.shots.slice(0, 12) : [];
+  const inputShots = Array.isArray(input.shots) ? input.shots : [];
+  if (version === 2 && inputShots.length > 12) throw new Error("一个任务最多只能包含 12 个分镜。");
+  const shots = version === 1 ? inputShots.slice(0, 12) : inputShots;
   if (!shots.length) throw new Error("至少需要一个分镜。");
+
+  if (version === 2) {
+    const characterId = assertAssetId(input.character?.id);
+    const model = cleanText(input.settings?.videoModel);
+    if (!classifyModel(model)) throw new Error(`视频复刻不支持模型：${model || "未选择"}`);
+    const inputScenes = Array.isArray(input.scenes) ? input.scenes : [];
+    if (!inputScenes.length) throw new Error("至少需要一个场景资产。");
+    const scenes = inputScenes.map((scene) => {
+      const id = assertAssetId(scene?.id);
+      const prompt = cleanText(scene?.prompt);
+      if (!prompt) throw new Error(`场景 ${id} 缺少参考图提示词。`);
+      return { id, prompt };
+    });
+    const sceneIds = new Set();
+    for (const scene of scenes) {
+      if (sceneIds.has(scene.id)) throw new Error(`场景 ID 重复：${scene.id}`);
+      sceneIds.add(scene.id);
+    }
+    return {
+      version: 2,
+      confirmed: true,
+      character: { id: characterId, prompt: characterPrompt },
+      scenes,
+      settings: {
+        ratio: cleanText(input.settings?.ratio) || "9:16",
+        resolution: cleanText(input.settings?.resolution),
+        videoModel: model,
+      },
+      shots: shots.map((shot, index) => {
+        const id = String(index + 1).padStart(3, "0");
+        const sceneId = cleanText(shot?.sceneId);
+        if (!sceneId) throw new Error(`镜头 ${id} 缺少场景 ID。`);
+        assertAssetId(sceneId);
+        if (!sceneIds.has(sceneId)) throw new Error(`镜头 ${id} 找不到场景 ID：${sceneId}`);
+        const title = safeSegment(shot?.title, `镜头-${id}`);
+        const imagePrompt = cleanText(shot?.imagePrompt || shot?.prompt);
+        const videoPrompt = cleanText(shot?.videoPrompt || shot?.prompt);
+        if (!imagePrompt || !videoPrompt) throw new Error(`镜头 ${id} 缺少图片或视频提示词。`);
+        return {
+          id,
+          title,
+          sceneId,
+          duration: Math.max(2, Math.min(15, Number(shot?.duration) || 5)),
+          dialogue: cleanText(shot?.dialogue),
+          plot: cleanText(shot?.plot),
+          environment: cleanText(shot?.environment),
+          camera: cleanText(shot?.camera),
+          imagePrompt,
+          lastImagePrompt: cleanText(shot?.lastImagePrompt),
+          videoPrompt,
+        };
+      }),
+    };
+  }
+
   return {
     version: 1,
     confirmed: true,
@@ -104,6 +165,8 @@ function dashboardMarkdown(project) {
   const status = cleanText(project.statusText || project.status || "准备中");
   const frames = Array.isArray(project.frames) ? project.frames : [];
   const shots = Array.isArray(project.shots) ? project.shots : [];
+  const sceneAssets = Array.isArray(project.sceneAssets) ? project.sceneAssets : [];
+  const characterImagePath = project.characterAsset?.imagePath || project.characterImagePath;
   const lines = [
     "---",
     `title: "${safeSegment(project.title || project.sourceName || "视频复刻项目").replace(/"/g, "\\\"")}"`,
@@ -116,6 +179,10 @@ function dashboardMarkdown(project) {
     "",
     `> [!info] 当前状态：${status}`,
     "",
+    "## 生成设置",
+    "",
+    `- 模型：\`${cleanText(project.videoModel) || "等待选择"}\``,
+    "",
     "## 源视频",
     "",
     `- 文件：\`${cleanText(project.sourcePath)}\``,
@@ -127,15 +194,23 @@ function dashboardMarkdown(project) {
     "",
     "## 人物参考",
     "",
-    project.characterImagePath ? `![[${project.characterImagePath}]]` : "等待生成人物三视图。",
+    characterImagePath ? `![[${characterImagePath}]]` : "等待生成人物三视图。",
     "",
+    "## 场景资产",
+    "",
+  ];
+  if (!sceneAssets.length) lines.push("等待生成场景参考图。", "");
+  for (const asset of sceneAssets) {
+    lines.push(`### ${safeSegment(asset.id, "场景")}`, "", `![[${asset.imagePath}]]`, "");
+  }
+  lines.push(
     "## 分镜脚本",
     "",
     project.storyboardPath ? `![[${project.storyboardPath}]]` : "等待山竹完成分镜分析。",
     "",
     "## 提取画面",
     "",
-  ];
+  );
   if (!frames.length) lines.push("等待抽取关键画面。");
   for (const frame of frames) {
     lines.push(`### 镜头参考 ${String(frame.index).padStart(3, "0")} · ${formatTime(frame.timestamp)}`, "", `![[${frame.path}]]`, "");
@@ -144,7 +219,9 @@ function dashboardMarkdown(project) {
   if (!shots.length) lines.push("尚未提交生成任务。", "");
   for (const shot of shots) {
     lines.push(`### ${shot.id}｜${safeSegment(shot.title, `镜头-${shot.id}`)}`, "");
-    if (shot.imagePath) lines.push(`![[${shot.imagePath}]]`, "");
+    const firstImagePath = shot.firstImagePath || shot.imagePath;
+    if (firstImagePath) lines.push("**首帧**", "", `![[${firstImagePath}]]`, "");
+    if (shot.lastImagePath) lines.push("**尾帧**", "", `![[${shot.lastImagePath}]]`, "");
     if (shot.videoPath) lines.push(`![[${shot.videoPath}]]`, "");
     else lines.push(`状态：${cleanText(shot.status || "等待生成")}`, "");
     if (shot.error) lines.push(`> [!warning] ${cleanText(shot.error)}`, "");

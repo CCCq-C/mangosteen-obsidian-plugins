@@ -22,7 +22,47 @@ const request = core.normalizeGenerationRequest({
   character: { prompt: "同一人物正面、侧面、背面三视图" },
   shots: [{ title: "开场", prompt: "人物走进房间", duration: 4 }],
 });
+assert.strictEqual(request.version, 1);
 assert.strictEqual(request.shots[0].id, "001");
+
+const requestV2Input = {
+  version: 2,
+  confirmed: true,
+  character: { id: "hero", prompt: "固定人物参考板" },
+  scenes: [{ id: "harbor", prompt: "海边集装箱场景" }],
+  settings: { videoModel: "MiniMax-H3", ratio: "9:16", resolution: "768p" },
+  shots: [{
+    title: "人物走向集装箱",
+    sceneId: "harbor",
+    imagePrompt: "人物全身中景",
+    lastImagePrompt: "人物停在集装箱前",
+    videoPrompt: "人物向前走，镜头缓慢推进",
+    duration: 4,
+  }],
+};
+const requestV2 = core.normalizeGenerationRequest(requestV2Input);
+assert.strictEqual(requestV2.version, 2);
+assert.deepStrictEqual(requestV2.character, { id: "hero", prompt: "固定人物参考板" });
+assert.deepStrictEqual(requestV2.scenes, [{ id: "harbor", prompt: "海边集装箱场景" }]);
+assert.strictEqual(requestV2.shots[0].sceneId, "harbor");
+assert.strictEqual(requestV2.shots[0].lastImagePrompt, "人物停在集装箱前");
+
+assert.throws(
+  () => core.normalizeGenerationRequest({ ...requestV2Input, shots: [{ ...requestV2Input.shots[0], sceneId: "missing" }] }),
+  /找不到场景 ID.*missing/,
+);
+assert.throws(
+  () => core.normalizeGenerationRequest({ ...requestV2Input, character: { ...requestV2Input.character, id: "../hero" } }),
+  /资产 ID 不安全/,
+);
+assert.throws(
+  () => core.normalizeGenerationRequest({ ...requestV2Input, settings: { ...requestV2Input.settings, videoModel: "KlingO3" } }),
+  /不支持模型/,
+);
+assert.throws(
+  () => core.normalizeGenerationRequest({ ...requestV2Input, shots: Array.from({ length: 13 }, () => requestV2Input.shots[0]) }),
+  /最多只能包含 12 个分镜/,
+);
 
 const markdown = core.dashboardMarkdown({
   folder: "山竹视频复刻/测试项目",
