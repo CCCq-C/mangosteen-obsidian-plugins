@@ -500,7 +500,7 @@ module.exports = class MangosteenVideoPlugin extends Plugin {
     let bytes;
     try { bytes = await file.arrayBuffer(); } catch (_) { throw new Error(label + "图片读取失败，请重新选择文件。"); }
     const uploaded = await bridge.uploadTemporaryImage({ name: file.name, type: this.api.localImageMimeType(file), bytes });
-    if (!uploaded?.ok || !/^https?:\/\/[^\s]+$/i.test(String(uploaded.url || "").trim())) {
+    if (!uploaded?.ok || !/^https:\/\/[^\s]+$/i.test(String(uploaded.url || "").trim())) {
       throw new Error(label + "图片上传失败，请检查网络、文件格式或重新登录后重试。");
     }
     return String(uploaded.url).trim();

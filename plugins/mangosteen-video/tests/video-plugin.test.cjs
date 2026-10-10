@@ -80,19 +80,72 @@ const baseOptions = {
   assert.strictEqual(Object.hasOwn(sentPayloads[0], "referenceImageFiles"), false);
   assert.strictEqual(sentPayloads[0].referenceImages.some((item) => typeof item !== "string"), false);
 
-  const existingUrlPayloads = [];
-  const existingUrlPlugin = makePlugin(async () => {
-    throw new Error("URL-only callers must not upload");
+  const mixedReferenceUploads = [];
+  const mixedReferencePayloads = [];
+  const mixedReferencePlugin = makePlugin(async (upload) => {
+    mixedReferenceUploads.push(upload.name);
+    return { ok: true, url: `https://uploads.example/${upload.name}` };
   });
-  existingUrlPlugin.sendVideoPayload = async (payload) => {
-    existingUrlPayloads.push(payload);
+  mixedReferencePlugin.sendVideoPayload = async (payload) => {
+    mixedReferencePayloads.push(payload);
     return { status: 200, json: { id: "video-task-2" } };
   };
-  await existingUrlPlugin.submitVideo({
+  await mixedReferencePlugin.submitVideo({
     ...baseOptions,
     referenceImages: ["https://assets.example/existing.png"],
+    referenceImageFiles: files,
   });
-  assert.deepStrictEqual(existingUrlPayloads[0].referenceImages, ["https://assets.example/existing.png"]);
+  assert.deepStrictEqual(mixedReferenceUploads, ["character-front.png", "character-side.webp"]);
+  assert.deepStrictEqual(mixedReferencePayloads[0].referenceImages, [
+    "https://assets.example/existing.png",
+    "https://uploads.example/character-front.png",
+    "https://uploads.example/character-side.webp",
+  ]);
+
+  let httpQuotaLookups = 0;
+  let httpPaidRequests = 0;
+  const httpPlugin = makePlugin(async () => ({ ok: true, url: "http://uploads.example/insecure.png" }));
+  httpPlugin.getRawQuota = async () => {
+    httpQuotaLookups += 1;
+    return 100;
+  };
+  httpPlugin.sendVideoPayload = async () => {
+    httpPaidRequests += 1;
+    return { status: 200, json: { id: "must-not-exist" } };
+  };
+  await assert.rejects(
+    httpPlugin.submitVideo({ ...baseOptions, referenceImageFiles: [files[0]] }),
+    /参考图片上传失败/
+  );
+  assert.strictEqual(httpQuotaLookups, 0);
+  assert.strictEqual(httpPaidRequests, 0);
+
+  let limitUploads = 0;
+  let limitQuotaLookups = 0;
+  let limitPaidRequests = 0;
+  const limitPlugin = makePlugin(async () => {
+    limitUploads += 1;
+    return { ok: true, url: "https://uploads.example/must-not-upload.png" };
+  });
+  limitPlugin.getRawQuota = async () => {
+    limitQuotaLookups += 1;
+    return 100;
+  };
+  limitPlugin.sendVideoPayload = async () => {
+    limitPaidRequests += 1;
+    return { status: 200, json: { id: "must-not-exist" } };
+  };
+  await assert.rejects(
+    limitPlugin.submitVideo({
+      ...baseOptions,
+      referenceImages: Array.from({ length: 29 }, (_, index) => `https://assets.example/reference-${index + 1}.png`),
+      referenceImageFiles: files,
+    }),
+    /最多填写 30 个/
+  );
+  assert.strictEqual(limitUploads, 0);
+  assert.strictEqual(limitQuotaLookups, 0);
+  assert.strictEqual(limitPaidRequests, 0);
 
   let paidRequests = 0;
   const failingPlugin = makePlugin(async () => ({ ok: false }));
