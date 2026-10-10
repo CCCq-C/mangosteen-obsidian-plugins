@@ -115,7 +115,7 @@ const {
 const request = {
   version: 3,
   confirmed: false,
-  character: { id: "hero", prompt: "短发人物，蓝色工装" },
+  character: { id: "hero", prompt: "短发人物，蓝色工装", voiceProfile: "年轻清亮女声，轻微四川口音" },
   products: [{ id: "phone", prompt: "银色手机" }],
   scenes: [{ id: "room", prompt: "明亮摄影棚" }],
   settings: { imageModel: "gpt-image-2", videoModel: "MiniMax-H3", ratio: "9:16", resolution: "768p" },
@@ -126,6 +126,7 @@ const request = {
     productIds: ["phone"],
     duration: 4,
     dialogue: "你好",
+    voiceDirection: "亲切，语速中等，句尾上扬",
     plot: "人物举起手机",
     environment: "白色背景",
     camera: "缓慢推进",
@@ -218,10 +219,28 @@ function createView(plugin) {
       && element.dataset.field === "title"
   ));
   assert(titleInput, "shot title input should render");
+  const voiceDirectionInput = view.contentEl.find((element) => (
+    element.tagName === "TEXTAREA"
+      && element.dataset.section === "shot"
+      && element.dataset.field === "voiceDirection"
+  ));
+  assert(voiceDirectionInput, "per-shot voice direction should be editable in the workbench");
+  assert.strictEqual(voiceDirectionInput.value, "亲切，语速中等，句尾上扬");
   titleInput.value = "本地改名";
   await titleInput.dispatch("input");
   assert.strictEqual(view.dirty, true);
   assert.strictEqual(view.draft.shots[0].title, "本地改名");
+
+  const assetsTab = view.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "资产");
+  await assetsTab.dispatch("click");
+  const voiceProfileInput = view.contentEl.find((element) => (
+    element.tagName === "TEXTAREA"
+      && element.dataset.section === "character"
+      && element.dataset.field === "voiceProfile"
+  ));
+  assert(voiceProfileInput, "stable character voice profile should be editable in the workbench");
+  assert.strictEqual(voiceProfileInput.value, "年轻清亮女声，轻微四川口音");
+  await view.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "分镜").dispatch("click");
 
   plugin.snapshot.request.shots[0].title = "外部改名";
   plugin.snapshot.project.statusText = "轮询状态变化";

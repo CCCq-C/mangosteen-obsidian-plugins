@@ -294,6 +294,9 @@ class VideoReplicaWorkbenchView extends ItemView {
     this.createDraftControl(characterCard, "人物提示词", "textarea", character.prompt, {
       section: "character", field: "prompt",
     });
+    this.createDraftControl(characterCard, "固定声音设定（语言、口音、音色、年龄感）", "textarea", character.voiceProfile, {
+      section: "character", field: "voiceProfile",
+    });
     this.renderAssetPath(characterCard, this.viewModel.assets.character?.imagePath);
 
     list(this.draft?.products).forEach((product, index) => {
@@ -348,6 +351,7 @@ class VideoReplicaWorkbenchView extends ItemView {
       const details = this.createDetails(card, `shot-${shot.id || index}`, "镜头内容", true);
       this.createDraftControl(details, "剧情 / 动作", "textarea", shot.plot, { section: "shot", index, field: "plot" });
       this.createDraftControl(details, "台词", "textarea", shot.dialogue, { section: "shot", index, field: "dialogue" });
+      this.createDraftControl(details, "情绪与语调（语速、重音、停顿）", "textarea", shot.voiceDirection, { section: "shot", index, field: "voiceDirection" });
       this.createDraftControl(details, "环境", "textarea", shot.environment, { section: "shot", index, field: "environment" });
       this.createDraftControl(details, "镜头语言", "textarea", shot.camera, { section: "shot", index, field: "camera" });
       this.createDraftControl(details, "首帧提示词", "textarea", shot.imagePrompt, { section: "shot", index, field: "imagePrompt" });
