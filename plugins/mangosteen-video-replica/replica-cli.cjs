@@ -31,10 +31,10 @@ function resolveRuntime(pluginRoot, name, envName, standard = []) {
 function resolveWhisperModel(pluginRoot) {
   return firstExisting([
     process.env.MANGOSTEEN_WHISPER_MODEL,
-    path.join(pluginRoot, "models", "ggml-base.bin"),
     path.join(pluginRoot, "models", "ggml-small.bin"),
-    path.join(os.homedir(), ".cache", "whisper-cpp", "ggml-base.bin"),
+    path.join(pluginRoot, "models", "ggml-base.bin"),
     path.join(os.homedir(), ".cache", "whisper-cpp", "ggml-small.bin"),
+    path.join(os.homedir(), ".cache", "whisper-cpp", "ggml-base.bin"),
   ]);
 }
 
@@ -193,8 +193,10 @@ async function transcribeAudio(runtime, audioPath, workFolder, sourceName) {
   if (!runtime.whisper) throw new Error("缺少 Whisper.cpp。请重新安装山竹视频复刻组件。");
   if (!runtime.whisperModel) throw new Error("缺少 Whisper 中文模型。请重新安装山竹视频复刻组件。");
   const outputPrefix = path.join(workFolder, "whisper-result");
+  const initialPrompt = String(sourceName || "").replace(/\s+/g, " ").trim().slice(0, 320);
   await run(runtime.whisper, [
     "-m", runtime.whisperModel, "-f", audioPath, "-l", "zh",
+    ...(initialPrompt ? ["--prompt", initialPrompt, "--carry-initial-prompt"] : []),
     "-oj", "-of", outputPrefix, "-np", "-t", String(Math.max(2, Math.min(8, os.cpus().length - 1))),
   ]);
   const jsonPath = `${outputPrefix}.json`;
@@ -306,6 +308,7 @@ function analysisPrompt(project, transcriptText = "") {
     "输出最多 12 个连续分镜，覆盖主要剧情。每个分镜写清人物动作、台词、环境、镜头语言、首帧提示词、可选尾帧提示词和视频提示词。",
     "人物提示词必须描述稳定的五官、发型、年龄、服装和正面/侧面/背面三视图。",
     "声音采用两层设定：character.voiceProfile 写全片固定的语言、口音、年龄感、音色和说话习惯；每个有台词的镜头用 voiceDirection 写本镜头的情绪、语调、语速、重音和停顿。全片没有台词时 voiceProfile 为空；单个镜头没有台词时 voiceDirection 为空。",
+    "严格区分人物对白、旁白和背景歌曲歌词。只有画面中角色实际开口说出的内容写入 dialogue；背景歌曲歌词不得当成人物对白或要求角色对口型，应写进 videoPrompt，明确为画外背景歌曲。",
     "优先保留台词转写中明确出现的语言或方言线索。当前分析只收到台词文本与截图，无法实际听到原声音频；没有明确证据时只能根据人物、画面和剧情给出可编辑的声音建议，不得声称已经克隆或精确识别原声。",
     "把需要固定外观的商品、品牌包装或核心道具单独写入 products；产品提示词要写清型号、形状、颜色、材质、比例、包装和可见标识。没有核心产品时 products 输出空数组。",
     "场景只描述纯环境：地标、空间布局、建筑、固定陈设、光线、天气、时间和环境质感，不得写人物、商品、品牌包装或产品摆放。环境细节要足以在多个镜头中保持空间连续。",
