@@ -225,6 +225,18 @@ const baseOptions = {
   assert.strictEqual(successPlugin.settings.videoTasks[0].status, "completed");
   assert.strictEqual(successPlugin.settings.submissionMarkers.length, 0, "terminal success reconciles the paid submission marker");
 
+  const unavailablePlugin = new VideoPlugin();
+  unavailablePlugin.api = videoApi;
+  unavailablePlugin.settings = { resolutionsByModel: {}, videoTasks: [], submissionMarkers: [] };
+  unavailablePlugin.videoAccess = { accountUserId: "user-1" };
+  unavailablePlugin.getRawQuota = async () => 100;
+  unavailablePlugin.saveSettings = async () => {};
+  unavailablePlugin.sendVideoPayload = async () => ({ status: 404, json: { error: { message: "model not found" } } });
+  await assert.rejects(
+    unavailablePlugin.submitVideo({ ...baseOptions, model: "MiniMax-H3", resolution: "768p" }),
+    (error) => error?.status === 404 && error?.model === "MiniMax-H3" && error?.changeModel === true,
+  );
+
   const responseLostPlugin = new VideoPlugin();
   responseLostPlugin.api = videoApi;
   responseLostPlugin.settings = { resolutionsByModel: {}, videoTasks: [], submissionMarkers: [] };

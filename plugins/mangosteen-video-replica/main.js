@@ -12,7 +12,7 @@ const ROOT = "山竹视频复刻";
 const REQUEST_FILE = "generation-request.json";
 const STATE_FILE = ".work/generation-state.json";
 const PROCESSING_LEASE_MS = 2 * 60 * 1000;
-const DEFAULT_SETTINGS = { analysisGroup: "", analysisModel: "" };
+const DEFAULT_SETTINGS = { analysisGroup: "", analysisModel: "", imageModel: "", videoModel: "" };
 
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
@@ -38,6 +38,12 @@ class PrepareModal extends Modal {
     const modelButton = modelRow.createEl("button", { text: "选择模型" });
     modelButton.addEventListener("click", () => new AnalysisModelModal(this.plugin, () => {
       modelLabel.setText(`分析模型：${this.plugin.analysisSelectionLabel()}`);
+    }).open());
+    const generationRow = contentEl.createDiv({ cls: "mangosteen-replica-model-row" });
+    const generationLabel = generationRow.createEl("span", { text: `生成模型：${this.plugin.generationSelectionLabel()}` });
+    const generationButton = generationRow.createEl("button", { text: "选择生成模型" });
+    generationButton.addEventListener("click", () => new GenerationModelModal(this.plugin, () => {
+      generationLabel.setText(`生成模型：${this.plugin.generationSelectionLabel()}`);
     }).open());
     const picker = contentEl.createEl("input", { attr: { type: "file", accept: ".mp4,.mov,.m4v,video/mp4,video/quicktime" } });
     const status = contentEl.createDiv({ cls: "mangosteen-replica-status", text: "等待选择视频" });
@@ -119,6 +125,43 @@ class AnalysisModelModal extends Modal {
   }
 }
 
+class GenerationModelModal extends Modal {
+  constructor(plugin, onSaved = null) { super(plugin.app); this.plugin = plugin; this.onSaved = onSaved; }
+
+  onOpen() {
+    this.contentEl.addClass("mangosteen-replica-modal");
+    this.contentEl.createEl("h2", { text: "选择图片与视频生成模型" });
+    this.status = this.contentEl.createEl("p", { text: "正在读取当前账号可用模型…" });
+    void this.loadCatalog();
+  }
+
+  async loadCatalog() {
+    try {
+      const catalog = await this.plugin.refreshGenerationModelCatalog();
+      const selection = this.plugin.resolveGenerationSelection(catalog);
+      this.status.remove();
+      const imageLabel = this.contentEl.createEl("label", { text: "图片模型" });
+      const imageSelect = imageLabel.createEl("select");
+      for (const model of catalog.imageModels) imageSelect.createEl("option", { text: model, attr: { value: model } });
+      imageSelect.value = selection.imageModel;
+      const videoLabel = this.contentEl.createEl("label", { text: "视频模型" });
+      const videoSelect = videoLabel.createEl("select");
+      for (const model of catalog.videoModels) videoSelect.createEl("option", { text: model, attr: { value: model } });
+      videoSelect.value = selection.videoModel;
+      const saveButton = this.contentEl.createEl("button", { cls: "mod-cta", text: "保存生成模型" });
+      saveButton.addEventListener("click", async () => {
+        const saved = await this.plugin.setGenerationSelection(imageSelect.value, videoSelect.value, catalog);
+        if (!saved) { new Notice("所选生成模型已不可用，请刷新后重新选择。", 6000); return; }
+        this.onSaved?.();
+        new Notice(`已选择：${imageSelect.value} + ${videoSelect.value}`, 5000);
+        this.close();
+      });
+    } catch (error) {
+      this.status.setText(`模型读取失败：${String(error?.message || error)}`);
+    }
+  }
+}
+
 module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
   async onload() {
     const pluginRoot = path.join(this.vaultPath(), ...String(this.manifest.dir || "").split(/[\\/]/).filter(Boolean));
@@ -135,6 +178,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     this.addRibbonIcon("clapperboard", "山竹视频复刻", () => new PrepareModal(this).open());
     this.addCommand({ id: "prepare-local-video", name: "从本地视频新建复刻项目", callback: () => new PrepareModal(this).open() });
     this.addCommand({ id: "select-analysis-model", name: "选择视频分析语言模型", callback: () => new AnalysisModelModal(this).open() });
+    this.addCommand({ id: "select-generation-models", name: "选择视频复刻的图片与视频模型", callback: () => new GenerationModelModal(this).open() });
     this.addCommand({ id: "analyze-latest-project", name: "分析最近的视频复刻项目", callback: () => void this.analyzeLatestProject() });
     this.addCommand({ id: "confirm-latest-generation", name: "确认并开始付费生成最近项目", callback: () => void this.confirmLatestGeneration() });
     this.addCommand({ id: "concat-latest-project", name: "拼接最近已完成项目", callback: () => void this.concatLatestProject() });
@@ -182,17 +226,87 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
   }
 
   analysisSettings() {
+    const image = this.app.plugins?.getPlugin?.("mangosteen-image");
     const video = this.app.plugins?.getPlugin?.("mangosteen-video");
-    const currentModel = String(video?.settings?.model || "").trim();
+    const imageModel = String(this.settings?.imageModel || image?.settings?.model || "gpt-image-2").trim();
+    const currentModel = String(this.settings?.videoModel || video?.settings?.model || "").trim();
     const videoModel = generationPolicy.classifyModel(currentModel) ? currentModel : "MiniMax-H3";
     const family = generationPolicy.classifyModel(videoModel);
     let resolution = String(video?.settings?.resolution || "720p").trim() || "720p";
     if (family === "minimax-h3" && !["768p", "2k"].includes(resolution.toLowerCase())) resolution = "768p";
     if (family === "seedance" && !["480p", "720p", "1080p"].includes(resolution.toLowerCase())) resolution = "720p";
     return {
+      imageModel,
       videoModel,
       resolution,
     };
+  }
+
+  async refreshGenerationModelCatalog() {
+    const image = this.app.plugins?.getPlugin?.("mangosteen-image");
+    const video = this.app.plugins?.getPlugin?.("mangosteen-video");
+    if (typeof image?.refreshAgentAccess !== "function" || typeof video?.refreshAgentAccess !== "function") {
+      throw new Error("山竹生图或视频插件未启用，无法读取生成模型。");
+    }
+    const [imageAccess, videoAccess] = await Promise.all([image.refreshAgentAccess(), video.refreshAgentAccess()]);
+    return {
+      imageModels: Object.keys(imageAccess?.imageModelKeys || {}),
+      videoModels: generationPolicy.eligibleModels(Object.keys(videoAccess?.videoModelKeys || {})),
+      currentImageModel: String(image.settings?.model || ""),
+      currentVideoModel: String(video.settings?.model || ""),
+    };
+  }
+
+  resolveGenerationSelection(catalog) {
+    const imageModels = Array.isArray(catalog?.imageModels) ? catalog.imageModels : [];
+    const videoModels = Array.isArray(catalog?.videoModels) ? catalog.videoModels : [];
+    const requestedImage = String(this.settings?.imageModel || catalog?.currentImageModel || "");
+    const requestedVideo = String(this.settings?.videoModel || catalog?.currentVideoModel || "");
+    const exact = (models, requested) => models.find((model) => model === requested)
+      || models.find((model) => model.toLowerCase() === requested.toLowerCase());
+    const imageModel = exact(imageModels, requestedImage)
+      || imageModels.find((model) => model.toLowerCase() === "gpt-image-2")
+      || imageModels.find((model) => model.toLowerCase().startsWith("gpt-image-2"))
+      || String(imageModels[0] || "");
+    const videoModel = exact(videoModels, requestedVideo)
+      || videoModels.find((model) => model.toLowerCase() === "minimax-h3")
+      || String(videoModels[0] || "");
+    return { imageModel, videoModel };
+  }
+
+  generationSelectionLabel() {
+    const settings = this.analysisSettings();
+    return `${settings.imageModel || "未选择图片模型"} + ${settings.videoModel || "未选择视频模型"}`;
+  }
+
+  async setGenerationSelection(imageModel, videoModel, catalog) {
+    if (!catalog?.imageModels?.includes(imageModel) || !catalog?.videoModels?.includes(videoModel)) return false;
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, this.settings, { imageModel, videoModel });
+    if (typeof this.saveData === "function") await this.saveData(this.settings);
+    return true;
+  }
+
+  generationModelError(kind, model, error) {
+    const message = String(error?.message || error || "模型不可用");
+    const status = Number(error?.status || 0);
+    const unavailable = error?.changeModel === true || status === 404
+      || /model.*(not found|unavailable)|no available channel|模型.*(不存在|不可用|下架)|没有可用.*线路/i.test(message);
+    if (!unavailable) return error;
+    const typed = error instanceof Error ? error : new Error(message);
+    typed.code = String(error?.code || "MODEL_UNAVAILABLE");
+    if (status) typed.status = status;
+    typed.changeModel = true;
+    typed.generationKind = kind;
+    typed.model = String(model || error?.model || "");
+    return typed;
+  }
+
+  unavailableGenerationModel(kind, model, available) {
+    const label = kind === "image" ? "图片" : "视频";
+    const detail = available.length ? `当前可用：${available.join("、")}` : `当前账号没有可用的${label}模型`;
+    return this.generationModelError(kind, model, Object.assign(new Error(`${label}模型“${model || "未选择"}”不可用。${detail}`), {
+      code: "MODELS_UNAVAILABLE", status: 404, changeModel: true,
+    }));
   }
 
   analysisModelCatalog() {
@@ -352,10 +466,23 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     const requestPath = path.join(path.dirname(record.projectPath), REQUEST_FILE);
     if (!fs.existsSync(requestPath)) { new Notice("最近项目还没有生成分镜草案。", 6000); return; }
     const request = this.readJson(requestPath);
-    if (request.confirmed === true) { new Notice("这个项目已经确认，正在检查生成状态。", 6000); await this.processRequest(requestPath, true); return; }
+    let catalog;
+    try {
+      catalog = await this.refreshGenerationModelCatalog();
+    } catch (error) {
+      new Notice(`无法读取生成模型：${String(error?.message || error)}`, 9000);
+      return;
+    }
+    const selection = this.resolveGenerationSelection(catalog);
+    if (!selection.imageModel || !selection.videoModel) {
+      new Notice("当前账号没有可用的图片或视频模型，请打开模型选择后重试。", 9000);
+      return;
+    }
+    await this.setGenerationSelection(selection.imageModel, selection.videoModel, catalog);
+    request.settings = Object.assign({}, request.settings, selection);
     request.confirmed = true;
     writeJson(requestPath, request);
-    new Notice("已确认，开始调用生图和视频算力。", 7000);
+    new Notice(`已确认：${selection.imageModel} + ${selection.videoModel}，开始调用生成算力。`, 7000);
     await this.processRequest(requestPath, true);
   }
 
@@ -474,12 +601,31 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       if (notify) new Notice("视频复刻任务已经全部处理完成。", 7000);
     } catch (error) {
       if (projectFolder) {
-        const state = { status: "failed", requestMtimeMs, updatedAt: new Date().toISOString(), error: String(error?.message || error) };
+        const modelError = error?.changeModel === true && ["image", "video"].includes(error?.generationKind);
+        const status = modelError ? `generation_${error.generationKind}_model_error` : "failed";
+        const state = {
+          status,
+          requestMtimeMs,
+          updatedAt: new Date().toISOString(),
+          error: String(error?.message || error),
+          ...(modelError ? {
+            errorCode: String(error?.code || "MODEL_UNAVAILABLE"),
+            errorStatus: Number(error?.status || 0) || undefined,
+            modelKind: error.generationKind,
+            model: String(error?.model || ""),
+          } : {}),
+        };
         this.writeState(projectFolder, state);
         try {
           const project = this.readJson(path.join(this.absolute(projectFolder), "project.json"));
-          project.status = "failed";
-          project.statusText = `生成失败：${state.error}`;
+          project.status = status;
+          if (modelError) {
+            const label = error.generationKind === "image" ? "图片" : "视频";
+            project.generationErrorCode = state.errorCode;
+            project.generationErrorStatus = state.errorStatus;
+            project.generationErrorAt = state.updatedAt;
+            project.statusText = `${label}模型 ${state.model || "当前选择"} 返回错误：${state.error}。请更换${label}模型后重试。`;
+          } else project.statusText = `生成失败：${state.error}`;
           this.saveProject(projectFolder, project);
         } catch (_) {}
       }
@@ -525,26 +671,39 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     };
   }
 
-  async generateImage(imagePlugin, prompt, referencePath = "") {
-    const response = referencePath
-      ? await imagePlugin.generateEdit(prompt, this.localImage(referencePath))
-      : await imagePlugin.generateText(prompt, 1);
-    const candidate = imagePlugin.extractResults(response)?.[0];
-    if (!candidate) throw new Error("生图任务完成，但没有返回图片。");
-    candidate.__mangosteenSubmissionFingerprint = response?.__mangosteenSubmissionFingerprint;
-    return candidate;
+  async generateImage(imagePlugin, prompt, referencePath = "", imageModel = "") {
+    try {
+      const response = referencePath
+        ? await imagePlugin.generateEdit(prompt, this.localImage(referencePath), "video-replica", { model: imageModel })
+        : await imagePlugin.generateText(prompt, 1, "video-replica", { model: imageModel });
+      const candidate = imagePlugin.extractResults(response)?.[0];
+      if (!candidate) throw new Error("生图任务完成，但没有返回图片。");
+      candidate.__mangosteenSubmissionFingerprint = response?.__mangosteenSubmissionFingerprint;
+      return candidate;
+    } catch (error) {
+      throw this.generationModelError("image", imageModel, error);
+    }
   }
 
-  async generateImageMulti(imagePlugin, prompt, referencePaths) {
+  async generateImageMulti(imagePlugin, prompt, referencePaths, imageModel = "") {
     if (typeof imagePlugin.generateEditMulti !== "function") throw new Error("山竹生图插件版本过低，缺少多图参考能力。请先更新插件。");
-    const response = await imagePlugin.generateEditMulti(prompt, referencePaths.map((vaultPath) => this.localImage(vaultPath)));
-    const candidate = imagePlugin.extractResults(response)?.[0];
-    if (!candidate) throw new Error("多图参考生图完成，但没有返回图片。");
-    candidate.__mangosteenSubmissionFingerprint = response?.__mangosteenSubmissionFingerprint;
-    return candidate;
+    try {
+      const response = await imagePlugin.generateEditMulti(
+        prompt,
+        referencePaths.map((vaultPath) => this.localImage(vaultPath)),
+        "video-replica",
+        { model: imageModel },
+      );
+      const candidate = imagePlugin.extractResults(response)?.[0];
+      if (!candidate) throw new Error("多图参考生图完成，但没有返回图片。");
+      candidate.__mangosteenSubmissionFingerprint = response?.__mangosteenSubmissionFingerprint;
+      return candidate;
+    } catch (error) {
+      throw this.generationModelError("image", imageModel, error);
+    }
   }
 
-  async ensureReferenceAsset(imagePlugin, asset, prompt) {
+  async ensureReferenceAsset(imagePlugin, asset, prompt, imageModel = "") {
     this.referenceAssetPromises ||= new Map();
     const key = `${asset.kind}:${asset.id}`;
     const pending = this.referenceAssetPromises.get(key);
@@ -555,7 +714,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         ? referenceAssets.resolveCharacterAsset(this.vaultPath(), asset.id)
         : referenceAssets.resolveSceneAsset(this.vaultPath(), asset.id);
       if (current.exists) return { ...current, reused: true };
-      const candidate = await this.generateImage(imagePlugin, prompt);
+      const candidate = await this.generateImage(imagePlugin, prompt, "", imageModel);
       await this.saveImageCandidate(imagePlugin, candidate, current.imagePath);
       referenceAssets.writeAssetMetadata(this.vaultPath(), current, {
         prompt,
@@ -614,7 +773,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     this.saveProject(projectFolder, project);
   }
 
-  async runAssetGeneration(projectFolder, request, requestMtimeMs, { image, video, model }) {
+  async runAssetGeneration(projectFolder, request, requestMtimeMs, { image, video, imageModel, model }) {
     const projectPath = path.join(this.absolute(projectFolder), "project.json");
     const project = this.readJson(projectPath);
     const previousShots = new Map((Array.isArray(project.shots) ? project.shots : []).map((shot) => [String(shot.id), shot]));
@@ -624,6 +783,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     this.writeState(projectFolder, state);
     project.status = "generating";
     project.statusText = "正在准备人物和场景资产";
+    project.imageModel = imageModel;
     project.videoModel = model;
     project.finalVideoPath = "";
     delete project.concatError;
@@ -635,6 +795,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       image,
       referenceAssets.resolveCharacterAsset(this.vaultPath(), request.character.id),
       request.character.prompt,
+      imageModel,
     );
     project.characterAsset = {
       id: character.id,
@@ -653,6 +814,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         image,
         referenceAssets.resolveSceneAsset(this.vaultPath(), scene.id),
         scene.prompt,
+        imageModel,
       );
       project.sceneAssets.push({
         id: resolved.id,
@@ -723,7 +885,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         const continuity = "保持参考人物的脸部、发型、服装和年龄一致，并保持场景一致。";
         const firstPrompt = `${shot.imagePrompt}\n${continuity}`;
         if (!shot.firstImagePath) {
-          const firstCandidate = await this.generateImageMulti(image, firstPrompt, referencePaths);
+          const firstCandidate = await this.generateImageMulti(image, firstPrompt, referencePaths, imageModel);
           shot.firstImagePath = await this.saveImageCandidate(
             image,
             firstCandidate,
@@ -735,7 +897,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         if (shot.lastImagePrompt && !shot.lastImagePath) {
           shot.status = "正在生成尾帧";
           this.saveProject(projectFolder, project);
-          const lastCandidate = await this.generateImageMulti(image, `${shot.lastImagePrompt}\n${continuity}`, referencePaths);
+          const lastCandidate = await this.generateImageMulti(image, `${shot.lastImagePrompt}\n${continuity}`, referencePaths, imageModel);
           shot.lastImagePath = await this.saveImageCandidate(
             image,
             lastCandidate,
@@ -745,19 +907,26 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
 
         shot.status = "正在生成视频";
         this.saveProject(projectFolder, project);
-        const task = await video.submitVideo(generationPolicy.buildVideoOptions({
-          model,
-          prompt: shot.videoPrompt,
-          duration: shot.duration,
-          ratio: request.settings.ratio,
-          resolution: effectiveResolution,
-          firstImageFile: this.localImage(shot.firstImagePath),
-          lastImageFile: shot.lastImagePath ? this.localImage(shot.lastImagePath) : null,
-        }));
-        const completed = await this.waitForVideo(video, task.id);
+        let task;
+        let completed;
+        try {
+          task = await video.submitVideo(generationPolicy.buildVideoOptions({
+            model,
+            prompt: shot.videoPrompt,
+            duration: shot.duration,
+            ratio: request.settings.ratio,
+            resolution: effectiveResolution,
+            firstImageFile: this.localImage(shot.firstImagePath),
+            lastImageFile: shot.lastImagePath ? this.localImage(shot.lastImagePath) : null,
+          }));
+          completed = await this.waitForVideo(video, task.id);
+        } catch (error) {
+          throw this.generationModelError("video", model, error);
+        }
         shot.videoPath = this.copyVaultFile(completed.localPath, `${projectFolder}/03-视频片段/镜头-${shot.id}-${core.safeSegment(shot.title)}.mp4`);
         shot.status = "已完成";
       } catch (error) {
+        if (error?.changeModel === true) throw error;
         shot.status = "失败";
         shot.error = String(error?.message || error);
       }
@@ -773,29 +942,34 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
 
   async runGeneration(projectFolder, request, requestMtimeMs) {
     const { image, video } = this.getGenerationPlugins();
-    const access = await video.refreshAgentAccess();
+    const [imageAccess, access] = await Promise.all([image.refreshAgentAccess(), video.refreshAgentAccess()]);
+    const imageModels = Object.keys(imageAccess?.imageModelKeys || {});
+    const requestedImageModel = String(request.settings.imageModel || this.settings?.imageModel || image.settings.model || "").trim();
+    const imageModel = imageModels.find((candidate) => candidate === requestedImageModel)
+      || imageModels.find((candidate) => candidate.toLowerCase() === requestedImageModel.toLowerCase());
+    if (!imageModel) throw this.unavailableGenerationModel("image", requestedImageModel, imageModels);
     const models = generationPolicy.eligibleModels(Object.keys(access?.videoModelKeys || {}));
     const requestedModel = String(request.settings.videoModel || video.settings.model || "").trim();
     const model = models.find((candidate) => candidate === requestedModel)
       || models.find((candidate) => candidate.toLowerCase() === requestedModel.toLowerCase());
     if (!model) {
-      const detail = models.length ? `当前可用：${models.join("、")}` : "当前账号没有可用的 MiniMax-H3 或 Seedance 模型";
-      throw new Error(`视频复刻不能使用模型“${requestedModel || "未选择"}”。${detail}，请刷新山竹账号中心或选择已开通模型。`);
+      throw this.unavailableGenerationModel("video", requestedModel, models);
     }
-    if (request.version === 2) return this.runAssetGeneration(projectFolder, request, requestMtimeMs, { image, video, model });
+    if (request.version === 2) return this.runAssetGeneration(projectFolder, request, requestMtimeMs, { image, video, imageModel, model });
     const projectPath = path.join(this.absolute(projectFolder), "project.json");
     const project = this.readJson(projectPath);
     const state = { status: "processing", requestMtimeMs, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), currentStep: "人物三视图" };
     this.writeState(projectFolder, state);
     project.status = "generating";
     project.statusText = "正在生成人物三视图";
+    project.imageModel = imageModel;
     project.videoModel = model;
     project.finalVideoPath = "";
     delete project.concatError;
     project.shots = request.shots.map((shot) => ({ ...shot, status: "等待生成", imagePath: "", videoPath: "", error: "" }));
     this.saveProject(projectFolder, project);
 
-    const characterCandidate = await this.generateImage(image, request.character.prompt);
+    const characterCandidate = await this.generateImage(image, request.character.prompt, "", imageModel);
     project.characterImagePath = await this.saveImageCandidate(image, characterCandidate, `${projectFolder}/01-人物参考/人物三视图.png`);
     project.statusText = "人物参考完成，正在生成分镜";
     this.saveProject(projectFolder, project);
@@ -808,22 +982,29 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       this.saveProject(projectFolder, project);
       try {
         const imagePrompt = `${shot.imagePrompt}\n保持参考人物的脸部、发型、服装和年龄一致。`;
-        const shotCandidate = await this.generateImage(image, imagePrompt, project.characterImagePath);
+        const shotCandidate = await this.generateImage(image, imagePrompt, project.characterImagePath, imageModel);
         shot.imagePath = await this.saveImageCandidate(image, shotCandidate, `${projectFolder}/02-分镜脚本/镜头-${shot.id}-${core.safeSegment(shot.title)}.png`);
         shot.status = "正在生成视频";
         this.saveProject(projectFolder, project);
-        const task = await video.submitVideo(generationPolicy.buildVideoOptions({
-          model,
-          prompt: shot.videoPrompt,
-          duration: shot.duration,
-          ratio: request.settings.ratio,
-          resolution: request.settings.resolution || video.settings.resolution,
-          firstImageFile: this.localImage(shot.imagePath),
-        }));
-        const completed = await this.waitForVideo(video, task.id);
+        let task;
+        let completed;
+        try {
+          task = await video.submitVideo(generationPolicy.buildVideoOptions({
+            model,
+            prompt: shot.videoPrompt,
+            duration: shot.duration,
+            ratio: request.settings.ratio,
+            resolution: request.settings.resolution || video.settings.resolution,
+            firstImageFile: this.localImage(shot.imagePath),
+          }));
+          completed = await this.waitForVideo(video, task.id);
+        } catch (error) {
+          throw this.generationModelError("video", model, error);
+        }
         shot.videoPath = this.copyVaultFile(completed.localPath, `${projectFolder}/03-视频片段/镜头-${shot.id}-${core.safeSegment(shot.title)}.mp4`);
         shot.status = "已完成";
       } catch (error) {
+        if (error?.changeModel === true) throw error;
         shot.status = "失败";
         shot.error = String(error?.message || error);
       }

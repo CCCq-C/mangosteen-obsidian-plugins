@@ -719,12 +719,12 @@ module.exports = class MangosteenImagePlugin extends Plugin {
   getBalanceKey() { return this.agentImageAccess?.balanceKey || this.getImageKey(); }
   requireKey(apiKey = this.getImageKey()) { if (!apiKey) throw new Error("请先在“设置 → 山竹账号中心”中登录绑定账号"); }
   headers(json = true, apiKey = this.getImageKey()) { this.requireKey(apiKey); const headers = { Authorization: `Bearer ${apiKey}` }; if (json) headers["Content-Type"] = "application/json"; return headers; }
-  async postJsonResponse(pathname, payload) {
-    return this.requestWithImageKeyFallback((apiKey) => this.request({ url: `${API_BASE}${pathname}`, method: "POST", headers: this.headers(true, apiKey), body: JSON.stringify(payload), throw: false }));
+  async postJsonResponse(pathname, payload, model = payload?.model || this.settings.model) {
+    return this.requestWithImageKeyFallback((apiKey) => this.request({ url: `${API_BASE}${pathname}`, method: "POST", headers: this.headers(true, apiKey), body: JSON.stringify(payload), throw: false }), model);
   }
-  async requestWithImageKeyFallback(request) {
+  async requestWithImageKeyFallback(request, model = this.settings.model) {
     await this.refreshAgentAccess();
-    const candidates = this.getImageKeyCandidates();
+    const candidates = this.getImageKeyCandidates(model);
     this.requireKey(candidates[0]?.key);
     let response;
     for (const candidate of candidates) {
@@ -734,12 +734,12 @@ module.exports = class MangosteenImagePlugin extends Plugin {
     }
     return response;
   }
-  async requestJson(pathname, payload) {
-    const response = await this.postJsonResponse(pathname, payload);
-    if (response.status >= 400) throw new Error(this.extractApiError(response.json, response.status));
+  async requestJson(pathname, payload, model = payload?.model || this.settings.model) {
+    const response = await this.postJsonResponse(pathname, payload, model);
+    if (response.status >= 400) throw this.remoteImageError(response.json, response.status, model);
     return response.json;
   }
-  async submitImageTask({ taskPath, fallbackPath, mode, prompt, requestedCount = 1, submissionFingerprint, requestShape, submit, fallbackSubmit }) {
+  async submitImageTask({ taskPath, fallbackPath, mode, prompt, model = this.settings.model, requestedCount = 1, submissionFingerprint, requestShape, submit, fallbackSubmit }) {
     if (!Array.isArray(this.settings.submissionMarkers)) this.settings.submissionMarkers = [];
     await this.prepareSubmissionMarker(submissionFingerprint, requestShape);
     let response;
@@ -752,41 +752,43 @@ module.exports = class MangosteenImagePlugin extends Plugin {
     if (response.status === 408 || response.status >= 500) return this.markSubmissionUncertain(submissionFingerprint, "REMOTE_ACCEPTANCE_AMBIGUOUS");
     if (response.status >= 400) {
       await this.releaseRejectedSubmission(submissionFingerprint);
-      throw new Error(this.extractApiError(response.json, response.status));
+      throw this.remoteImageError(response.json, response.status, model);
     }
     if (this.extractResults(response.json).length) {
       const id = `sync-${submissionFingerprint.slice(-16)}-${Date.now()}`;
-      const task = await this.rememberImageTask({ id, taskPath, mode, prompt, model: this.settings.model, group: response.__mangosteenGroup, size: this.settings.size, requestedCount, submissionFingerprint });
+      const task = await this.rememberImageTask({ id, taskPath, mode, prompt, model, group: response.__mangosteenGroup, size: this.settings.size, requestedCount, submissionFingerprint });
       response.json.__mangosteenTaskId = task.id;
       response.json.__mangosteenSubmissionFingerprint = submissionFingerprint;
       return response.json;
     }
     const id = this.api.extractImageTaskId(response.json);
     if (!id) return this.markSubmissionUncertain(submissionFingerprint, "TASK_ID_MISSING");
-    const task = await this.rememberImageTask({ id, taskPath, mode, prompt, model: this.settings.model, group: response.__mangosteenGroup, size: this.settings.size, requestedCount, submissionFingerprint });
+    const task = await this.rememberImageTask({ id, taskPath, mode, prompt, model, group: response.__mangosteenGroup, size: this.settings.size, requestedCount, submissionFingerprint });
     return this.waitForImageTask(task);
   }
-  async generateText(prompt, count = this.settings.count, submissionSlot = "single") {
+  async generateText(prompt, count = this.settings.count, submissionSlot = "single", options = {}) {
+    const model = String(options?.model || this.settings.model || "").trim();
     const requestedCount = Math.max(1, Math.min(7, Number.parseInt(count, 10) || 1));
-    const payload = this.api.createTextToImagePayload({ model: this.settings.model, prompt, size: this.settings.size, count: requestedCount });
+    const payload = this.api.createTextToImagePayload({ model, prompt, size: this.settings.size, count: requestedCount });
     const submissionFingerprint = this.api.createSubmissionFingerprint({ kind: "text-to-image", submissionSlot, payload });
-    const response = await this.submitImageTask({ taskPath: "/v1/images/generations/tasks", fallbackPath: "/v1/images/generations", mode: "文生图", prompt, requestedCount, submissionFingerprint, requestShape: { version: 1, mode: "text-to-image", model: payload.model, size: payload.size, count: requestedCount }, submit: (path) => this.postJsonResponse(path, payload), fallbackSubmit: (path) => this.postJsonResponse(path, payload) });
+    const response = await this.submitImageTask({ taskPath: "/v1/images/generations/tasks", fallbackPath: "/v1/images/generations", mode: "文生图", prompt, model, requestedCount, submissionFingerprint, requestShape: { version: 1, mode: "text-to-image", model: payload.model, size: payload.size, count: requestedCount }, submit: (path) => this.postJsonResponse(path, payload, model), fallbackSubmit: (path) => this.postJsonResponse(path, payload, model) });
     response.__mangosteenRequestedCount = requestedCount;
     return response;
   }
-  async generateEdit(prompt, image, submissionSlot = "single") {
-    return this.generateEditMulti(prompt, [image], submissionSlot);
+  async generateEdit(prompt, image, submissionSlot = "single", options = {}) {
+    return this.generateEditMulti(prompt, [image], submissionSlot, options);
   }
-  async generateEditMulti(prompt, images, submissionSlot = "single") {
+  async generateEditMulti(prompt, images, submissionSlot = "single", options = {}) {
+    const model = String(options?.model || this.settings.model || "").trim();
     await this.refreshAgentAccess();
-    this.requireKey();
+    this.requireKey(this.getImageKey(model));
     if (!String(prompt || "").trim()) throw new Error("请先输入如何修改图片");
     if (!Array.isArray(images) || images.length < 1 || images.length > 4) throw new Error("请选择 1–4 张参考图片");
     for (const image of images) this.api.assertLocalImageUploadSize(image);
-    const fields = { model: this.settings.model, prompt: String(prompt).trim(), images, size: this.settings.size, quality: "high", output_format: "png" };
+    const fields = { model, prompt: String(prompt).trim(), images, size: this.settings.size, quality: "high", output_format: "png" };
     const fingerprintImages = images.map((image) => ({ name: image.name, type: image.type, buffer: image.buffer }));
     const submissionFingerprint = this.api.createSubmissionFingerprint({ kind: "image-edit", submissionSlot, fields: { ...fields, images: fingerprintImages } });
-    return this.submitImageTask({ taskPath: "/v1/images/edits/tasks", fallbackPath: "/v1/images/edits", mode: "图生图", prompt: fields.prompt, submissionFingerprint, requestShape: { version: 1, mode: "image-edit", model: fields.model, size: fields.size, referenceImageCount: images.length }, submit: (path) => this.postMultipart(path, fields), fallbackSubmit: (path) => this.postMultipart(path, fields) });
+    return this.submitImageTask({ taskPath: "/v1/images/edits/tasks", fallbackPath: "/v1/images/edits", mode: "图生图", prompt: fields.prompt, model, submissionFingerprint, requestShape: { version: 1, mode: "image-edit", model: fields.model, size: fields.size, referenceImageCount: images.length }, submit: (path) => this.postMultipart(path, fields, model), fallbackSubmit: (path) => this.postMultipart(path, fields, model) });
   }
   async runGenerationBatch(count, generate) {
     const total = Math.max(1, Math.min(7, Number.parseInt(count, 10) || 1));
@@ -805,7 +807,7 @@ module.exports = class MangosteenImagePlugin extends Plugin {
   }
   async generateTextBatch(prompt, count) { return this.runGenerationBatch(count, (index) => this.generateText(prompt, 1, `batch-${index + 1}`)); }
   async generateEditBatch(prompt, image, count) { return this.runGenerationBatch(count, (index) => this.generateEdit(prompt, image, `batch-${index + 1}`)); }
-  async postMultipart(pathname, fields) {
+  async postMultipart(pathname, fields, model = fields?.model || this.settings.model) {
     const https = require("https");
     const boundary = `----Mangosteen${Date.now().toString(16)}`;
     const body = this.api.buildImageEditMultipart(fields, boundary);
@@ -821,7 +823,7 @@ module.exports = class MangosteenImagePlugin extends Plugin {
       });
       request.setTimeout(45000, () => request.destroy(new Error("图片上传超时，请检查网络后重试。")));
       request.on("error", reject); request.write(body); request.end();
-    }));
+    }), model);
   }
   async getRawQuota() {
     await this.refreshAgentAccess();
@@ -865,6 +867,14 @@ module.exports = class MangosteenImagePlugin extends Plugin {
     anchor.href = this.toPreviewUrl(candidate); anchor.download = `山竹生图-${index}.png`; anchor.click();
   }
   extractApiError(json, status) { return String(json?.error?.message || json?.message || json?.error || `请求失败（${status}）`); }
+  remoteImageError(json, status, model = this.settings.model) {
+    const error = new Error(this.extractApiError(json, status));
+    error.code = Number(status) === 404 ? "MODEL_UNAVAILABLE" : "REMOTE_REJECTED";
+    error.status = Number(status) || 0;
+    error.model = String(model || "");
+    error.changeModel = error.status === 404 || /model|channel|模型|线路/i.test(error.message);
+    return error;
+  }
   toChineseError(error) {
     const message = String(error?.message || error || "未知错误").replace(/sk-[A-Za-z0-9_-]+/g, "[已隐藏]");
     if (/当前账号实际分组|图片分组/.test(message)) return message;

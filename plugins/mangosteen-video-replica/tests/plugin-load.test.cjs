@@ -38,10 +38,25 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   await plugin.onload();
   assert(commandIds.includes("analyze-latest-project"));
   assert(commandIds.includes("select-analysis-model"));
+  assert(commandIds.includes("select-generation-models"));
   assert(commandIds.includes("confirm-latest-generation"));
   assert(commandIds.includes("concat-latest-project"));
-  plugin.app.plugins = { getPlugin: () => ({ settings: { model: "MiniMax-H3", resolution: "720p" } }) };
-  assert.deepStrictEqual(plugin.analysisSettings(), { videoModel: "MiniMax-H3", resolution: "768p" });
+  plugin.app.plugins = { getPlugin: (id) => id === "mangosteen-image"
+    ? { settings: { model: "gpt-image-2-w" } }
+    : { settings: { model: "MiniMax-H3", resolution: "720p" } } };
+  assert.deepStrictEqual(plugin.analysisSettings(), { imageModel: "gpt-image-2-w", videoModel: "MiniMax-H3", resolution: "768p" });
+
+  const catalogImage = { settings: { model: "gpt-image-2-w" }, refreshAgentAccess: async () => ({ imageModelKeys: { "gpt-image-2-w": "key", "gpt-image-2-adobe": "key" } }) };
+  const catalogVideo = { settings: { model: "MiniMax-H3", resolution: "768p" }, refreshAgentAccess: async () => ({ videoModelKeys: { "MiniMax-H3": "key", "seedance-2.5": "key" } }) };
+  plugin.app.plugins = { getPlugin: (id) => id === "mangosteen-image" ? catalogImage : id === "mangosteen-video" ? catalogVideo : null };
+  const generationCatalog = await plugin.refreshGenerationModelCatalog();
+  assert.deepStrictEqual(generationCatalog.imageModels, ["gpt-image-2-w", "gpt-image-2-adobe"]);
+  assert.deepStrictEqual(generationCatalog.videoModels, ["MiniMax-H3", "seedance-2.5"]);
+  const generationImage = (overrides = {}) => ({
+    settings: { model: "gpt-image-2-w" },
+    refreshAgentAccess: async () => ({ imageModelKeys: { "gpt-image-2-w": "test-key" } }),
+    ...overrides,
+  });
 
   const vault = fs.mkdtempSync(path.join(os.tmpdir(), "mangosteen-replica-plugin-"));
   const project = path.join(vault, "山竹视频复刻", "失败任务");
@@ -143,12 +158,12 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   ];
   for (const testCase of blockedCases) {
     const calls = { generateText: 0, generateEdit: 0, generateEditMulti: 0, submitVideo: 0 };
-    const blockedImage = {
+    const blockedImage = generationImage({
       generateText: async () => { calls.generateText += 1; return {}; },
       generateEdit: async () => { calls.generateEdit += 1; return {}; },
       generateEditMulti: async () => { calls.generateEditMulti += 1; return {}; },
       extractResults: () => [{ kind: "base64", value: Buffer.from("image").toString("base64") }],
-    };
+    });
     const blockedVideo = {
       settings: { model: testCase.model, resolution: "720p" },
       refreshAgentAccess: async () => ({
@@ -161,7 +176,7 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
       character: { prompt: "人物三视图" },
       settings: { ratio: "9:16", resolution: "720p", videoModel: testCase.model },
       shots: [{ id: 1, title: "开场", duration: 5, imagePrompt: "人物站立", videoPrompt: "人物向前走" }],
-    }, 123), /视频复刻不能使用模型/, testCase.name);
+    }, 123), /视频模型.*不可用/, testCase.name);
     assert.deepStrictEqual(calls, {
       generateText: 0,
       generateEdit: 0,
@@ -223,18 +238,21 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
     fs.writeFileSync(requestPath, JSON.stringify(request));
 
     const generatedTextPrompts = [];
+    const generatedImageModels = [];
     const submittedOptions = [];
-    const image = {
-      generateText: async (prompt) => {
+    const image = generationImage({
+      generateText: async (prompt, _count, _slot, options) => {
         generatedTextPrompts.push(prompt);
+        generatedImageModels.push(options?.model);
         return { candidate: { kind: "base64", value: Buffer.from(`asset:${prompt}`).toString("base64") } };
       },
       generateEdit: async () => { throw new Error("version 2 must use generateEditMulti"); },
-      generateEditMulti: async (prompt) => ({
-        candidate: { kind: "base64", value: Buffer.from(`keyframe:${prompt}`).toString("base64") },
-      }),
+      generateEditMulti: async (prompt, _images, _slot, options) => {
+        generatedImageModels.push(options?.model);
+        return { candidate: { kind: "base64", value: Buffer.from(`keyframe:${prompt}`).toString("base64") } };
+      },
       extractResults: (response) => response?.candidate ? [response.candidate] : [],
-    };
+    });
     const video = {
       settings: { model, resolution },
       refreshAgentAccess: async () => ({ videoModelKeys: { [model]: "mock-key-never-used" } }),
@@ -265,6 +283,7 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
       assert.strictEqual(completed.sceneAssets.length, 1, `${family}: one scene asset must be retained`);
       assert(fs.existsSync(path.join(caseVault, ...completed.sceneAssets[0].imagePath.split("/"))), `${family}: scene asset file must exist`);
       assert.deepStrictEqual(generatedTextPrompts, ["固定人物参考板", "固定摄影棚场景"], `${family}: exactly one character and one scene asset must be generated`);
+      assert(generatedImageModels.every((value) => value === "gpt-image-2-w"), `${family}: every image call must use the selected image model`);
 
       assert.strictEqual(completed.shots.length, 2, `${family}: two shots must be retained`);
       assert(completed.shots.every((shot) => shot.firstImagePath && fs.existsSync(path.join(caseVault, ...shot.firstImagePath.split("/")))), `${family}: both shot first keyframes must be retained`);
@@ -333,12 +352,12 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   fs.mkdirSync(path.join(vault, "山竹视频"), { recursive: true });
   fs.writeFileSync(path.join(generated, "project.json"), JSON.stringify({ folder: generatedFolder, title: "模拟生成", frames: [], shots: [] }));
   fs.writeFileSync(path.join(vault, "山竹视频/mock.mp4"), "video");
-  const image = {
+  const image = generationImage({
     generateText: async () => ({}),
     generateEdit: async () => ({}),
     generateEditMulti: async () => { throw new Error("version 1 must not require multi-image editing"); },
     extractResults: () => [{ kind: "base64", value: Buffer.from("image").toString("base64") }],
-  };
+  });
   let submittedOptions;
   const video = {
     settings: { model: "seedance-2.5", resolution: "720p" },
@@ -379,7 +398,7 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
 
   const generatedTextPrompts = [];
   const editCalls = [];
-  const imageV2 = {
+  const imageV2 = generationImage({
     generateText: async (prompt) => {
       generatedTextPrompts.push(prompt);
       return { candidate: { kind: "base64", value: Buffer.from(`text:${prompt}`).toString("base64") } };
@@ -393,7 +412,7 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
       return { candidate: { kind: "base64", value: Buffer.from(`edit:${prompt}`).toString("base64") } };
     },
     extractResults: (response) => response?.candidate ? [response.candidate] : [],
-  };
+  });
   const submittedV2Options = [];
   const videoV2 = {
     settings: { model: "seedance-2.5", resolution: "720p" },
@@ -558,7 +577,7 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   const sceneGate = new Promise((resolve) => { releaseScene = resolve; });
   const characterStarted = new Promise((resolve) => { markCharacterStarted = resolve; });
   const sceneStarted = new Promise((resolve) => { markSceneStarted = resolve; });
-  const concurrentImage = {
+  const concurrentImage = generationImage({
     generateText: async (prompt) => {
       concurrentPrompts[prompt] += 1;
       const count = concurrentPrompts[prompt];
@@ -575,7 +594,7 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
     generateEdit: async () => { throw new Error("version 2 must use generateEditMulti"); },
     generateEditMulti: async (prompt) => ({ candidate: { kind: "base64", value: Buffer.from(`frame:${prompt}`).toString("base64") } }),
     extractResults: (response) => response?.candidate ? [response.candidate] : [],
-  };
+  });
   const concurrentVideo = {
     settings: { model: "seedance-2.5", resolution: "720p" },
     refreshAgentAccess: async () => ({ videoModelKeys: { "seedance-2.5": "secret-not-read-by-replica" } }),
@@ -636,12 +655,12 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
     shots: [{ title: "失败镜头", sceneId: "failure-scene", duration: 4, imagePrompt: "失败首帧", videoPrompt: "失败视频" }],
   }));
   plugin.getGenerationPlugins = () => ({
-    image: {
+    image: generationImage({
       generateText: async () => { throw new Error("v2 paid image failed"); },
       generateEdit: async () => ({}),
       generateEditMulti: async () => ({}),
       extractResults: () => [],
-    },
+    }),
     video: concurrentVideo,
   });
   await plugin.processRequest(failedV2RequestPath);
@@ -653,6 +672,40 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   assert.strictEqual(failedV2Project.status, "failed");
   assert.match(failedV2Project.statusText, /v2 paid image failed/);
   assert.strictEqual(plugin.requestAlreadyHandled(failedV2Folder, failedV2State.requestMtimeMs), true);
+
+  const modelErrorFolder = "山竹视频复刻/图片模型失败标记";
+  const modelErrorRoot = path.join(vault, ...modelErrorFolder.split("/"));
+  fs.mkdirSync(modelErrorRoot, { recursive: true });
+  fs.writeFileSync(path.join(modelErrorRoot, "project.json"), JSON.stringify({ folder: modelErrorFolder, title: "图片模型失败标记", frames: [], shots: [] }));
+  const modelErrorRequestPath = path.join(modelErrorRoot, "generation-request.json");
+  fs.writeFileSync(modelErrorRequestPath, JSON.stringify({
+    version: 2,
+    confirmed: true,
+    character: { id: "model-error-hero", prompt: "模型错误人物" },
+    scenes: [{ id: "model-error-scene", prompt: "模型错误场景" }],
+    settings: { imageModel: "gpt-image-2-w", ratio: "9:16", resolution: "768p", videoModel: "MiniMax-H3" },
+    shots: [{ title: "失败镜头", sceneId: "model-error-scene", duration: 4, imagePrompt: "失败首帧", videoPrompt: "失败视频" }],
+  }));
+  plugin.getGenerationPlugins = () => ({
+    image: generationImage({
+      generateText: async () => { throw Object.assign(new Error("model not found"), { code: "MODEL_UNAVAILABLE", status: 404, changeModel: true }); },
+      generateEdit: async () => ({}),
+      generateEditMulti: async () => ({}),
+      extractResults: () => [],
+    }),
+    video: {
+      settings: { model: "MiniMax-H3", resolution: "768p" },
+      refreshAgentAccess: async () => ({ videoModelKeys: { "MiniMax-H3": "test-key" } }),
+      submitVideo: async () => ({ id: "must-not-run" }),
+    },
+  });
+  await plugin.processRequest(modelErrorRequestPath);
+  const modelErrorState = JSON.parse(fs.readFileSync(path.join(modelErrorRoot, ".work/generation-state.json"), "utf8"));
+  const generationModelErrorProject = JSON.parse(fs.readFileSync(path.join(modelErrorRoot, "project.json"), "utf8"));
+  assert.strictEqual(modelErrorState.status, "generation_image_model_error");
+  assert.strictEqual(modelErrorState.model, "gpt-image-2-w");
+  assert.strictEqual(generationModelErrorProject.status, "generation_image_model_error");
+  assert.match(generationModelErrorProject.statusText, /gpt-image-2-w.*请更换图片模型后重试/);
 
   fs.rmSync(vault, { recursive: true, force: true });
   fs.rmSync(escapedMediaOutside, { recursive: true, force: true });

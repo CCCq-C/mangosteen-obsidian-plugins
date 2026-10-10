@@ -99,6 +99,7 @@ function normalizeGenerationRequest(input) {
       character: { id: characterId, prompt: characterPrompt },
       scenes,
       settings: {
+        imageModel: cleanText(input.settings?.imageModel),
         ratio: cleanText(input.settings?.ratio) || "9:16",
         resolution: cleanText(input.settings?.resolution),
         videoModel: model,
@@ -135,6 +136,7 @@ function normalizeGenerationRequest(input) {
     confirmed: true,
     character: { prompt: characterPrompt },
     settings: {
+      imageModel: cleanText(input.settings?.imageModel),
       ratio: cleanText(input.settings?.ratio) || "9:16",
       resolution: cleanText(input.settings?.resolution),
       videoModel: cleanText(input.settings?.videoModel),
@@ -178,6 +180,7 @@ function buildGenerationDraft(project, analysis, settings = {}) {
     },
     scenes,
     settings: {
+      imageModel: cleanText(settings.imageModel) || "gpt-image-2",
       videoModel: cleanText(settings.videoModel) || "MiniMax-H3",
       ratio: cleanText(settings.ratio) || (Number(project?.height) > Number(project?.width) ? "9:16" : "16:9"),
       resolution: cleanText(settings.resolution) || "720p",
@@ -241,7 +244,8 @@ function dashboardMarkdown(project) {
     "",
     "## 生成设置",
     "",
-    `- 模型：\`${cleanText(project.videoModel) || "等待选择"}\``,
+    `- 图片模型：\`${cleanText(project.imageModel) || "等待选择"}\``,
+    `- 视频模型：\`${cleanText(project.videoModel) || "等待选择"}\``,
     "",
     "## 源视频",
     "",

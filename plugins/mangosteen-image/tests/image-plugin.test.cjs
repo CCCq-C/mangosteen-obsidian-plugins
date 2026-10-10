@@ -96,6 +96,24 @@ Module._load = originalLoad;
   await batchPlugin.reconcileImageSubmission(batch.successes[0].response.__mangosteenSubmissionFingerprint);
   assert.strictEqual(batchPlugin.settings.submissionMarkers.length, 1, "persisted image output reconciles only its own marker");
 
+  const overridePlugin = new ImagePlugin();
+  overridePlugin.api = imageApi;
+  overridePlugin.settings = { model: "gpt-image-2-adobe", size: "1024x1024", imageTasks: [], submissionMarkers: [] };
+  overridePlugin.saveSettings = async () => {};
+  let overridePayload;
+  let overrideRequestModel;
+  overridePlugin.postJsonResponse = async (_path, payload, model) => {
+    overridePayload = payload;
+    overrideRequestModel = model;
+    return { status: 200, json: { id: "override-image-task" }, __mangosteenGroup: "gpt_image_web" };
+  };
+  overridePlugin.waitForImageTask = async (task) => ({ task });
+  const overrideResponse = await overridePlugin.generateText("use explicit model", 1, "video-replica", { model: "gpt-image-2-w" });
+  assert.strictEqual(overridePayload.model, "gpt-image-2-w");
+  assert.strictEqual(overrideRequestModel, "gpt-image-2-w");
+  assert.strictEqual(overrideResponse.task.model, "gpt-image-2-w");
+  assert.strictEqual(overridePlugin.settings.model, "gpt-image-2-adobe", "per-request model must not mutate the standalone image setting");
+
   console.log("image-plugin: ok");
 })().catch((error) => {
   console.error(error);

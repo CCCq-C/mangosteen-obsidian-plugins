@@ -493,6 +493,15 @@ module.exports = class MangosteenVideoPlugin extends Plugin {
     return String(json?.error?.message || json?.message || json?.error || `请求失败（${status}）`);
   }
 
+  remoteVideoError(json, status, model = this.settings.model) {
+    const error = new Error(this.extractApiError(json, status));
+    error.code = Number(status) === 404 ? "MODEL_UNAVAILABLE" : "REMOTE_REJECTED";
+    error.status = Number(status) || 0;
+    error.model = String(model || "");
+    error.changeModel = error.status === 404 || /model|channel|模型|线路/i.test(error.message);
+    return error;
+  }
+
   async requestWithVideoKeyFallback(request, model = this.settings.model, preferredGroup = "") {
     await this.refreshAgentAccess();
     const candidates = this.getVideoKeyCandidates(model);
@@ -645,7 +654,7 @@ module.exports = class MangosteenVideoPlugin extends Plugin {
       submitted = await this.sendPaidVideoPayload(payload, descriptor);
       ({ response, fingerprint } = submitted);
     }
-    if (response.status >= 400) throw new Error(this.extractApiError(response.json, response.status));
+    if (response.status >= 400) throw this.remoteVideoError(response.json, response.status, payload.model);
     const id = this.api.extractVideoTaskId(response.json);
     if (!id) return this.markSubmissionUncertain(fingerprint, "TASK_ID_MISSING");
     return this.rememberVideoTask({

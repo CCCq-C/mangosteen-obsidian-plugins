@@ -324,6 +324,7 @@ function applyAnalysis({ projectFolder, vaultPath, analysis, settings = {}, anal
   const request = core.buildGenerationDraft(project, analysis, settings);
   project.status = "analysis_ready";
   project.statusText = "山竹智能体分析完成，等待确认生成";
+  project.imageModel = request.settings.imageModel;
   project.videoModel = request.settings.videoModel;
   project.analysisProvider = analysisProvider;
   project.analysisGroup = String(analysisGroup || "");
