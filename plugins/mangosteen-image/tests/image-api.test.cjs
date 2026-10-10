@@ -35,4 +35,15 @@ assert.throws(() => api.buildImageEditMultipart({
   })),
 }, boundary), /1.*4/);
 
+const fingerprint = api.createSubmissionFingerprint({
+  mode: "edit", prompt: "same character", image: Buffer.from("character"),
+});
+assert.match(fingerprint, /^sha256:[a-f0-9]{64}$/);
+assert.strictEqual(fingerprint, api.createSubmissionFingerprint({
+  image: Buffer.from("character"), prompt: "same character", mode: "edit",
+}));
+assert.notStrictEqual(fingerprint, api.createSubmissionFingerprint({
+  mode: "edit", prompt: "same character", image: Buffer.from("changed-character"),
+}));
+
 console.log("image-api: ok");

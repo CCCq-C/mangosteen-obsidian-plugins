@@ -10,6 +10,7 @@ const DEFAULT_SETTINGS = {
   resolution: "720p",
   resolutionsByModel: {},
   videoTasks: [],
+  submissionMarkers: [],
 };
 
 const addField = (root, label, tag, options = {}) => {
@@ -213,17 +214,7 @@ class VideoStudioModal extends Modal {
     advanced.createEl("summary", { text: "高级参考材料" });
     const videos = capabilities.maxVideos ? addField(advanced, `参考视频 URL（每行一个，最多${capabilities.maxVideos}个）`, "textarea") : null;
     if (videos) { videos.value = this.draftReferenceVideos || ""; videos.addEventListener("input", () => { this.draftReferenceVideos = videos.value; this.refreshPrice?.(); }); }
-    let generateAudio;
     if (supportsImageToVideo(model.value)) {
-      const audioRow = advanced.createDiv({ cls: "mangosteen-video-audio-row" });
-      const audioCopy = audioRow.createDiv({ cls: "mangosteen-video-audio-copy" });
-      audioCopy.createEl("strong", { text: "同步生成音频" });
-      audioCopy.createEl("span", { text: "让模型同时生成视频配音" });
-      const audioToggle = audioRow.createEl("label", { cls: "mangosteen-video-audio-toggle" });
-      generateAudio = audioToggle.createEl("input", { attr: { type: "checkbox", "aria-label": "同步生成音频" } });
-      audioToggle.createEl("span", { cls: "mangosteen-video-audio-track" });
-      generateAudio.checked = Boolean(this.draftGenerateAudio);
-      generateAudio.addEventListener("change", () => { this.draftGenerateAudio = generateAudio.checked; });
       const frameGrid = advanced.createDiv({ cls: "mangosteen-video-frame-grid" });
       this.renderFrameUpload(frameGrid, "first", "首帧");
       this.renderFrameUpload(frameGrid, "last", "尾帧");
@@ -262,7 +253,7 @@ class VideoStudioModal extends Modal {
           referenceImages: [],
           referenceVideos: splitUrls(videos?.value),
           referenceAudios: [],
-          generateAudio: Boolean(generateAudio?.checked),
+          generateAudio: false,
           firstImageFile: this.firstImageFile || null,
           lastImageFile: this.lastImageFile || null,
         });
@@ -320,6 +311,7 @@ module.exports = class MangosteenVideoPlugin extends Plugin {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData?.());
     this.videoTaskViews = new Set();
     if (!this.settings.resolutionsByModel || typeof this.settings.resolutionsByModel !== "object") this.settings.resolutionsByModel = {};
+    if (!Array.isArray(this.settings.submissionMarkers)) this.settings.submissionMarkers = [];
     this.addRibbonIcon?.("video", "打开山竹视频", () => this.openStudio());
     if (typeof this.registerInterval === "function") {
       const poll = window.setInterval(() => {
@@ -339,6 +331,98 @@ module.exports = class MangosteenVideoPlugin extends Plugin {
 
   async saveSettings() {
     if (typeof this.saveData === "function") await this.saveData(this.settings);
+  }
+
+  submissionMarker(fingerprint) {
+    return (this.settings.submissionMarkers || []).find((item) => item.fingerprint === fingerprint);
+  }
+
+  blockedSubmissionError() {
+    return new Error("检测到相同付费请求仍在处理中或待核对，已阻止重复提交。请先打开山竹视频任务记录刷新状态；确认平台未接收后再手动清理该状态。");
+  }
+
+  uncertaintyError() {
+    return new Error("付费请求的提交结果待核对，系统不会自动重复提交。请先打开山竹视频任务记录核对平台状态。");
+  }
+
+  async prepareSubmissionMarker(fingerprint, requestShape) {
+    if (this.submissionMarker(fingerprint)) throw this.blockedSubmissionError();
+    const marker = {
+      fingerprint,
+      kind: "video",
+      status: "prepared",
+      requestShape,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    this.settings.submissionMarkers = [marker, ...(this.settings.submissionMarkers || [])];
+    try {
+      await this.saveSettings();
+    } catch (error) {
+      this.settings.submissionMarkers = (this.settings.submissionMarkers || []).filter((item) => item !== marker);
+      throw new Error(`无法保存付费提交安全标记，已取消视频提交：${String(error?.message || error)}`);
+    }
+    return marker;
+  }
+
+  async markSubmissionUncertain(fingerprint, reasonCode = "REMOTE_RESULT_UNKNOWN") {
+    const marker = this.submissionMarker(fingerprint);
+    if (marker) Object.assign(marker, { status: "uncertain", reasonCode, updatedAt: new Date().toISOString() });
+    try { await this.saveSettings(); } catch (_) { /* the durable prepared marker still blocks a retry */ }
+    throw this.uncertaintyError();
+  }
+
+  async releaseRejectedSubmission(fingerprint) {
+    const previous = (this.settings.submissionMarkers || []).map((item) => ({ ...item }));
+    this.settings.submissionMarkers = (this.settings.submissionMarkers || []).filter((item) => item.fingerprint !== fingerprint);
+    try {
+      await this.saveSettings();
+    } catch (_) {
+      this.settings.submissionMarkers = previous.map((item) => item.fingerprint === fingerprint
+        ? { ...item, status: "uncertain", reasonCode: "LOCAL_RELEASE_SAVE_FAILED", updatedAt: new Date().toISOString() }
+        : item);
+      try { await this.saveSettings(); } catch (_) { /* prior durable marker remains conservative */ }
+      throw this.uncertaintyError();
+    }
+  }
+
+  async videoSubmissionDescriptor(options, payload) {
+    const fileValue = async (file) => {
+      if (!file) return "";
+      if (Buffer.isBuffer(file.buffer)) return file.buffer;
+      return Buffer.from(await file.arrayBuffer());
+    };
+    return {
+      kind: "video",
+      model: payload.model,
+      prompt: payload.prompt,
+      duration: payload.duration,
+      ratio: Object.prototype.hasOwnProperty.call(payload, "ratio") ? payload.ratio : "omitted",
+      resolution: payload.resolution,
+      generateAudio: Boolean(payload.generate_audio),
+      firstImage: options.firstImageFile ? await fileValue(options.firstImageFile) : String(options.firstImage || ""),
+      lastImage: options.lastImageFile ? await fileValue(options.lastImageFile) : String(options.lastImage || ""),
+      referenceImages: [
+        ...(Array.isArray(options.referenceImages) ? options.referenceImages : []),
+        ...await Promise.all(Array.from(options.referenceImageFiles || []).map(fileValue)),
+      ],
+      referenceVideos: Array.isArray(options.referenceVideos) ? options.referenceVideos : [],
+      referenceAudios: Array.isArray(options.referenceAudios) ? options.referenceAudios : [],
+    };
+  }
+
+  async sendPaidVideoPayload(payload, descriptor) {
+    const fingerprint = this.api.createSubmissionFingerprint(descriptor);
+    await this.prepareSubmissionMarker(fingerprint, this.api.createVideoRequestShape(payload));
+    let response;
+    try {
+      response = await this.sendVideoPayload(payload);
+    } catch (_) {
+      return this.markSubmissionUncertain(fingerprint, "REMOTE_RESPONSE_LOST");
+    }
+    if (response.status === 408 || response.status >= 500) return this.markSubmissionUncertain(fingerprint, "REMOTE_ACCEPTANCE_AMBIGUOUS");
+    if (response.status >= 400) await this.releaseRejectedSubmission(fingerprint);
+    return { response, fingerprint };
   }
 
   request(options, timeoutMs = 45000) { return this.api?.withTimeout ? this.api.withTimeout(requestUrl(options), timeoutMs, "视频服务请求") : requestUrl(options); }
@@ -463,8 +547,21 @@ module.exports = class MangosteenVideoPlugin extends Plugin {
       saved: false,
       lastError: "",
     }, task, { payload });
-    this.settings.videoTasks = [saved, ...(this.settings.videoTasks || []).filter((item) => item.id !== saved.id)].slice(0, 50);
-    await this.saveSettings();
+    const previousTasks = this.settings.videoTasks || [];
+    const previousMarkers = (this.settings.submissionMarkers || []).map((item) => ({ ...item }));
+    const marker = task.submissionFingerprint ? this.submissionMarker(task.submissionFingerprint) : null;
+    if (marker) Object.assign(marker, { status: "accepted", taskId: saved.id, updatedAt: new Date().toISOString() });
+    this.settings.videoTasks = [saved, ...previousTasks.filter((item) => item.id !== saved.id)].slice(0, 50);
+    try {
+      await this.saveSettings();
+    } catch (_) {
+      this.settings.videoTasks = previousTasks;
+      this.settings.submissionMarkers = previousMarkers.map((item) => item.fingerprint === task.submissionFingerprint
+        ? { ...item, status: "uncertain", reasonCode: "TASK_PERSISTENCE_FAILED", updatedAt: new Date().toISOString() }
+        : item);
+      try { await this.saveSettings(); } catch (_) { /* durable prepared marker remains */ }
+      throw this.uncertaintyError();
+    }
     return saved;
   }
 
@@ -512,6 +609,8 @@ module.exports = class MangosteenVideoPlugin extends Plugin {
   }
 
   async submitVideo(options) {
+    if (!Array.isArray(this.settings.submissionMarkers)) this.settings.submissionMarkers = [];
+    const originalOptions = Object.assign({}, options);
     const payloadOptions = Object.assign({}, options, { allowedResolutions: this.settings.resolutionsByModel?.[options.model] });
     const referenceImageFiles = Array.from(payloadOptions.referenceImageFiles || []);
     const referenceImages = Array.isArray(payloadOptions.referenceImages) ? [...payloadOptions.referenceImages] : [];
@@ -533,24 +632,29 @@ module.exports = class MangosteenVideoPlugin extends Plugin {
     delete payloadOptions.referenceImageFiles;
     let payload = this.api.createVideoPayload(payloadOptions);
     const beforeQuota = await this.getRawQuota().catch(() => null);
-    let response = await this.sendVideoPayload(payload);
+    let descriptor = await this.videoSubmissionDescriptor(originalOptions, payload);
+    let submitted = await this.sendPaidVideoPayload(payload, descriptor);
+    let { response, fingerprint } = submitted;
     const allowed = this.api.readAllowedResolutions(response.json);
     if (response.status >= 400 && allowed.length && !allowed.includes(payload.resolution)) {
       this.settings.resolutionsByModel[payload.model] = allowed;
       this.settings.resolution = allowed[0];
       await this.saveSettings();
       payload = this.api.createVideoPayload(Object.assign({}, payloadOptions, { resolution: allowed[0], allowedResolutions: allowed }));
-      response = await this.sendVideoPayload(payload);
+      descriptor = await this.videoSubmissionDescriptor(Object.assign({}, originalOptions, { resolution: allowed[0] }), payload);
+      submitted = await this.sendPaidVideoPayload(payload, descriptor);
+      ({ response, fingerprint } = submitted);
     }
     if (response.status >= 400) throw new Error(this.extractApiError(response.json, response.status));
     const id = this.api.extractVideoTaskId(response.json);
-    if (!id) throw new Error("平台已接收请求，但没有返回视频任务编号。");
+    if (!id) return this.markSubmissionUncertain(fingerprint, "TASK_ID_MISSING");
     return this.rememberVideoTask({
       id,
       model: payload.model,
       prompt: payload.prompt,
       payload,
       requestShape: this.api.createVideoRequestShape(payload),
+      submissionFingerprint: fingerprint,
       group: response.__mangosteenGroup,
       beforeQuota,
     });
@@ -614,6 +718,7 @@ module.exports = class MangosteenVideoPlugin extends Plugin {
         if (state.status === "failed") {
           task.status = "failed";
           task.lastError = this.api.toChineseVideoError(state.error || "平台视频任务失败");
+          this.settings.submissionMarkers = (this.settings.submissionMarkers || []).filter((item) => item.fingerprint !== task.submissionFingerprint);
           continue;
         }
         if (state.status === "completed") {
@@ -627,6 +732,7 @@ module.exports = class MangosteenVideoPlugin extends Plugin {
           task.cost = this.api.calculateCost(task.beforeQuota, task.afterQuota);
           task.saved = true;
           task.status = "completed";
+          this.settings.submissionMarkers = (this.settings.submissionMarkers || []).filter((item) => item.fingerprint !== task.submissionFingerprint);
           continue;
         }
         if (state.status === "unknown") {

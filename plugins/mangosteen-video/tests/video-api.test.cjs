@@ -1,24 +1,24 @@
 const assert = require("assert");
 const api = require("../video-api.cjs");
 
-const imageUrls = (count) => Array.from({ length: count }, (_, index) => `https://x/image-${index + 1}.png`);
+const imageUrls = (count) => Array.from({ length: count }, (_, index) => `https://assets.example/image-${index + 1}.png`);
 
 assert.deepStrictEqual(api.createVideoPayload({
   model: "MiniMax-H3", prompt: "move", duration: 4,
-  ratio: "9:16", resolution: "768p", firstImage: "https://x/first.png"
+  ratio: "9:16", resolution: "768p", firstImage: "https://assets.example/first.png"
 }), {
   model: "MiniMax-H3", prompt: "move", duration: 4,
-  resolution: "768p", first_image: "https://x/first.png"
+  resolution: "768p", first_image: "https://assets.example/first.png"
 });
 
 assert.throws(() => api.createVideoPayload({
   model: "MiniMax-H3", prompt: "move", duration: 4, resolution: "768p",
-  firstImage: "https://x/first.png", referenceImages: ["https://x/person.png"]
+  firstImage: "https://assets.example/first.png", referenceImages: ["https://assets.example/person.png"]
 }), /不能同时使用/);
 
 assert.throws(() => api.createVideoPayload({
   model: "seedance-2.5", prompt: "move", duration: 4, ratio: "9:16", resolution: "720p",
-  firstImage: "https://x/first.png"
+  firstImage: "https://assets.example/first.png"
 }), /Seedance.*参考图片/);
 
 const seedance20Payload = api.createVideoPayload({
@@ -48,7 +48,7 @@ for (const [field, label] of [
 ]) {
   assert.throws(() => api.createVideoPayload({
     model: "MiniMax-H3", prompt: "move", duration: 4, resolution: "768p",
-    [field]: ["https://x/reference.png"]
+    [field]: ["https://assets.example/reference.png"]
   }), new RegExp(`MiniMax-H3.*不支持.*${label}`));
 }
 
@@ -62,10 +62,10 @@ assert.strictEqual(api.VIDEO_INPUT_CAPABILITIES["seedance-2.5"].maxReferenceImag
 
 assert.deepStrictEqual(api.createVideoPayload({
   model: "generic-model", prompt: "move", duration: 4, ratio: "9:16", resolution: "720p",
-  firstImage: "https://x/first.png", referenceImages: ["https://x/person.png"]
+  firstImage: "https://assets.example/first.png", referenceImages: ["https://assets.example/person.png"]
 }), {
   model: "generic-model", prompt: "move", duration: 4, resolution: "720p",
-  referenceImages: ["https://x/person.png"], first_image: "https://x/first.png"
+  referenceImages: ["https://assets.example/person.png"], first_image: "https://assets.example/first.png"
 });
 
 const h3RequestShape = api.createVideoRequestShape(api.createVideoPayload({
@@ -92,5 +92,32 @@ assert.strictEqual(seedanceRequestShape.hasFirstImage, false);
 assert.strictEqual(seedanceRequestShape.hasLastImage, false);
 assert.strictEqual(seedanceRequestShape.hasRatio, true);
 assert.strictEqual(seedanceRequestShape.referenceImageCount, 30);
+
+assert.throws(() => api.createVideoPayload({
+  model: "MiniMax-H3", prompt: "move", duration: 4, resolution: "768p",
+  firstImage: "http://assets.example/first.png"
+}), /HTTPS/);
+assert.throws(() => api.createVideoPayload({
+  model: "seedance-2.5", prompt: "move", duration: 4, ratio: "9:16", resolution: "720p",
+  referenceImages: ["https://127.0.0.1/private.png"]
+}), /公网 HTTPS/);
+assert.throws(() => api.createVideoPayload({
+  model: "MiniMax-H3", prompt: "move", duration: 4, resolution: "768p", generateAudio: true
+}), /MiniMax-H3.*音频/);
+assert.throws(() => api.createVideoPayload({
+  model: "vendor-seedance-preview", prompt: "move", duration: 4, ratio: "9:16", resolution: "720p"
+}), /不支持的 Seedance/);
+assert.strictEqual(api.resolveVideoModelFamily("vendor-seedance-preview"), "unsupported-seedance");
+
+const submissionFingerprint = api.createSubmissionFingerprint({
+  model: "MiniMax-H3", prompt: "move", frame: Buffer.from("first-frame"),
+});
+assert.match(submissionFingerprint, /^sha256:[a-f0-9]{64}$/);
+assert.strictEqual(submissionFingerprint, api.createSubmissionFingerprint({
+  prompt: "move", frame: Buffer.from("first-frame"), model: "MiniMax-H3",
+}));
+assert.notStrictEqual(submissionFingerprint, api.createSubmissionFingerprint({
+  model: "MiniMax-H3", prompt: "move", frame: Buffer.from("changed-frame"),
+}));
 
 console.log("video-api: ok");

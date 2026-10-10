@@ -1,3 +1,5 @@
+const crypto = require("crypto");
+
 const QUOTA_PER_USD = 500000;
 const DEFAULT_IMAGE_DOWNLOAD_LIMIT = 25 * 1024 * 1024;
 const MAX_LOCAL_IMAGE_UPLOAD_BYTES = 20 * 1024 * 1024;
@@ -7,6 +9,24 @@ const PROGRESS_COMPANIONS = ["可以先喝口咖啡～", "我会一直在这里�
 
 function cleanText(value) {
   return String(value || "").trim();
+}
+
+function canonicalSubmissionValue(value) {
+  if (Buffer.isBuffer(value)) return { bytesSha256: crypto.createHash("sha256").update(value).digest("hex") };
+  if (value instanceof ArrayBuffer) return canonicalSubmissionValue(Buffer.from(value));
+  if (ArrayBuffer.isView(value)) return canonicalSubmissionValue(Buffer.from(value.buffer, value.byteOffset, value.byteLength));
+  if (Array.isArray(value)) return value.map(canonicalSubmissionValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.keys(value).sort()
+      .filter((key) => value[key] !== undefined && typeof value[key] !== "function")
+      .map((key) => [key, canonicalSubmissionValue(value[key])]));
+  }
+  return value;
+}
+
+function createSubmissionFingerprint(value) {
+  const canonical = JSON.stringify(canonicalSubmissionValue(value));
+  return `sha256:${crypto.createHash("sha256").update(canonical).digest("hex")}`;
 }
 
 function localImageMimeType(file) {
@@ -205,4 +225,4 @@ function isRetryableImageError(error) {
   return /\b(?:408|429|50[0-4])\b|timeout|network|failed to fetch|enotfound|econn|socket|temporar|overload/i.test(message);
 }
 
-module.exports = { IMAGE_PROGRESS_INTERVAL_MS, accountProgressText, assertImageDownloadSize, assertLocalImageUploadSize, buildImageEditMultipart, buildImageModelKeyMap, calculateCost, createAccountBalanceRequest, createBalanceRequest, createHistoryEntry, createImageKeyPayload, createLocalImagePreview, createSessionTokenRequest, createTextToImagePayload, describeAvailableGroups, extractImageResults, extractImageTaskId, generationProgressText, imageBatchResultText, isRetryableImageError, localImageMimeType, readImageTaskProgress, readImageTaskState, readQuota, selectAvailableGroups, selectImageGroups, withTimeout };
+module.exports = { IMAGE_PROGRESS_INTERVAL_MS, accountProgressText, assertImageDownloadSize, assertLocalImageUploadSize, buildImageEditMultipart, buildImageModelKeyMap, calculateCost, createAccountBalanceRequest, createBalanceRequest, createHistoryEntry, createImageKeyPayload, createLocalImagePreview, createSessionTokenRequest, createSubmissionFingerprint, createTextToImagePayload, describeAvailableGroups, extractImageResults, extractImageTaskId, generationProgressText, imageBatchResultText, isRetryableImageError, localImageMimeType, readImageTaskProgress, readImageTaskState, readQuota, selectAvailableGroups, selectImageGroups, withTimeout };

@@ -1,5 +1,6 @@
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 
 const ROOT = "山竹视频资产库";
 const WINDOWS_RESERVED_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
@@ -52,13 +53,23 @@ function resolveAsset(vaultRoot, kind, value) {
   const id = assertAssetId(value);
   const typeFolder = kind === "character" ? "人物" : "场景";
   const imageName = kind === "character" ? "人物参考板.png" : "场景参考图.png";
+  const metadataName = kind === "character" ? "character.json" : "scene.json";
   const folderPath = `${ROOT}/${typeFolder}/${id}`;
   const imagePath = `${folderPath}/${imageName}`;
-  const metadataPath = `${folderPath}/metadata.json`;
+  const canonicalMetadataPath = `${folderPath}/${metadataName}`;
+  const legacyMetadataPath = `${folderPath}/metadata.json`;
   const imageAbsolutePath = checkedAssetPath(vaultRoot, imagePath);
-  const metadataAbsolutePath = checkedAssetPath(vaultRoot, metadataPath);
+  const canonicalMetadataAbsolutePath = checkedAssetPath(vaultRoot, canonicalMetadataPath);
+  const legacyMetadataAbsolutePath = checkedAssetPath(vaultRoot, legacyMetadataPath);
   const exists = Boolean(fs.statSync(imageAbsolutePath, { throwIfNoEntry: false })?.isFile());
   let metadata = null;
+  let metadataPath = canonicalMetadataPath;
+  let metadataAbsolutePath = canonicalMetadataAbsolutePath;
+  if (!fs.statSync(metadataAbsolutePath, { throwIfNoEntry: false })?.isFile()
+      && fs.statSync(legacyMetadataAbsolutePath, { throwIfNoEntry: false })?.isFile()) {
+    metadataPath = legacyMetadataPath;
+    metadataAbsolutePath = legacyMetadataAbsolutePath;
+  }
   if (fs.statSync(metadataAbsolutePath, { throwIfNoEntry: false })?.isFile()) {
     metadata = JSON.parse(fs.readFileSync(metadataAbsolutePath, "utf8"));
   }
@@ -84,20 +95,31 @@ function writeAssetMetadata(vaultRoot, asset, metadata = {}) {
     id: canonical.id,
     imagePath: canonical.imagePath,
   };
-  let metadataPath = checkedAssetPath(vaultRoot, canonical.metadataPath);
+  const canonicalMetadataPath = `${canonical.folderPath}/${canonical.kind === "character" ? "character.json" : "scene.json"}`;
+  let metadataPath = checkedAssetPath(vaultRoot, canonicalMetadataPath);
   fs.mkdirSync(path.dirname(metadataPath), { recursive: true });
-  metadataPath = checkedAssetPath(vaultRoot, canonical.metadataPath);
-  const temporaryVaultPath = `${canonical.metadataPath}.tmp-${process.pid}`;
+  metadataPath = checkedAssetPath(vaultRoot, canonicalMetadataPath);
+  const temporaryVaultPath = `${canonicalMetadataPath}.tmp-${process.pid}`;
   const temporary = checkedAssetPath(vaultRoot, temporaryVaultPath);
   fs.writeFileSync(temporary, `${JSON.stringify(payload, null, 2)}\n`);
-  metadataPath = checkedAssetPath(vaultRoot, canonical.metadataPath);
+  metadataPath = checkedAssetPath(vaultRoot, canonicalMetadataPath);
   fs.renameSync(temporary, metadataPath);
   return payload;
+}
+
+function hashAssetImage(vaultRoot, asset) {
+  const resolved = asset?.kind === "character"
+    ? resolveCharacterAsset(vaultRoot, asset.id)
+    : resolveSceneAsset(vaultRoot, asset?.id);
+  const absolutePath = checkedAssetPath(vaultRoot, resolved.imagePath);
+  if (!fs.statSync(absolutePath, { throwIfNoEntry: false })?.isFile()) throw new Error(`资产图片不存在：${resolved.imagePath}`);
+  return `sha256:${crypto.createHash("sha256").update(fs.readFileSync(absolutePath)).digest("hex")}`;
 }
 
 module.exports = {
   assertAssetId,
   checkedAssetPath,
+  hashAssetImage,
   resolveCharacterAsset,
   resolveSceneAsset,
   writeAssetMetadata,

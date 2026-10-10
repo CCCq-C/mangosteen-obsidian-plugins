@@ -40,3 +40,6 @@ Task 8: complete (source and installed Node suites 9/9 pass; live MiniMax-H3 and
 Task 8: fix round 1/5 (review-requested: future sanitized transport request-shape persistence, deterministic generation fingerprints, and mandatory-keyframe recovery; source/installed suites 9/9 pass; no paid calls)
 Task 8: fix round 1/5 (3 addressed, 0 open; commits 8858d5b..7f21a35)
 Task 8: complete (commits 151082a..7f21a35, review clean)
+Final review: changes requested; Task 8 acceptance pending (5 Important findings open at de0efc0)
+Final review fix wave: code and tests prepared for paid-request uncertainty, processing leases, asset-content fingerprints, strict transport validation, and spec-compatible asset metadata.
+Task 8 acceptance evidence complete: one bounded H3 rerun completed with sanitized request-shape proof; no automatic retry.

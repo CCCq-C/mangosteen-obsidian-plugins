@@ -207,6 +207,71 @@ const baseOptions = {
   assert.strictEqual(persisted.requestShape.referenceImageCount, 1);
   assert.strictEqual(JSON.stringify(persisted).includes("signed.example"), false);
 
+  const successPlugin = new VideoPlugin();
+  successPlugin.api = videoApi;
+  successPlugin.settings = { resolutionsByModel: {}, videoTasks: [], submissionMarkers: [] };
+  successPlugin.videoAccess = { accountUserId: "user-1" };
+  successPlugin.getRawQuota = async () => 100;
+  successPlugin.saveSettings = async () => {};
+  successPlugin.sendVideoPayload = async () => ({ status: 200, json: { id: "normal-video-task" } });
+  const normalTask = await successPlugin.submitVideo(baseOptions);
+  assert.strictEqual(normalTask.id, "normal-video-task");
+  assert.strictEqual(successPlugin.settings.submissionMarkers[0].status, "accepted");
+  assert.deepStrictEqual(successPlugin.settings.submissionMarkers[0].requestShape, normalTask.requestShape);
+  successPlugin.fetchVideoTask = async () => ({ id: normalTask.id, status: "completed" });
+  successPlugin.saveCompletedVideo = async () => "山竹视频/normal-video-task/output.mp4";
+  successPlugin.refreshTaskUsageRecords = async () => {};
+  await successPlugin.refreshVideoTasksNow();
+  assert.strictEqual(successPlugin.settings.videoTasks[0].status, "completed");
+  assert.strictEqual(successPlugin.settings.submissionMarkers.length, 0, "terminal success reconciles the paid submission marker");
+
+  const responseLostPlugin = new VideoPlugin();
+  responseLostPlugin.api = videoApi;
+  responseLostPlugin.settings = { resolutionsByModel: {}, videoTasks: [], submissionMarkers: [] };
+  responseLostPlugin.videoAccess = { accountUserId: "user-1" };
+  responseLostPlugin.getRawQuota = async () => 100;
+  responseLostPlugin.saveSettings = async () => {};
+  let responseLostPosts = 0;
+  responseLostPlugin.sendVideoPayload = async () => {
+    responseLostPosts += 1;
+    throw new Error("socket closed after upload");
+  };
+  await assert.rejects(
+    responseLostPlugin.submitVideo(baseOptions),
+    /提交结果待核对.*不会自动重复提交/,
+  );
+  assert.strictEqual(responseLostPosts, 1);
+  assert.strictEqual(responseLostPlugin.settings.submissionMarkers[0].status, "uncertain");
+  await assert.rejects(
+    responseLostPlugin.submitVideo(baseOptions),
+    /已阻止重复提交/,
+  );
+  assert.strictEqual(responseLostPosts, 1, "response-lost retry must not issue another paid POST");
+
+  const saveFailurePlugin = new VideoPlugin();
+  saveFailurePlugin.api = videoApi;
+  saveFailurePlugin.settings = { resolutionsByModel: {}, videoTasks: [], submissionMarkers: [] };
+  saveFailurePlugin.videoAccess = { accountUserId: "user-1" };
+  saveFailurePlugin.getRawQuota = async () => 100;
+  let saveFailurePosts = 0;
+  let saveCalls = 0;
+  saveFailurePlugin.sendVideoPayload = async () => {
+    saveFailurePosts += 1;
+    return { status: 200, json: { id: "accepted-but-save-failed" } };
+  };
+  saveFailurePlugin.saveSettings = async () => {
+    saveCalls += 1;
+    if (saveCalls === 2) throw new Error("disk unavailable");
+  };
+  await assert.rejects(
+    saveFailurePlugin.submitVideo(baseOptions),
+    /提交结果待核对.*不会自动重复提交/,
+  );
+  assert.strictEqual(saveFailurePosts, 1);
+  assert.strictEqual(saveFailurePlugin.settings.submissionMarkers[0].status, "uncertain");
+  await assert.rejects(saveFailurePlugin.submitVideo(baseOptions), /已阻止重复提交/);
+  assert.strictEqual(saveFailurePosts, 1, "save-failure retry must not issue another paid POST");
+
   console.log("video-plugin: ok");
 })().catch((error) => {
   console.error(error);

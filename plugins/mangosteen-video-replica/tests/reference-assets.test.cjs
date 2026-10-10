@@ -12,7 +12,7 @@ assert.deepStrictEqual(character, {
   id: "hero",
   folderPath: "山竹视频资产库/人物/hero",
   imagePath: "山竹视频资产库/人物/hero/人物参考板.png",
-  metadataPath: "山竹视频资产库/人物/hero/metadata.json",
+  metadataPath: "山竹视频资产库/人物/hero/character.json",
   exists: false,
   metadata: null,
 });
@@ -20,7 +20,7 @@ assert.deepStrictEqual(character, {
 const scene = assets.resolveSceneAsset(vault, "harbor");
 assert.strictEqual(scene.folderPath, "山竹视频资产库/场景/harbor");
 assert.strictEqual(scene.imagePath, "山竹视频资产库/场景/harbor/场景参考图.png");
-assert.strictEqual(scene.metadataPath, "山竹视频资产库/场景/harbor/metadata.json");
+assert.strictEqual(scene.metadataPath, "山竹视频资产库/场景/harbor/scene.json");
 assert.strictEqual(scene.exists, false);
 
 fs.mkdirSync(path.dirname(path.join(vault, ...scene.imagePath.split("/"))), { recursive: true });
@@ -39,6 +39,19 @@ assert.deepStrictEqual(resolvedScene.metadata, {
   prompt: "海边集装箱场景",
   createdAt: "2026-10-10T00:00:00.000Z",
 });
+assert.strictEqual(resolvedScene.metadataPath, "山竹视频资产库/场景/harbor/scene.json");
+assert.match(assets.hashAssetImage(vault, resolvedScene), /^sha256:[a-f0-9]{64}$/);
+
+const legacyFolder = path.join(vault, "山竹视频资产库", "人物", "legacy");
+fs.mkdirSync(legacyFolder, { recursive: true });
+fs.writeFileSync(path.join(legacyFolder, "人物参考板.png"), "legacy-image");
+fs.writeFileSync(path.join(legacyFolder, "metadata.json"), JSON.stringify({ prompt: "legacy metadata" }));
+const legacy = assets.resolveCharacterAsset(vault, "legacy");
+assert.strictEqual(legacy.metadataPath, "山竹视频资产库/人物/legacy/metadata.json");
+assert.strictEqual(legacy.metadata.prompt, "legacy metadata");
+assets.writeAssetMetadata(vault, legacy, { prompt: "new metadata" });
+assert.strictEqual(fs.existsSync(path.join(legacyFolder, "character.json")), true);
+assert.strictEqual(fs.existsSync(path.join(legacyFolder, "metadata.json")), true, "legacy metadata must not be renamed or deleted");
 
 for (const unsafeId of ["", ".", "..", "../hero", "hero/side", "hero\\side", "CON", "hero.png"]) {
   assert.throws(() => assets.resolveCharacterAsset(vault, unsafeId), /资产 ID 不安全/, unsafeId);
@@ -67,7 +80,7 @@ assert.throws(
   /资产路径.*知识库范围/,
   "existing parent symlink must not receive metadata writes",
 );
-assert.strictEqual(fs.existsSync(path.join(escapedParentOutside, "metadata.json")), false);
+assert.strictEqual(fs.existsSync(path.join(escapedParentOutside, "character.json")), false);
 
 fs.rmSync(vault, { recursive: true, force: true });
 fs.rmSync(escapedRootVault, { recursive: true, force: true });

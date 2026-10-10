@@ -20,8 +20,9 @@ assert.deepStrictEqual(
 );
 
 assert.strictEqual(classifyModel(" minimax-H3 "), "minimax-h3");
-assert.strictEqual(classifyModel("vendor-seedance-preview"), "seedance");
+assert.strictEqual(classifyModel("vendor-seedance-preview"), null);
 assert.strictEqual(classifyModel("sd-2.0-stable"), "seedance");
+assert.strictEqual(classifyModel("seedance-2.5_unknown"), null);
 assert.strictEqual(classifyModel("wan3.0-video-prime"), null);
 
 const firstImageFile = { name: "first.png" };
@@ -85,8 +86,8 @@ for (const model of ["KlingO3", "wan3.0-r2v-k1", "future-video-model"]) {
 }
 
 const fingerprintInput = {
-  character: { id: "hero-v1", prompt: "短发女性，蓝色工装" },
-  scene: { id: "harbor-v1", prompt: "海边集装箱码头" },
+  character: { id: "hero-v1", prompt: "短发女性，蓝色工装", contentHash: "sha256:character-a" },
+  scene: { id: "harbor-v1", prompt: "海边集装箱码头", contentHash: "sha256:scene-a" },
   shot: {
     imagePrompt: "人物站在红色集装箱前",
     lastImagePrompt: "人物转身看海",
@@ -102,8 +103,10 @@ assert.match(baselineFingerprint, /^sha256:[a-f0-9]{64}$/);
 for (const changed of [
   { character: { ...fingerprintInput.character, id: "hero-v2" } },
   { character: { ...fingerprintInput.character, prompt: "长发女性，白色外套" } },
+  { character: { ...fingerprintInput.character, contentHash: "sha256:character-b" } },
   { scene: { ...fingerprintInput.scene, id: "studio-v1" } },
   { scene: { ...fingerprintInput.scene, prompt: "白色摄影棚" } },
+  { scene: { ...fingerprintInput.scene, contentHash: "sha256:scene-b" } },
   { shot: { ...fingerprintInput.shot, imagePrompt: "人物坐在集装箱前" } },
   { shot: { ...fingerprintInput.shot, lastImagePrompt: "" } },
   { shot: { ...fingerprintInput.shot, videoPrompt: "人物快步跑向镜头" } },

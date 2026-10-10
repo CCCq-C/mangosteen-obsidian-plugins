@@ -86,6 +86,26 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   assert.strictEqual(state.requestMtimeMs, fs.statSync(requestPath).mtimeMs);
   assert.strictEqual(plugin.requestAlreadyHandled("山竹视频复刻/失败任务", state.requestMtimeMs), true);
 
+  const leaseFolder = "山竹视频复刻/租约恢复";
+  const leaseRoot = path.join(vault, ...leaseFolder.split("/"));
+  fs.mkdirSync(path.join(leaseRoot, ".work"), { recursive: true });
+  plugin.instanceId = "instance-current";
+  const requestMtimeMs = 789;
+  const now = Date.now();
+  const writeLease = (value) => fs.writeFileSync(path.join(leaseRoot, ".work/generation-state.json"), JSON.stringify(value));
+  writeLease({
+    status: "processing", requestMtimeMs, instanceId: plugin.instanceId,
+    leaseStartedAt: new Date(now - 1000).toISOString(), leaseUpdatedAt: new Date(now).toISOString(), leaseExpiresAt: new Date(now + 60000).toISOString(),
+  });
+  assert.strictEqual(plugin.requestAlreadyHandled(leaseFolder, requestMtimeMs, now), true, "fresh same-instance lease must skip duplicate scans");
+  writeLease({
+    status: "processing", requestMtimeMs, instanceId: "instance-before-restart",
+    leaseStartedAt: new Date(now - 120000).toISOString(), leaseUpdatedAt: new Date(now - 120000).toISOString(), leaseExpiresAt: new Date(now - 60000).toISOString(),
+  });
+  assert.strictEqual(plugin.requestAlreadyHandled(leaseFolder, requestMtimeMs, now), false, "expired foreign lease must resume after restart");
+  writeLease({ status: "processing", requestMtimeMs, updatedAt: new Date(now - 120000).toISOString() });
+  assert.strictEqual(plugin.requestAlreadyHandled(leaseFolder, requestMtimeMs, now), false, "legacy processing state without a lease must resume");
+
   async function runMockEndToEnd({ model, family, resolution }) {
     const caseVault = fs.mkdtempSync(path.join(os.tmpdir(), `mangosteen-replica-e2e-${family}-`));
     const projectFolder = "山竹视频复刻/双镜头端到端";
@@ -343,8 +363,10 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   ]);
   assert.strictEqual(completedV2.shots[0].lastImagePath, "");
   assert.strictEqual(completedV2.shots[1].lastImagePath, `${generatedV2Folder}/02-分镜脚本/镜头-002-摄影棚-尾帧.png`);
-  assert(fs.existsSync(path.join(vault, "山竹视频资产库", "人物", "hero", "metadata.json")));
-  assert(fs.existsSync(path.join(vault, "山竹视频资产库", "场景", "studio", "metadata.json")));
+  assert(fs.existsSync(path.join(vault, "山竹视频资产库", "人物", "hero", "character.json")));
+  assert(fs.existsSync(path.join(vault, "山竹视频资产库", "场景", "studio", "scene.json")));
+  assert.match(completedV2.characterAsset.contentHash, /^sha256:[a-f0-9]{64}$/);
+  assert(completedV2.sceneAssets.every((asset) => /^sha256:[a-f0-9]{64}$/.test(asset.contentHash)));
 
   const dashboardV2 = fs.readFileSync(path.join(generatedV2, "00-项目总览.md"), "utf8");
   assert.match(dashboardV2, /模型：`seedance-2\.5`/);
@@ -359,12 +381,44 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   assert.strictEqual(editCalls.length, 3, "retrying an unchanged project must reuse saved keyframes");
   assert.strictEqual(submittedV2Options.length, 2, "retrying a completed unchanged project must not submit duplicate videos");
 
+  const beforeCharacterReplacement = JSON.parse(fs.readFileSync(path.join(generatedV2, "project.json"), "utf8"));
+  fs.writeFileSync(path.join(vault, "山竹视频资产库", "人物", "hero", "人物参考板.png"), "manually-replaced-character");
+  await plugin.runGeneration(generatedV2Folder, requestV2, 457.1);
+  const afterCharacterReplacement = JSON.parse(fs.readFileSync(path.join(generatedV2, "project.json"), "utf8"));
+  assert.strictEqual(editCalls.length, 6, "replacing character image bytes must regenerate every keyframe");
+  assert.strictEqual(submittedV2Options.length, 4, "replacing character image bytes must invalidate every video");
+  assert(afterCharacterReplacement.shots.every((shot, index) => shot.generationFingerprint !== beforeCharacterReplacement.shots[index].generationFingerprint));
+
+  const beforeSceneReplacement = afterCharacterReplacement.shots.map((shot) => shot.generationFingerprint);
+  fs.writeFileSync(harborImagePath, "manually-replaced-harbor");
+  await plugin.runGeneration(generatedV2Folder, requestV2, 457.2);
+  const afterSceneReplacement = JSON.parse(fs.readFileSync(path.join(generatedV2, "project.json"), "utf8"));
+  assert.strictEqual(editCalls.length, 7, "replacing one scene image must regenerate only that scene's keyframe");
+  assert.strictEqual(submittedV2Options.length, 5, "replacing one scene image must invalidate only that scene's video");
+  assert.notStrictEqual(afterSceneReplacement.shots[0].generationFingerprint, beforeSceneReplacement[0]);
+  assert.strictEqual(afterSceneReplacement.shots[1].generationFingerprint, beforeSceneReplacement[1]);
+
+  const studioImagePath = path.join(vault, "山竹视频资产库", "场景", "studio", "场景参考图.png");
+  const originalGenerateText = imageV2.generateText;
+  imageV2.generateText = async (prompt) => {
+    generatedTextPrompts.push(prompt);
+    return { candidate: { kind: "base64", value: Buffer.from(`recreated:${prompt}`).toString("base64") } };
+  };
+  fs.unlinkSync(studioImagePath);
+  await plugin.runGeneration(generatedV2Folder, requestV2, 457.3);
+  imageV2.generateText = originalGenerateText;
+  const afterSceneRecreation = JSON.parse(fs.readFileSync(path.join(generatedV2, "project.json"), "utf8"));
+  assert.strictEqual(editCalls.length, 9, "a missing and recreated scene must regenerate its required keyframes");
+  assert.strictEqual(submittedV2Options.length, 6, "a missing and recreated scene must invalidate its video");
+  assert.strictEqual(afterSceneRecreation.shots[0].generationFingerprint, afterSceneReplacement.shots[0].generationFingerprint);
+  assert.notStrictEqual(afterSceneRecreation.shots[1].generationFingerprint, afterSceneReplacement.shots[1].generationFingerprint);
+
   const reusableV2 = JSON.parse(fs.readFileSync(path.join(generatedV2, "project.json"), "utf8"));
   const deletedFirstImage = reusableV2.shots[1].firstImagePath;
   fs.unlinkSync(path.join(vault, ...deletedFirstImage.split("/")));
   await plugin.runGeneration(generatedV2Folder, requestV2, 458);
-  assert.strictEqual(editCalls.length, 4, "a missing mandatory first keyframe must be regenerated");
-  assert.strictEqual(submittedV2Options.length, 3, "a video must not be reused when a mandatory keyframe is missing");
+  assert.strictEqual(editCalls.length, 10, "a missing mandatory first keyframe must be regenerated");
+  assert.strictEqual(submittedV2Options.length, 7, "a video must not be reused when a mandatory keyframe is missing");
   assert(fs.existsSync(path.join(vault, ...deletedFirstImage.split("/"))), "the missing mandatory keyframe must be restored");
 
   const beforeResolutionChange = JSON.parse(fs.readFileSync(path.join(generatedV2, "project.json"), "utf8"));
@@ -374,8 +428,8 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
     settings: { ...requestV2.settings, resolution: "1080p" },
   }, 459);
   const afterResolutionChange = JSON.parse(fs.readFileSync(path.join(generatedV2, "project.json"), "utf8"));
-  assert.strictEqual(editCalls.length, 7, "an effective resolution change must invalidate all saved keyframes");
-  assert.strictEqual(submittedV2Options.length, 5, "an effective resolution change must invalidate both saved videos");
+  assert.strictEqual(editCalls.length, 13, "an effective resolution change must invalidate all saved keyframes");
+  assert.strictEqual(submittedV2Options.length, 9, "an effective resolution change must invalidate both saved videos");
   assert(afterResolutionChange.shots.every((shot, index) => shot.generationFingerprint !== previousFingerprints[index]), "resolution changes must persist new deterministic fingerprints");
 
   const resolutionFingerprints = afterResolutionChange.shots.map((shot) => shot.generationFingerprint);
@@ -385,8 +439,8 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
     settings: { ...requestV2.settings, resolution: "1080p" },
   }, 460);
   const afterCharacterChange = JSON.parse(fs.readFileSync(path.join(generatedV2, "project.json"), "utf8"));
-  assert.strictEqual(editCalls.length, 10, "a character ID change must invalidate all saved keyframes");
-  assert.strictEqual(submittedV2Options.length, 7, "a character ID change must invalidate both saved videos");
+  assert.strictEqual(editCalls.length, 16, "a character ID change must invalidate all saved keyframes");
+  assert.strictEqual(submittedV2Options.length, 11, "a character ID change must invalidate both saved videos");
   assert(afterCharacterChange.shots.every((shot, index) => shot.generationFingerprint !== resolutionFingerprints[index]), "character changes must persist new deterministic fingerprints");
 
   const characterFingerprints = afterCharacterChange.shots.map((shot) => shot.generationFingerprint);
@@ -396,8 +450,8 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
     settings: { ...requestV2.settings, ratio: "16:9", resolution: "1080p" },
   }, 461);
   const afterRatioChange = JSON.parse(fs.readFileSync(path.join(generatedV2, "project.json"), "utf8"));
-  assert.strictEqual(editCalls.length, 13, "a Seedance effective ratio change must invalidate all saved keyframes");
-  assert.strictEqual(submittedV2Options.length, 9, "a Seedance effective ratio change must invalidate both saved videos");
+  assert.strictEqual(editCalls.length, 19, "a Seedance effective ratio change must invalidate all saved keyframes");
+  assert.strictEqual(submittedV2Options.length, 13, "a Seedance effective ratio change must invalidate both saved videos");
   assert(afterRatioChange.shots.every((shot, index) => shot.generationFingerprint !== characterFingerprints[index]), "ratio changes must persist new deterministic fingerprints");
 
   const concurrentFolders = ["山竹视频复刻/并发任务一", "山竹视频复刻/并发任务二"];

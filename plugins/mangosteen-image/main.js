@@ -4,7 +4,7 @@ const path = require("path");
 const API_BASE = "https://apimodel.aihubkit.com";
 const HISTORY_ROOT = "生图记录";
 const IMAGE_TASK_WAIT_ATTEMPTS = 450;
-const DEFAULT_SETTINGS = { imageTasks: [], model: "gpt-image-2", size: "1024x1024", count: 1, editCount: 1 };
+const DEFAULT_SETTINGS = { imageTasks: [], submissionMarkers: [], model: "gpt-image-2", size: "1024x1024", count: 1, editCount: 1 };
 const preferredImageModel = (models, current) => models.includes(current)
   ? current
   : models.find((id) => id.toLowerCase() === "gpt-image-2")
@@ -273,6 +273,7 @@ class ImageModal extends Modal {
     const costPerRequest = this.lastCost === null ? null : this.lastCost / successfulResponses.length;
     await Promise.all(successfulResponses.map((item) => this.plugin.saveImageResult({
       taskId: item?.__mangosteenTaskId,
+      submissionFingerprint: item?.__mangosteenSubmissionFingerprint,
       candidates: this.plugin.extractResults(item),
       prompt,
       mode: this.mode === "text" ? "文生图" : "图生图",
@@ -380,6 +381,7 @@ module.exports = class MangosteenImagePlugin extends Plugin {
       count: Number(saved?.count || DEFAULT_SETTINGS.count),
       editCount: Number(saved?.editCount || DEFAULT_SETTINGS.editCount),
       imageTasks: Array.isArray(saved?.imageTasks) ? saved.imageTasks : [],
+      submissionMarkers: Array.isArray(saved?.submissionMarkers) ? saved.submissionMarkers : [],
     };
     if (hadStandaloneAccess) await this.saveSettings();
     const adapter = this.app?.vault?.adapter;
@@ -399,6 +401,67 @@ module.exports = class MangosteenImagePlugin extends Plugin {
   }
 
   async saveSettings() { await this.saveData(this.settings); }
+  submissionMarker(fingerprint) {
+    return (this.settings.submissionMarkers || []).find((item) => item.fingerprint === fingerprint);
+  }
+  blockedSubmissionError() {
+    return new Error("检测到相同付费请求仍在处理中或待核对，已阻止重复提交。请先打开生图记录刷新状态；确认平台未接收后再手动清理该状态。");
+  }
+  uncertaintyError() {
+    return new Error("付费请求的提交结果待核对，系统不会自动重复提交。请先打开生图记录核对平台状态。");
+  }
+  async prepareSubmissionMarker(fingerprint, requestShape) {
+    if (this.submissionMarker(fingerprint)) throw this.blockedSubmissionError();
+    const marker = {
+      fingerprint,
+      kind: "image",
+      status: "prepared",
+      requestShape,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    this.settings.submissionMarkers = [marker, ...(this.settings.submissionMarkers || [])];
+    try {
+      await this.saveSettings();
+    } catch (error) {
+      this.settings.submissionMarkers = (this.settings.submissionMarkers || []).filter((item) => item !== marker);
+      throw new Error(`无法保存付费提交安全标记，已取消生图提交：${String(error?.message || error)}`);
+    }
+    return marker;
+  }
+  async markSubmissionUncertain(fingerprint, reasonCode = "REMOTE_RESULT_UNKNOWN") {
+    const marker = this.submissionMarker(fingerprint);
+    if (marker) Object.assign(marker, { status: "uncertain", reasonCode, updatedAt: new Date().toISOString() });
+    try { await this.saveSettings(); } catch (_) { /* durable prepared marker still blocks a retry */ }
+    throw this.uncertaintyError();
+  }
+  async releaseRejectedSubmission(fingerprint) {
+    const previous = (this.settings.submissionMarkers || []).map((item) => ({ ...item }));
+    this.settings.submissionMarkers = (this.settings.submissionMarkers || []).filter((item) => item.fingerprint !== fingerprint);
+    try {
+      await this.saveSettings();
+    } catch (_) {
+      this.settings.submissionMarkers = previous.map((item) => item.fingerprint === fingerprint
+        ? { ...item, status: "uncertain", reasonCode: "LOCAL_RELEASE_SAVE_FAILED", updatedAt: new Date().toISOString() }
+        : item);
+      try { await this.saveSettings(); } catch (_) { /* prior durable marker remains conservative */ }
+      throw this.uncertaintyError();
+    }
+  }
+  async reconcileImageSubmission(fingerprint) {
+    if (!fingerprint) return;
+    const previous = (this.settings.submissionMarkers || []).map((item) => ({ ...item }));
+    this.settings.submissionMarkers = (this.settings.submissionMarkers || []).filter((item) => item.fingerprint !== fingerprint);
+    try {
+      await this.saveSettings();
+    } catch (_) {
+      this.settings.submissionMarkers = previous.map((item) => item.fingerprint === fingerprint
+        ? { ...item, status: "uncertain", reasonCode: "RESULT_PERSISTENCE_FAILED", updatedAt: new Date().toISOString() }
+        : item);
+      try { await this.saveSettings(); } catch (_) { /* prior accepted marker remains */ }
+      throw this.uncertaintyError();
+    }
+  }
   request(options, timeoutMs = 45000) { return this.api?.withTimeout ? this.api.withTimeout(requestUrl(options), timeoutMs, "图片服务请求") : requestUrl(options); }
   getAvatarUrl() {
     const file = `${String(this.manifest?.dir || ".obsidian/plugins/mangosteen-image").replace(/\\/g, "/")}/assets/mangosteen-avatar.png`;
@@ -487,7 +550,7 @@ module.exports = class MangosteenImagePlugin extends Plugin {
     await this.app.vault.modify(record, `${await this.app.vault.read(record)}${entry}`);
     return { recordPath: record.path, imagePaths, createdAt, taskName };
   }
-  async saveImageResult({ taskId, candidates, prompt, mode, cost, requestedCount, model = this.settings.model }) {
+  async saveImageResult({ taskId, submissionFingerprint, candidates, prompt, mode, cost, requestedCount, model = this.settings.model }) {
     const saved = await this.persistGeneration({ candidates, prompt, mode, cost, model });
     let task = (this.settings.imageTasks || []).find((item) => item.id === taskId);
     if (!task) {
@@ -501,7 +564,18 @@ module.exports = class MangosteenImagePlugin extends Plugin {
       outputCount: candidates.length,
       imagePaths: saved.imagePaths, recordPath: saved.recordPath, status: "completed", progress: 100, saved: true,
     });
-    await this.saveSettings();
+    const fingerprint = submissionFingerprint || task.submissionFingerprint;
+    const previousMarkers = (this.settings.submissionMarkers || []).map((item) => ({ ...item }));
+    this.settings.submissionMarkers = (this.settings.submissionMarkers || []).filter((item) => item.fingerprint !== fingerprint);
+    try {
+      await this.saveSettings();
+    } catch (_) {
+      this.settings.submissionMarkers = previousMarkers.map((item) => item.fingerprint === fingerprint
+        ? { ...item, status: "uncertain", reasonCode: "RESULT_PERSISTENCE_FAILED", updatedAt: new Date().toISOString() }
+        : item);
+      try { await this.saveSettings(); } catch (_) { /* prior accepted marker remains */ }
+      throw this.uncertaintyError();
+    }
     this.refreshImageTaskViews();
     void this.refreshTaskUsageRecords();
     return task;
@@ -509,10 +583,23 @@ module.exports = class MangosteenImagePlugin extends Plugin {
   async openHistory() {
     new ImageHistoryModal(this).open();
   }
-  async rememberImageTask({ id, taskPath, mode, prompt, model, group, size, requestedCount }) {
-    const task = { id, taskPath, mode, prompt, model, group, size, requestedCount, accountUserId: String(this.agentImageAccess?.accountUserId || ""), createdAt: new Date().toISOString(), status: "processing", progress: null, saved: false };
-    this.settings.imageTasks = [task, ...(this.settings.imageTasks || []).filter((item) => item.id !== id)].slice(0, 50);
-    await this.saveSettings();
+  async rememberImageTask({ id, taskPath, mode, prompt, model, group, size, requestedCount, submissionFingerprint }) {
+    const task = { id, taskPath, mode, prompt, model, group, size, requestedCount, submissionFingerprint, accountUserId: String(this.agentImageAccess?.accountUserId || ""), createdAt: new Date().toISOString(), status: "processing", progress: null, saved: false };
+    const previousTasks = this.settings.imageTasks || [];
+    const previousMarkers = (this.settings.submissionMarkers || []).map((item) => ({ ...item }));
+    const marker = submissionFingerprint ? this.submissionMarker(submissionFingerprint) : null;
+    if (marker) Object.assign(marker, { status: "accepted", taskId: id, updatedAt: new Date().toISOString() });
+    this.settings.imageTasks = [task, ...previousTasks.filter((item) => item.id !== id)].slice(0, 50);
+    try {
+      await this.saveSettings();
+    } catch (_) {
+      this.settings.imageTasks = previousTasks;
+      this.settings.submissionMarkers = previousMarkers.map((item) => item.fingerprint === submissionFingerprint
+        ? { ...item, status: "uncertain", reasonCode: "TASK_PERSISTENCE_FAILED", updatedAt: new Date().toISOString() }
+        : item);
+      try { await this.saveSettings(); } catch (_) { /* durable prepared marker remains */ }
+      throw this.uncertaintyError();
+    }
     return task;
   }
   refreshImageTaskViews() { for (const view of this.imageTaskViews || []) { view.refreshTasks?.(); view.refreshPrice?.(); } }
@@ -561,11 +648,13 @@ module.exports = class MangosteenImagePlugin extends Plugin {
         await this.saveSettings();
         this.refreshImageTaskViews();
         response.__mangosteenTaskId = task.id;
+        response.__mangosteenSubmissionFingerprint = task.submissionFingerprint;
         return response;
       }
       const state = this.api.readImageTaskState(response);
       if (/failed|error|cancel|rejected/.test(state)) {
         task.status = "failed";
+        this.settings.submissionMarkers = (this.settings.submissionMarkers || []).filter((item) => item.fingerprint !== task.submissionFingerprint);
         await this.saveSettings();
         this.refreshImageTaskViews();
         throw new Error("平台图片任务执行失败，请打开生图记录查看后重试。");
@@ -596,6 +685,7 @@ module.exports = class MangosteenImagePlugin extends Plugin {
           if (/failed|error|cancel|rejected/.test(state)) {
             task.status = "failed";
             task.lastError = this.toChineseError(response?.data?.message || response?.message || response?.error?.message || "平台图片任务执行失败");
+            this.settings.submissionMarkers = (this.settings.submissionMarkers || []).filter((item) => item.fingerprint !== task.submissionFingerprint);
             continue;
           }
           task.status = /queued|pending|waiting/.test(state) ? "queued" : "processing";
@@ -606,7 +696,7 @@ module.exports = class MangosteenImagePlugin extends Plugin {
           task.usageLogDetail = "";
         }
         task.status = "saving";
-        await this.saveImageResult({ taskId: task.id, candidates: results, prompt: task.prompt, mode: task.mode, cost: task.cost ?? null, model: task.model });
+        await this.saveImageResult({ taskId: task.id, submissionFingerprint: task.submissionFingerprint, candidates: results, prompt: task.prompt, mode: task.mode, cost: task.cost ?? null, model: task.model });
       } catch (error) {
         const saving = task.status === "saving";
         task.status = "retrying";
@@ -649,38 +739,54 @@ module.exports = class MangosteenImagePlugin extends Plugin {
     if (response.status >= 400) throw new Error(this.extractApiError(response.json, response.status));
     return response.json;
   }
-  async submitImageTask({ taskPath, fallbackPath, mode, prompt, requestedCount = 1, submit, fallbackSubmit }) {
-    const response = await submit(taskPath);
-    if (response.status === 404 || response.status === 405) return fallbackSubmit(fallbackPath);
-    if (response.status >= 400) throw new Error(this.extractApiError(response.json, response.status));
-    if (this.extractResults(response.json).length) return response.json;
+  async submitImageTask({ taskPath, fallbackPath, mode, prompt, requestedCount = 1, submissionFingerprint, requestShape, submit, fallbackSubmit }) {
+    if (!Array.isArray(this.settings.submissionMarkers)) this.settings.submissionMarkers = [];
+    await this.prepareSubmissionMarker(submissionFingerprint, requestShape);
+    let response;
+    try {
+      response = await submit(taskPath);
+      if (response.status === 404 || response.status === 405) response = await fallbackSubmit(fallbackPath);
+    } catch (_) {
+      return this.markSubmissionUncertain(submissionFingerprint, "REMOTE_RESPONSE_LOST");
+    }
+    if (response.status === 408 || response.status >= 500) return this.markSubmissionUncertain(submissionFingerprint, "REMOTE_ACCEPTANCE_AMBIGUOUS");
+    if (response.status >= 400) {
+      await this.releaseRejectedSubmission(submissionFingerprint);
+      throw new Error(this.extractApiError(response.json, response.status));
+    }
+    if (this.extractResults(response.json).length) {
+      const id = `sync-${submissionFingerprint.slice(-16)}-${Date.now()}`;
+      const task = await this.rememberImageTask({ id, taskPath, mode, prompt, model: this.settings.model, group: response.__mangosteenGroup, size: this.settings.size, requestedCount, submissionFingerprint });
+      response.json.__mangosteenTaskId = task.id;
+      response.json.__mangosteenSubmissionFingerprint = submissionFingerprint;
+      return response.json;
+    }
     const id = this.api.extractImageTaskId(response.json);
-    if (!id) throw new Error("平台已接收生图请求，但未返回任务编号。请联系平台完善异步生图接口返回内容。");
-    const task = await this.rememberImageTask({ id, taskPath, mode, prompt, model: this.settings.model, group: response.__mangosteenGroup, size: this.settings.size, requestedCount });
+    if (!id) return this.markSubmissionUncertain(submissionFingerprint, "TASK_ID_MISSING");
+    const task = await this.rememberImageTask({ id, taskPath, mode, prompt, model: this.settings.model, group: response.__mangosteenGroup, size: this.settings.size, requestedCount, submissionFingerprint });
     return this.waitForImageTask(task);
   }
-  async generateText(prompt, count = this.settings.count) {
+  async generateText(prompt, count = this.settings.count, submissionSlot = "single") {
     const requestedCount = Math.max(1, Math.min(7, Number.parseInt(count, 10) || 1));
     const payload = this.api.createTextToImagePayload({ model: this.settings.model, prompt, size: this.settings.size, count: requestedCount });
-    const response = await this.submitImageTask({ taskPath: "/v1/images/generations/tasks", fallbackPath: "/v1/images/generations", mode: "文生图", prompt, requestedCount, submit: (path) => this.postJsonResponse(path, payload), fallbackSubmit: async (path) => this.requestJson(path, payload) });
+    const submissionFingerprint = this.api.createSubmissionFingerprint({ kind: "text-to-image", submissionSlot, payload });
+    const response = await this.submitImageTask({ taskPath: "/v1/images/generations/tasks", fallbackPath: "/v1/images/generations", mode: "文生图", prompt, requestedCount, submissionFingerprint, requestShape: { version: 1, mode: "text-to-image", model: payload.model, size: payload.size, count: requestedCount }, submit: (path) => this.postJsonResponse(path, payload), fallbackSubmit: (path) => this.postJsonResponse(path, payload) });
     response.__mangosteenRequestedCount = requestedCount;
     return response;
   }
-  async generateEdit(prompt, image) {
-    return this.generateEditMulti(prompt, [image]);
+  async generateEdit(prompt, image, submissionSlot = "single") {
+    return this.generateEditMulti(prompt, [image], submissionSlot);
   }
-  async generateEditMulti(prompt, images) {
+  async generateEditMulti(prompt, images, submissionSlot = "single") {
     await this.refreshAgentAccess();
     this.requireKey();
     if (!String(prompt || "").trim()) throw new Error("请先输入如何修改图片");
     if (!Array.isArray(images) || images.length < 1 || images.length > 4) throw new Error("请选择 1–4 张参考图片");
     for (const image of images) this.api.assertLocalImageUploadSize(image);
     const fields = { model: this.settings.model, prompt: String(prompt).trim(), images, size: this.settings.size, quality: "high", output_format: "png" };
-    return this.submitImageTask({ taskPath: "/v1/images/edits/tasks", fallbackPath: "/v1/images/edits", mode: "图生图", prompt: fields.prompt, submit: (path) => this.postMultipart(path, fields), fallbackSubmit: async (path) => {
-      const response = await this.postMultipart(path, fields);
-      if (response.status >= 400) throw new Error(this.extractApiError(response.json, response.status));
-      return response.json;
-    } });
+    const fingerprintImages = images.map((image) => ({ name: image.name, type: image.type, buffer: image.buffer }));
+    const submissionFingerprint = this.api.createSubmissionFingerprint({ kind: "image-edit", submissionSlot, fields: { ...fields, images: fingerprintImages } });
+    return this.submitImageTask({ taskPath: "/v1/images/edits/tasks", fallbackPath: "/v1/images/edits", mode: "图生图", prompt: fields.prompt, submissionFingerprint, requestShape: { version: 1, mode: "image-edit", model: fields.model, size: fields.size, referenceImageCount: images.length }, submit: (path) => this.postMultipart(path, fields), fallbackSubmit: (path) => this.postMultipart(path, fields) });
   }
   async runGenerationBatch(count, generate) {
     const total = Math.max(1, Math.min(7, Number.parseInt(count, 10) || 1));
@@ -697,8 +803,8 @@ module.exports = class MangosteenImagePlugin extends Plugin {
     await Promise.all(Array.from({ length: Math.min(2, total) }, () => worker()));
     return { successes: successes.filter(Boolean), failures: failures.sort((a, b) => a.index - b.index) };
   }
-  async generateTextBatch(prompt, count) { return this.runGenerationBatch(count, () => this.generateText(prompt, 1)); }
-  async generateEditBatch(prompt, image, count) { return this.runGenerationBatch(count, () => this.generateEdit(prompt, image)); }
+  async generateTextBatch(prompt, count) { return this.runGenerationBatch(count, (index) => this.generateText(prompt, 1, `batch-${index + 1}`)); }
+  async generateEditBatch(prompt, image, count) { return this.runGenerationBatch(count, (index) => this.generateEdit(prompt, image, `batch-${index + 1}`)); }
   async postMultipart(pathname, fields) {
     const https = require("https");
     const boundary = `----Mangosteen${Date.now().toString(16)}`;

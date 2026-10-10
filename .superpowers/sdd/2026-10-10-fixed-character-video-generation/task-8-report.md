@@ -45,3 +45,10 @@
 - A completed video is reusable only while every model-required keyframe still exists. The regression deletes a mandatory first keyframe and verifies that the keyframe and its video are regenerated.
 - Source suite and installed-vault suite both pass 9/9 test files; eight changed allow-listed files have matching SHA-256 hashes after deployment.
 - No paid image or video request was submitted in this fix round. Existing live videos and reusable assets were not modified; their pre/post SHA-256 hashes match.
+
+## Final H3 evidence rerun
+
+- A single additional 4-second H3 acceptance request reached `completed`; cost was `$0.8712`.
+- Output: `/Users/ziyan/ObsidianVaults/山竹视频复刻/固定人物流程最终验收-H3-2026-10-11/03-视频片段/镜头-001-走向集装箱.mp4`.
+- Persisted request shape directly proves `first_image` and `last_image` were present, while `ratio`, `generate_audio`, and all reference-media arrays were absent.
+- No retry or duplicate submission was made.

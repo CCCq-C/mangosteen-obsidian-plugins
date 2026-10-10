@@ -5,7 +5,7 @@ const clean = (value) => String(value || "").trim();
 function classifyModel(modelId) {
   const id = clean(modelId).toLowerCase();
   if (id === "minimax-h3") return "minimax-h3";
-  if (id.includes("seedance") || ["sd-2.0-fast", "sd-2.0-mini", "sd-2.0-stable"].includes(id)) return "seedance";
+  if (["seedance-2.0", "sd-2.0-fast", "sd-2.0-mini", "sd-2.0-stable", "seedance-2.5", "seedance-2.5_k1", "seedance-2.5_y2"].includes(id)) return "seedance";
   return null;
 }
 
@@ -23,8 +23,8 @@ function createGenerationFingerprint({ character = {}, scene = {}, shot = {}, mo
   const requirements = referenceRequirements(model, shot.lastImagePrompt);
   const canonical = {
     version: 1,
-    character: { id: clean(character.id), prompt: clean(character.prompt) },
-    scene: { id: clean(scene.id), prompt: clean(scene.prompt) },
+    character: { id: clean(character.id), prompt: clean(character.prompt), contentHash: clean(character.contentHash) },
+    scene: { id: clean(scene.id), prompt: clean(scene.prompt), contentHash: clean(scene.contentHash) },
     imagePrompt: clean(shot.imagePrompt),
     lastImagePrompt: clean(shot.lastImagePrompt),
     videoPrompt: clean(shot.videoPrompt),

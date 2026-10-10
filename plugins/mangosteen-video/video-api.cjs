@@ -1,3 +1,5 @@
+const crypto = require("crypto");
+
 const QUOTA_PER_USD = 500000;
 const DEFAULT_VIDEO_DOWNLOAD_LIMIT = 1024 * 1024 * 1024;
 const MAX_LOCAL_IMAGE_UPLOAD_BYTES = 20 * 1024 * 1024;
@@ -27,7 +29,37 @@ const VIDEO_INPUT_CAPABILITIES = {
 };
 
 const clean = (value) => String(value || "").trim();
-const isPublicUrl = (value) => /^https?:\/\/[^\s]+$/i.test(clean(value));
+
+function isPublicHttpsUrl(value) {
+  let parsed;
+  try { parsed = new URL(clean(value)); } catch (_) { return false; }
+  if (parsed.protocol !== "https:" || parsed.username || parsed.password) return false;
+  const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (!hostname || hostname === "localhost" || hostname.endsWith(".localhost") || hostname.endsWith(".local")) return false;
+  if (/^(?:0|10|127)\./.test(hostname) || /^169\.254\./.test(hostname) || /^192\.168\./.test(hostname)) return false;
+  const private172 = hostname.match(/^172\.(\d{1,3})\./);
+  if (private172 && Number(private172[1]) >= 16 && Number(private172[1]) <= 31) return false;
+  if (/^(?:::|::1|f[cd][0-9a-f]{2}:|fe[89ab][0-9a-f]:)/i.test(hostname)) return false;
+  return hostname.includes(".") || /^\d{1,3}(?:\.\d{1,3}){3}$/.test(hostname);
+}
+
+function canonicalSubmissionValue(value) {
+  if (Buffer.isBuffer(value)) return { bytesSha256: crypto.createHash("sha256").update(value).digest("hex") };
+  if (value instanceof ArrayBuffer) return canonicalSubmissionValue(Buffer.from(value));
+  if (ArrayBuffer.isView(value)) return canonicalSubmissionValue(Buffer.from(value.buffer, value.byteOffset, value.byteLength));
+  if (Array.isArray(value)) return value.map(canonicalSubmissionValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.keys(value).sort()
+      .filter((key) => value[key] !== undefined && typeof value[key] !== "function")
+      .map((key) => [key, canonicalSubmissionValue(value[key])]));
+  }
+  return value;
+}
+
+function createSubmissionFingerprint(value) {
+  const canonical = JSON.stringify(canonicalSubmissionValue(value));
+  return `sha256:${crypto.createHash("sha256").update(canonical).digest("hex")}`;
+}
 
 function localImageMimeType(file) {
   return clean(file?.type).toLowerCase()
@@ -42,15 +74,16 @@ function assertLocalImageUploadSize(file, maxBytes = MAX_LOCAL_IMAGE_UPLOAD_BYTE
 function validateUrls(values, label, limit) {
   const urls = (values || []).map(clean).filter(Boolean);
   if (urls.length > limit) throw new Error(`${label}最多填写 ${limit} 个`);
-  if (urls.some((url) => !isPublicUrl(url))) throw new Error("参考材料仅支持公开 HTTP/HTTPS 地址");
+  if (urls.some((url) => !isPublicHttpsUrl(url))) throw new Error("参考材料仅支持公网 HTTPS 地址");
   return urls;
 }
 
 function resolveVideoModelFamily(model) {
   const id = clean(model).toLowerCase();
   if (id === "minimax-h3") return "minimax-h3";
-  if (/^(?:seedance|sd)-2\.0(?:$|[-_])/.test(id)) return "seedance-2.0";
-  if (/^seedance-2\.5(?:$|[-_])/.test(id)) return "seedance-2.5";
+  if (["seedance-2.0", "sd-2.0-fast", "sd-2.0-mini", "sd-2.0-stable"].includes(id)) return "seedance-2.0";
+  if (["seedance-2.5", "seedance-2.5_k1", "seedance-2.5_y2"].includes(id)) return "seedance-2.5";
+  if (id.includes("seedance") || /^sd-2(?:\.|-|_)/.test(id)) return "unsupported-seedance";
   return "generic";
 }
 
@@ -63,6 +96,7 @@ function createVideoPayload(options = {}) {
   if (!model) throw new Error("请选择视频模型");
   const capabilities = videoCapabilitiesForModel(model, options.allowedResolutions);
   const modelFamily = resolveVideoModelFamily(model);
+  if (modelFamily === "unsupported-seedance") throw new Error(`不支持的 Seedance 模型标识：${model}`);
   const inputCapabilities = VIDEO_INPUT_CAPABILITIES[modelFamily];
   if (!prompt) throw new Error("请先描述想生成的视频");
   if (capabilities.maxPrompt && prompt.length > capabilities.maxPrompt) throw new Error(`${model} 的视频描述不能超过 ${capabilities.maxPrompt} 个字符`);
@@ -90,9 +124,10 @@ function createVideoPayload(options = {}) {
   if (referenceImages.length) payload.referenceImages = referenceImages;
   if (referenceVideos.length) payload.referenceVideos = referenceVideos;
   if (referenceAudios.length) payload.referenceAudios = referenceAudios;
+  if (options.generateAudio && modelFamily === "minimax-h3") throw new Error("MiniMax-H3 当前接口不支持同步生成音频");
   if (options.generateAudio) payload.generate_audio = true;
   for (const [url, field] of [[firstImage, "first_image"], [lastImage, "last_image"]]) {
-    if (url && !isPublicUrl(url)) throw new Error("首尾帧仅支持公开 HTTP/HTTPS 图片地址");
+    if (url && !isPublicHttpsUrl(url)) throw new Error("首尾帧仅支持公网 HTTPS 图片地址");
     if (url) payload[field] = url;
   }
   if (inputCapabilities.omitRatioWithFrames && (payload.first_image || payload.last_image)) delete payload.ratio;
@@ -281,6 +316,7 @@ module.exports = {
   assertLocalImageUploadSize,
   calculateCost,
   createBalanceRequest,
+  createSubmissionFingerprint,
   createVideoKeyPayload,
   createVideoPayload,
   createVideoRequestShape,

@@ -1,6 +1,7 @@
 const { Modal, Notice, Plugin, requestUrl } = require("obsidian");
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 
 let core;
 let generationPolicy;
@@ -10,6 +11,7 @@ let workflow;
 const ROOT = "山竹视频复刻";
 const REQUEST_FILE = "generation-request.json";
 const STATE_FILE = ".work/generation-state.json";
+const PROCESSING_LEASE_MS = 2 * 60 * 1000;
 
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
@@ -69,6 +71,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     referenceAssets = require(path.join(pluginRoot, "reference-assets.cjs"));
     workflow = require(path.join(pluginRoot, "replica-cli.cjs"));
     this.pluginRoot = pluginRoot;
+    this.instanceId = crypto.randomUUID();
     this.processing = new Set();
     this.referenceAssetPromises = new Map();
     this.addRibbonIcon("clapperboard", "山竹视频复刻", () => new PrepareModal(this).open());
@@ -133,14 +136,27 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     atomicWrite(path.join(absoluteFolder, "00-项目总览.md"), core.dashboardMarkdown(project));
   }
 
-  writeState(projectFolder, state) { writeJson(path.join(this.absolute(projectFolder), STATE_FILE), state); }
+  writeState(projectFolder, state) {
+    if (state?.status === "processing") {
+      const now = new Date();
+      state.instanceId = this.instanceId || (this.instanceId = crypto.randomUUID());
+      state.leaseStartedAt ||= now.toISOString();
+      state.leaseUpdatedAt = now.toISOString();
+      state.leaseExpiresAt = new Date(now.getTime() + PROCESSING_LEASE_MS).toISOString();
+    }
+    writeJson(path.join(this.absolute(projectFolder), STATE_FILE), state);
+  }
 
-  requestAlreadyHandled(projectFolder, requestMtimeMs) {
+  requestAlreadyHandled(projectFolder, requestMtimeMs, nowMs = Date.now()) {
     const statePath = path.join(this.absolute(projectFolder), STATE_FILE);
     if (!fs.existsSync(statePath)) return false;
     try {
       const state = this.readJson(statePath);
-      return Number(state.requestMtimeMs) === Number(requestMtimeMs) && ["processing", "completed", "completed_with_errors", "failed"].includes(state.status);
+      if (Number(state.requestMtimeMs) !== Number(requestMtimeMs)) return false;
+      if (["completed", "completed_with_errors", "failed"].includes(state.status)) return true;
+      if (state.status !== "processing") return false;
+      const expiresAt = Date.parse(state.leaseExpiresAt || "");
+      return Number.isFinite(expiresAt) && expiresAt > Number(nowMs);
     } catch (_) { return false; }
   }
 
@@ -148,6 +164,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     if (this.processing.has(requestPath)) return;
     let projectFolder;
     let requestMtimeMs = null;
+    let leaseTimer = null;
     try {
       const root = this.absolute(ROOT);
       const relative = path.relative(root, path.dirname(requestPath));
@@ -157,6 +174,17 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       if (this.requestAlreadyHandled(projectFolder, requestMtimeMs)) return;
       const request = core.normalizeGenerationRequest(this.readJson(requestPath));
       this.processing.add(requestPath);
+      leaseTimer = setInterval(() => {
+        try {
+          const statePath = path.join(this.absolute(projectFolder), STATE_FILE);
+          if (!fs.existsSync(statePath)) return;
+          const state = this.readJson(statePath);
+          if (state.status === "processing" && Number(state.requestMtimeMs) === Number(requestMtimeMs) && state.instanceId === this.instanceId) {
+            this.writeState(projectFolder, state);
+          }
+        } catch (_) { /* the next workflow state write retries lease persistence */ }
+      }, Math.floor(PROCESSING_LEASE_MS / 3));
+      leaseTimer.unref?.();
       await this.runGeneration(projectFolder, request, requestMtimeMs);
       if (notify) new Notice("视频复刻任务已经全部处理完成。", 7000);
     } catch (error) {
@@ -171,7 +199,10 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         } catch (_) {}
       }
       if (notify) new Notice(`视频复刻失败：${String(error?.message || error)}`, 10000);
-    } finally { this.processing.delete(requestPath); }
+    } finally {
+      if (leaseTimer) clearInterval(leaseTimer);
+      this.processing.delete(requestPath);
+    }
   }
 
   getGenerationPlugins() {
@@ -194,6 +225,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     const absolutePath = this.absolute(vaultPath);
     fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
     atomicWrite(absolutePath, bytes);
+    await imagePlugin.reconcileImageSubmission?.(candidate?.__mangosteenSubmissionFingerprint);
     return vaultPath;
   }
 
@@ -214,6 +246,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       : await imagePlugin.generateText(prompt, 1);
     const candidate = imagePlugin.extractResults(response)?.[0];
     if (!candidate) throw new Error("生图任务完成，但没有返回图片。");
+    candidate.__mangosteenSubmissionFingerprint = response?.__mangosteenSubmissionFingerprint;
     return candidate;
   }
 
@@ -222,6 +255,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     const response = await imagePlugin.generateEditMulti(prompt, referencePaths.map((vaultPath) => this.localImage(vaultPath)));
     const candidate = imagePlugin.extractResults(response)?.[0];
     if (!candidate) throw new Error("多图参考生图完成，但没有返回图片。");
+    candidate.__mangosteenSubmissionFingerprint = response?.__mangosteenSubmissionFingerprint;
     return candidate;
   }
 
@@ -288,12 +322,51 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     project.videoModel = model;
     project.characterAsset = null;
     project.sceneAssets = [];
+    this.saveProject(projectFolder, project);
+
+    const character = await this.ensureReferenceAsset(
+      image,
+      referenceAssets.resolveCharacterAsset(this.vaultPath(), request.character.id),
+      request.character.prompt,
+    );
+    project.characterAsset = {
+      id: character.id,
+      imagePath: character.imagePath,
+      metadataPath: character.metadataPath,
+      contentHash: referenceAssets.hashAssetImage(this.vaultPath(), character),
+      reused: character.reused,
+    };
+    this.saveProject(projectFolder, project);
+
+    for (const scene of request.scenes) {
+      state.currentStep = `场景资产 ${scene.id}`;
+      state.updatedAt = new Date().toISOString();
+      this.writeState(projectFolder, state);
+      const resolved = await this.ensureReferenceAsset(
+        image,
+        referenceAssets.resolveSceneAsset(this.vaultPath(), scene.id),
+        scene.prompt,
+      );
+      project.sceneAssets.push({
+        id: resolved.id,
+        imagePath: resolved.imagePath,
+        metadataPath: resolved.metadataPath,
+        contentHash: referenceAssets.hashAssetImage(this.vaultPath(), resolved),
+        reused: resolved.reused,
+      });
+      this.saveProject(projectFolder, project);
+    }
+
+    const sceneAssetsById = new Map(project.sceneAssets.map((asset) => [asset.id, asset]));
     project.shots = request.shots.map((shot) => {
       const previous = previousShots.get(String(shot.id));
       const requirements = generationPolicy.referenceRequirements(model, shot.lastImagePrompt);
+      const sceneRequest = sceneRequestsById.get(String(shot.sceneId)) || { id: shot.sceneId, prompt: "" };
+      const sceneAsset = sceneAssetsById.get(String(shot.sceneId));
+      if (!sceneAsset) throw new Error(`镜头 ${shot.id} 找不到场景资产：${shot.sceneId}`);
       const generationFingerprint = generationPolicy.createGenerationFingerprint({
-        character: request.character,
-        scene: sceneRequestsById.get(String(shot.sceneId)) || { id: shot.sceneId, prompt: "" },
+        character: { ...request.character, contentHash: project.characterAsset.contentHash },
+        scene: { ...sceneRequest, contentHash: sceneAsset.contentHash },
         shot,
         model,
         ratio: request.settings.ratio,
@@ -326,40 +399,6 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         error: "",
       };
     });
-    this.saveProject(projectFolder, project);
-
-    const character = await this.ensureReferenceAsset(
-      image,
-      referenceAssets.resolveCharacterAsset(this.vaultPath(), request.character.id),
-      request.character.prompt,
-    );
-    project.characterAsset = {
-      id: character.id,
-      imagePath: character.imagePath,
-      metadataPath: character.metadataPath,
-      reused: character.reused,
-    };
-    this.saveProject(projectFolder, project);
-
-    for (const scene of request.scenes) {
-      state.currentStep = `场景资产 ${scene.id}`;
-      state.updatedAt = new Date().toISOString();
-      this.writeState(projectFolder, state);
-      const resolved = await this.ensureReferenceAsset(
-        image,
-        referenceAssets.resolveSceneAsset(this.vaultPath(), scene.id),
-        scene.prompt,
-      );
-      project.sceneAssets.push({
-        id: resolved.id,
-        imagePath: resolved.imagePath,
-        metadataPath: resolved.metadataPath,
-        reused: resolved.reused,
-      });
-      this.saveProject(projectFolder, project);
-    }
-
-    const sceneAssetsById = new Map(project.sceneAssets.map((asset) => [asset.id, asset]));
     project.statusText = "人物和场景资产已准备，正在生成镜头";
     this.saveProject(projectFolder, project);
 
