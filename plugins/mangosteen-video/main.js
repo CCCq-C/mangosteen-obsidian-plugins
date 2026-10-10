@@ -493,24 +493,39 @@ module.exports = class MangosteenVideoPlugin extends Plugin {
     for (const view of this.videoTaskViews || []) { view.refreshTasks?.(); view.refreshPrice?.(); }
   }
 
+  async #uploadTemporaryImage(file, label) {
+    this.api.assertLocalImageUploadSize(file);
+    const bridge = this.app?.plugins?.getPlugin?.("mangosteen-agent")?.getAccountBridge?.();
+    if (!bridge?.uploadTemporaryImage) throw new Error("请先登录山竹账号中心，再上传" + label + "图片。");
+    let bytes;
+    try { bytes = await file.arrayBuffer(); } catch (_) { throw new Error(label + "图片读取失败，请重新选择文件。"); }
+    const uploaded = await bridge.uploadTemporaryImage({ name: file.name, type: this.api.localImageMimeType(file), bytes });
+    if (!uploaded?.ok || !/^https?:\/\/[^\s]+$/i.test(String(uploaded.url || "").trim())) {
+      throw new Error(label + "图片上传失败，请检查网络、文件格式或重新登录后重试。");
+    }
+    return String(uploaded.url).trim();
+  }
+
   async submitVideo(options) {
     const payloadOptions = Object.assign({}, options, { allowedResolutions: this.settings.resolutionsByModel?.[options.model] });
+    const referenceImageFiles = Array.from(payloadOptions.referenceImageFiles || []);
+    const referenceImages = Array.isArray(payloadOptions.referenceImages) ? [...payloadOptions.referenceImages] : [];
     for (const [label, urlField, fileField] of [["首帧", "firstImage", "firstImageFile"], ["尾帧", "lastImage", "lastImageFile"]]) {
       if (String(payloadOptions[urlField] || "").trim() && payloadOptions[fileField]) throw new Error(label + "请只选图片 URL 或本地图片，不要同时填写。");
     }
-    this.api.createVideoPayload(payloadOptions);
+    this.api.createVideoPayload(Object.assign({}, payloadOptions, {
+      firstImage: payloadOptions.firstImage || (payloadOptions.firstImageFile ? "https://local.invalid/first-image" : ""),
+      lastImage: payloadOptions.lastImage || (payloadOptions.lastImageFile ? "https://local.invalid/last-image" : ""),
+      referenceImages: referenceImages.concat(referenceImageFiles.map((_, index) => `https://local.invalid/reference-${index + 1}`)),
+    }));
     for (const [label, urlField, fileField] of [["首帧", "firstImage", "firstImageFile"], ["尾帧", "lastImage", "lastImageFile"]]) {
       const file = payloadOptions[fileField];
       if (!file) continue;
-      this.api.assertLocalImageUploadSize(file);
-      const bridge = this.app?.plugins?.getPlugin?.("mangosteen-agent")?.getAccountBridge?.();
-      if (!bridge?.uploadTemporaryImage) throw new Error("请先登录山竹账号中心，再上传" + label + "图片。");
-      let bytes;
-      try { bytes = await file.arrayBuffer(); } catch (_) { throw new Error(label + "图片读取失败，请重新选择文件。"); }
-      const uploaded = await bridge.uploadTemporaryImage({ name: file.name, type: this.api.localImageMimeType(file), bytes });
-      if (!uploaded?.ok) throw new Error(label + "图片上传失败，请检查网络、文件格式或重新登录后重试。");
-      payloadOptions[urlField] = uploaded.url;
+      payloadOptions[urlField] = await this.#uploadTemporaryImage(file, label);
     }
+    for (const file of referenceImageFiles) referenceImages.push(await this.#uploadTemporaryImage(file, "参考"));
+    payloadOptions.referenceImages = referenceImages;
+    delete payloadOptions.referenceImageFiles;
     let payload = this.api.createVideoPayload(payloadOptions);
     const beforeQuota = await this.getRawQuota().catch(() => null);
     let response = await this.sendVideoPayload(payload);
