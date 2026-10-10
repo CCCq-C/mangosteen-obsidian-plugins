@@ -102,6 +102,7 @@ global.window = {
     return id;
   },
   clearInterval(id) { clearedTimers.push(id); },
+  confirm() { return true; },
 };
 global.ResizeObserver = class FakeResizeObserver {
   constructor(callback) { this.callback = callback; this.disconnected = false; resizeObservers.push(this); }
@@ -159,6 +160,7 @@ function createPlugin(snapshot = readySnapshot, projects = [{ folder: readySnaps
     loadCalls: 0,
     saveCalls: [],
     confirmCalls: [],
+    stopCalls: [],
     openedPaths: [],
     async listWorkbenchProjects() { return clone(this.projects); },
     async loadWorkbenchProject(folder) {
@@ -171,6 +173,7 @@ function createPlugin(snapshot = readySnapshot, projects = [{ folder: readySnaps
       this.snapshot.request = clone(nextRequest);
     },
     async confirmWorkbenchDraft(folder) { this.confirmCalls.push(folder); },
+    async stopWorkbenchGeneration(folder) { this.stopCalls.push(folder); },
     async openVaultPath(vaultPath) { this.openedPaths.push(vaultPath); },
     openPrepareModal() {},
     openAnalysisModelModal() {},
@@ -474,6 +477,68 @@ function createView(plugin) {
   await assert.doesNotReject(() => failedView.onOpen());
   assert(failedView.contentEl.find((element) => element.textContent.includes("上游生成失败")));
   await failedView.onClose();
+
+  const processingPlugin = createPlugin({
+    project: {
+      ...clone(readySnapshot.project),
+      status: "generating",
+      statusText: "正在生成镜头",
+    },
+    request: { ...clone(request), confirmed: true },
+    generationState: { status: "processing", currentStep: "镜头 001", requestMtimeMs: 123 },
+  });
+  const processingView = createView(processingPlugin);
+  await processingView.onOpen();
+  const stopButton = processingView.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "停止后续生成");
+  assert(stopButton, "processing projects must expose a graceful stop button");
+  let releaseStop;
+  let stopStarted;
+  const stopBlocker = new Promise((resolve) => { releaseStop = resolve; });
+  const stopStartedPromise = new Promise((resolve) => { stopStarted = resolve; });
+  processingPlugin.stopWorkbenchGeneration = async function stopWorkbenchGeneration(folder) {
+    this.stopCalls.push(folder);
+    this.snapshot.generationState.stopRequestedAt = "2026-10-11T00:01:00Z";
+    stopStarted();
+    await stopBlocker;
+  };
+  processingView.draft.shots[0].title = "停止期间保留的本地草案";
+  processingView.dirty = true;
+  const firstStop = processingView.stopGeneration();
+  await stopStartedPromise;
+  assert.strictEqual(processingView.stopPending, true);
+  assert.strictEqual(
+    processingView.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "停止后续生成").disabled,
+    true,
+    "stop must disable synchronously while pending",
+  );
+  const secondStop = processingView.stopGeneration();
+  assert.deepStrictEqual(processingPlugin.stopCalls, [readySnapshot.project.folder]);
+  releaseStop();
+  await Promise.all([firstStop, secondStop]);
+  assert.strictEqual(processingView.stopPending, false);
+  assert.strictEqual(processingView.draft.shots[0].title, "停止期间保留的本地草案", "stop refresh must preserve a dirty draft");
+  assert.strictEqual(
+    processingView.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "停止后续生成").disabled,
+    true,
+    "a persisted stop request must keep the stop action disabled after refresh",
+  );
+  await processingView.onClose();
+
+  const failedStopPlugin = createPlugin({
+    project: { ...clone(readySnapshot.project), status: "generating" },
+    request: { ...clone(request), confirmed: true },
+    generationState: { status: "processing", requestMtimeMs: 124 },
+  });
+  failedStopPlugin.stopWorkbenchGeneration = async () => { throw new Error("停止调用失败"); };
+  const failedStopView = createView(failedStopPlugin);
+  await failedStopView.onOpen();
+  await assert.rejects(() => failedStopView.stopGeneration(), /停止调用失败/);
+  assert.strictEqual(failedStopView.stopPending, false, "failed stop must release the pending guard");
+  assert.strictEqual(
+    failedStopView.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "停止后续生成").disabled,
+    false,
+  );
+  await failedStopView.onClose();
 
   const css = fs.readFileSync(path.join(__dirname, "../styles.css"), "utf8");
   const fallbackStart = css.indexOf("@supports not (container-type: inline-size)");

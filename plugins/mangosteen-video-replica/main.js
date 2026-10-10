@@ -12,6 +12,8 @@ let workflow;
 const ROOT = "山竹视频复刻";
 const REQUEST_FILE = "generation-request.json";
 const STATE_FILE = ".work/generation-state.json";
+const STOP_FILE = ".work/stop-request.json";
+const GENERATION_STOPPED_CODE = "GENERATION_STOPPED";
 const PROCESSING_LEASE_MS = 2 * 60 * 1000;
 const DEFAULT_SETTINGS = { analysisGroup: "", analysisModel: "", imageModel: "", videoModel: "" };
 const WORKBENCH_SHOT_FIELDS = [
@@ -228,6 +230,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     this.addCommand({ id: "analyze-latest-project", name: "分析最近的视频复刻项目", callback: () => void this.analyzeLatestProject() });
     this.addCommand({ id: "confirm-latest-generation", name: "确认并开始付费生成最近项目", callback: () => void this.confirmLatestGeneration() });
     this.addCommand({ id: "concat-latest-project", name: "拼接最近已完成项目", callback: () => void this.concatLatestProject() });
+    this.addCommand({ id: "stop-latest-generation", name: "停止最近的视频复刻任务", callback: () => void this.stopLatestGeneration() });
     this.addCommand({ id: "scan-generation-requests", name: "检查已确认的视频复刻任务", callback: () => void this.scanRequests(true) });
     this.registerInterval(window.setInterval(() => void this.scanRequests(false), 5000));
     const handleProjectFileChange = (file) => {
@@ -324,6 +327,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       projectPath: path.join(checked.absoluteFolder, "project.json"),
       requestPath: path.join(checked.absoluteFolder, REQUEST_FILE),
       statePath: path.join(checked.absoluteFolder, STATE_FILE),
+      stopPath: path.join(checked.absoluteFolder, STOP_FILE),
     };
   }
 
@@ -786,13 +790,79 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     this.requestWorkbenchRefresh();
   }
 
+  stopRequestPath(projectFolder) {
+    return this.workbenchProjectPaths(projectFolder).stopPath;
+  }
+
+  isGenerationStopRequested(projectFolder, requestMtimeMs) {
+    const stopPath = this.stopRequestPath(projectFolder);
+    if (!fs.existsSync(stopPath)) return false;
+    try {
+      const stopRequest = this.readJson(stopPath);
+      return Number(stopRequest.requestMtimeMs) === Number(requestMtimeMs);
+    } catch (_) { return false; }
+  }
+
+  assertGenerationActive(projectFolder, requestMtimeMs) {
+    if (!this.isGenerationStopRequested(projectFolder, requestMtimeMs)) return;
+    const error = new Error("用户已停止视频复刻任务；已完成内容会保留，当前已提交的平台任务无法保证撤销。");
+    error.code = GENERATION_STOPPED_CODE;
+    throw error;
+  }
+
+  requestGenerationStop(projectFolder) {
+    const paths = this.workbenchProjectPaths(projectFolder);
+    if (!fs.existsSync(paths.statePath)) return false;
+    const state = this.readJson(paths.statePath);
+    if (state.status !== "processing" || !Number.isFinite(Number(state.requestMtimeMs))) return false;
+    if (fs.existsSync(paths.stopPath)) {
+      try {
+        const existing = this.readJson(paths.stopPath);
+        if (Number(existing.requestMtimeMs) === Number(state.requestMtimeMs)) return true;
+      } catch (_) { /* replace an unreadable marker atomically */ }
+    }
+    const requestedAt = new Date().toISOString();
+    writeJson(paths.stopPath, {
+      requestMtimeMs: Number(state.requestMtimeMs),
+      requestedAt,
+    });
+    state.stopRequestedAt = requestedAt;
+    state.updatedAt = requestedAt;
+    writeJson(paths.statePath, state);
+    this.requestWorkbenchRefresh();
+    try {
+      const project = this.readJson(paths.projectPath);
+      project.statusText = "已请求停止：当前已提交的平台任务完成后停止，不再提交新的付费任务。";
+      writeJson(paths.projectPath, project);
+      atomicWrite(path.join(path.dirname(paths.projectPath), "00-项目总览.md"), core.dashboardMarkdown(project));
+      this.requestWorkbenchRefresh();
+    } catch (_) { /* stop marker remains authoritative */ }
+    return true;
+  }
+
+  async stopWorkbenchGeneration(projectFolder) {
+    if (!this.requestGenerationStop(projectFolder)) throw new Error("当前项目没有正在运行的生成任务。");
+    new Notice("已请求停止；当前已提交的任务结束后，不再生成后续内容。", 8000);
+    return true;
+  }
+
+  async stopLatestGeneration() {
+    const record = this.projectRecords().find((item) => {
+      const statePath = path.join(path.dirname(item.projectPath), STATE_FILE);
+      if (!fs.existsSync(statePath)) return false;
+      try { return this.readJson(statePath).status === "processing"; } catch (_) { return false; }
+    });
+    if (!record) { new Notice("当前没有正在运行的视频复刻任务。", 6000); return false; }
+    return this.stopWorkbenchGeneration(record.project.folder);
+  }
+
   requestAlreadyHandled(projectFolder, requestMtimeMs, nowMs = Date.now()) {
     const statePath = path.join(this.absolute(projectFolder), STATE_FILE);
     if (!fs.existsSync(statePath)) return false;
     try {
       const state = this.readJson(statePath);
       if (Number(state.requestMtimeMs) !== Number(requestMtimeMs)) return false;
-      if (["completed", "completed_with_errors", "failed"].includes(state.status)) return true;
+      if (["completed", "completed_with_errors", "failed", "stopped"].includes(state.status)) return true;
       if (state.status !== "processing") return false;
       const expiresAt = Date.parse(state.leaseExpiresAt || "");
       return Number.isFinite(expiresAt) && expiresAt > Number(nowMs);
@@ -830,8 +900,9 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       if (notify) new Notice("视频复刻任务已经全部处理完成。", 7000);
     } catch (error) {
       if (projectFolder) {
-        const modelError = error?.changeModel === true && ["image", "video"].includes(error?.generationKind);
-        const status = modelError ? `generation_${error.generationKind}_model_error` : "failed";
+        const stopped = error?.code === GENERATION_STOPPED_CODE;
+        const modelError = !stopped && error?.changeModel === true && ["image", "video"].includes(error?.generationKind);
+        const status = stopped ? "stopped" : modelError ? `generation_${error.generationKind}_model_error` : "failed";
         const state = {
           status,
           requestMtimeMs,
@@ -848,7 +919,9 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         try {
           const project = this.readJson(path.join(this.absolute(projectFolder), "project.json"));
           project.status = status;
-          if (modelError) {
+          if (stopped) {
+            project.statusText = "生成已停止；已完成的参考图和视频片段均已保留。";
+          } else if (modelError) {
             const label = error.generationKind === "image" ? "图片" : "视频";
             project.generationErrorCode = state.errorCode;
             project.generationErrorStatus = state.errorStatus;
@@ -858,7 +931,10 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
           this.saveProject(projectFolder, project);
         } catch (_) {}
       }
-      if (notify) new Notice(`视频复刻失败：${String(error?.message || error)}`, 10000);
+      if (notify) new Notice(
+        error?.code === GENERATION_STOPPED_CODE ? "视频复刻已停止，已完成内容均已保留。" : `视频复刻失败：${String(error?.message || error)}`,
+        10000,
+      );
     } finally {
       if (leaseTimer) clearInterval(leaseTimer);
       this.processing.delete(requestPath);
@@ -1004,6 +1080,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
   }
 
   async runAssetGeneration(projectFolder, request, requestMtimeMs, { image, video, imageModel, model }) {
+    this.assertGenerationActive(projectFolder, requestMtimeMs);
     const projectPath = path.join(this.absolute(projectFolder), "project.json");
     const project = this.readJson(projectPath);
     const previousShots = new Map((Array.isArray(project.shots) ? project.shots : []).map((shot) => [String(shot.id), shot]));
@@ -1023,6 +1100,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     project.sceneAssets = [];
     this.saveProject(projectFolder, project);
 
+    this.assertGenerationActive(projectFolder, requestMtimeMs);
     const character = await this.ensureReferenceAsset(
       image,
       referenceAssets.resolveCharacterAsset(this.vaultPath(), request.character.id),
@@ -1039,6 +1117,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     this.saveProject(projectFolder, project);
 
     for (const product of request.products || []) {
+      this.assertGenerationActive(projectFolder, requestMtimeMs);
       state.currentStep = `产品资产 ${product.id}`;
       state.updatedAt = new Date().toISOString();
       this.writeState(projectFolder, state);
@@ -1059,6 +1138,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     }
 
     for (const scene of request.scenes) {
+      this.assertGenerationActive(projectFolder, requestMtimeMs);
       state.currentStep = `场景资产 ${scene.id}`;
       state.updatedAt = new Date().toISOString();
       this.writeState(projectFolder, state);
@@ -1132,6 +1212,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     this.saveProject(projectFolder, project);
 
     for (const shot of project.shots) {
+      this.assertGenerationActive(projectFolder, requestMtimeMs);
       state.currentStep = `镜头 ${shot.id}`;
       state.updatedAt = new Date().toISOString();
       this.writeState(projectFolder, state);
@@ -1139,6 +1220,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       shot.status = shot.firstImagePath ? "复用已有首帧" : "正在生成首帧";
       this.saveProject(projectFolder, project);
       try {
+        this.assertGenerationActive(projectFolder, requestMtimeMs);
         const sceneAsset = sceneAssetsById.get(shot.sceneId);
         if (!sceneAsset) throw new Error(`镜头 ${shot.id} 找不到场景资产：${shot.sceneId}`);
         const shotProductAssets = (shot.productIds || []).map((productId) => {
@@ -1161,6 +1243,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         ].join("\n");
         const firstPrompt = `${shot.imagePrompt}\n${continuity}`;
         if (!shot.firstImagePath) {
+          this.assertGenerationActive(projectFolder, requestMtimeMs);
           const firstCandidate = await this.generateImageMulti(image, firstPrompt, referencePaths, imageModel);
           shot.firstImagePath = await this.saveImageCandidate(
             image,
@@ -1171,6 +1254,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         shot.imagePath = shot.firstImagePath;
 
         if (shot.lastImagePrompt && !shot.lastImagePath) {
+          this.assertGenerationActive(projectFolder, requestMtimeMs);
           shot.status = "正在生成尾帧";
           this.saveProject(projectFolder, project);
           const lastCandidate = await this.generateImageMulti(image, `${shot.lastImagePrompt}\n${continuity}`, referencePaths, imageModel);
@@ -1183,6 +1267,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
 
         shot.status = "正在生成视频";
         this.saveProject(projectFolder, project);
+        this.assertGenerationActive(projectFolder, requestMtimeMs);
         let task;
         let completed;
         try {
@@ -1207,6 +1292,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         shot.videoPath = this.copyVaultFile(completed.localPath, `${projectFolder}/03-视频片段/镜头-${shot.id}-${core.safeSegment(shot.title)}.mp4`);
         shot.status = "已完成";
       } catch (error) {
+        if (error?.code === GENERATION_STOPPED_CODE) throw error;
         if (error?.changeModel === true) throw error;
         shot.status = "失败";
         shot.error = String(error?.message || error);
@@ -1222,6 +1308,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
   }
 
   async runGeneration(projectFolder, request, requestMtimeMs) {
+    this.assertGenerationActive(projectFolder, requestMtimeMs);
     const { image, video } = this.getGenerationPlugins();
     const [imageAccess, access] = await Promise.all([image.refreshAgentAccess(), video.refreshAgentAccess()]);
     const imageModels = Object.keys(imageAccess?.imageModelKeys || {});
@@ -1250,23 +1337,27 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     project.shots = request.shots.map((shot) => ({ ...shot, status: "等待生成", imagePath: "", videoPath: "", error: "" }));
     this.saveProject(projectFolder, project);
 
+    this.assertGenerationActive(projectFolder, requestMtimeMs);
     const characterCandidate = await this.generateImage(image, request.character.prompt, "", imageModel);
     project.characterImagePath = await this.saveImageCandidate(image, characterCandidate, `${projectFolder}/01-人物参考/人物三视图.png`);
     project.statusText = "人物参考完成，正在生成分镜";
     this.saveProject(projectFolder, project);
 
     for (const shot of project.shots) {
+      this.assertGenerationActive(projectFolder, requestMtimeMs);
       state.currentStep = `镜头 ${shot.id}`;
       state.updatedAt = new Date().toISOString();
       this.writeState(projectFolder, state);
       shot.status = "正在生成参考图";
       this.saveProject(projectFolder, project);
       try {
+        this.assertGenerationActive(projectFolder, requestMtimeMs);
         const imagePrompt = `${shot.imagePrompt}\n保持参考人物的脸部、发型、服装和年龄一致。`;
         const shotCandidate = await this.generateImage(image, imagePrompt, project.characterImagePath, imageModel);
         shot.imagePath = await this.saveImageCandidate(image, shotCandidate, `${projectFolder}/02-分镜脚本/镜头-${shot.id}-${core.safeSegment(shot.title)}.png`);
         shot.status = "正在生成视频";
         this.saveProject(projectFolder, project);
+        this.assertGenerationActive(projectFolder, requestMtimeMs);
         let task;
         let completed;
         try {
@@ -1290,6 +1381,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         shot.videoPath = this.copyVaultFile(completed.localPath, `${projectFolder}/03-视频片段/镜头-${shot.id}-${core.safeSegment(shot.title)}.mp4`);
         shot.status = "已完成";
       } catch (error) {
+        if (error?.code === GENERATION_STOPPED_CODE) throw error;
         if (error?.changeModel === true) throw error;
         shot.status = "失败";
         shot.error = String(error?.message || error);

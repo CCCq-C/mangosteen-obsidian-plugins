@@ -87,6 +87,7 @@ function deriveWorkbenchState(options = {}) {
     statusText: text(project.statusText),
     locked,
     canConfirm: !locked && project.status === "analysis_ready" && request.confirmed === false,
+    canStop: processing && !text(generationState.stopRequestedAt),
     progress: calculateStageProgress({ project, request, generationState }),
     current: {
       step: text(generationState.currentStep),
@@ -117,6 +118,7 @@ function stateSignature(viewModel) {
     statusText: state.statusText,
     locked: state.locked,
     canConfirm: state.canConfirm,
+    canStop: state.canStop,
     progress: state.progress,
     current: state.current,
     assets: state.assets,

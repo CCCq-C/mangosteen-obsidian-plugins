@@ -16,6 +16,7 @@ assert.deepStrictEqual(empty, {
   statusText: "",
   locked: true,
   canConfirm: false,
+  canStop: false,
   progress: { percent: 0, indeterminate: false, label: "等待开始" },
   current: { step: "", model: "", elapsedMs: 0 },
   assets: { character: null, products: [], scenes: [] },
@@ -40,6 +41,7 @@ assert.strictEqual(ready.empty, false);
 assert.strictEqual(ready.progress.percent, 30);
 assert.strictEqual(ready.locked, false);
 assert.strictEqual(ready.canConfirm, true);
+assert.strictEqual(ready.canStop, false);
 
 const assetsReady = deriveWorkbenchState({
   project: {
@@ -93,6 +95,14 @@ assert.strictEqual(generating.current.elapsedMs, 120000);
 assert.deepStrictEqual(generating.current, { step: "镜头 002", model: "MiniMax-H3", elapsedMs: 120000 });
 assert.strictEqual(generating.locked, true);
 assert.strictEqual(generating.canConfirm, false);
+assert.strictEqual(generating.canStop, true);
+
+const stopping = deriveWorkbenchState({
+  project: { status: "generating" },
+  request: { confirmed: true },
+  generationState: { status: "processing", stopRequestedAt: "2026-10-11T00:01:00Z" },
+});
+assert.strictEqual(stopping.canStop, false, "a recorded stop request must disable repeated stop actions");
 
 assert.deepStrictEqual(calculateStageProgress({
   project: {
@@ -136,6 +146,7 @@ assert.deepStrictEqual(legacy.assets.products, []);
 assert.deepStrictEqual(legacy.current, { step: "", model: "", elapsedMs: 0 });
 assert.strictEqual(legacy.error, null);
 assert.strictEqual(legacy.canConfirm, true);
+assert.strictEqual(legacy.canStop, false);
 
 assert.deepStrictEqual(deriveWorkbenchState({
   project: [],

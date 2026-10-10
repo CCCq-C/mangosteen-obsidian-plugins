@@ -79,6 +79,8 @@ class VideoReplicaWorkbenchView extends ItemView {
     this.saveStatusElements = [];
     this.confirmButtons = [];
     this.confirmPending = false;
+    this.stopButtons = [];
+    this.stopPending = false;
   }
 
   getViewType() { return VIEW_TYPE; }
@@ -194,6 +196,7 @@ class VideoReplicaWorkbenchView extends ItemView {
     this.saveButtons = [];
     this.saveStatusElements = [];
     this.confirmButtons = [];
+    this.stopButtons = [];
 
     const frame = this.contentEl.createDiv({ cls: "mangosteen-replica-frame" });
     this.renderToolbar(frame);
@@ -292,6 +295,13 @@ class VideoReplicaWorkbenchView extends ItemView {
       "",
       this.confirmPending || this.editingLocked() || !this.viewModel.canConfirm,
     ));
+    this.stopButtons.push(this.createButton(
+      actions,
+      "停止后续生成",
+      () => this.stopGeneration(),
+      "mod-warning",
+      this.stopPending || !this.viewModel.canStop,
+    ));
     this.createButton(actions, "打开项目总览", () => this.plugin.openVaultPath(`${this.viewModel.folder}/00-项目总览.md`));
 
     const progressCard = parent.createDiv({ cls: "mangosteen-replica-card mangosteen-replica-progress-card" });
@@ -314,6 +324,25 @@ class VideoReplicaWorkbenchView extends ItemView {
     const metric = parent.createDiv({ cls: "mangosteen-replica-metric" });
     metric.createEl("span", { text: label });
     metric.createEl("strong", { text: value });
+  }
+
+  async stopGeneration() {
+    if (this.stopPending || !this.viewModel.canStop || !this.selectedFolder) return false;
+    const confirmed = typeof window === "undefined" || typeof window.confirm !== "function" || window.confirm(
+      "停止后不会再提交新的付费生成任务；已经提交到平台的当前任务仍会完成并可能产生费用。确定停止吗？",
+    );
+    if (!confirmed) return false;
+    this.stopPending = true;
+    this.syncStopState();
+    try {
+      await this.plugin.stopWorkbenchGeneration(this.selectedFolder);
+      this.feedback = "已请求停止：当前已提交的任务完成后，不再生成后续内容。";
+      await this.refresh({ force: true });
+      return true;
+    } finally {
+      this.stopPending = false;
+      this.syncStopState();
+    }
   }
 
   renderAssets(parent) {
@@ -507,6 +536,11 @@ class VideoReplicaWorkbenchView extends ItemView {
   syncConfirmState() {
     const disabled = this.confirmPending || this.editingLocked() || !this.viewModel.canConfirm;
     for (const button of this.confirmButtons) button.disabled = disabled;
+  }
+
+  syncStopState() {
+    const disabled = this.stopPending || !this.viewModel.canStop;
+    for (const button of this.stopButtons) button.disabled = disabled;
   }
 
   createDetails(parent, key, label, defaultOpen) {
