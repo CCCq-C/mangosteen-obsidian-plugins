@@ -1,4 +1,3 @@
-const { ItemView } = require("obsidian");
 const { normalizeGenerationRequest } = require("./replica-core.cjs");
 const {
   isDraftLocked,
@@ -53,7 +52,10 @@ function formatElapsed(milliseconds) {
   return `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
-class VideoReplicaWorkbenchView extends ItemView {
+function createVideoReplicaWorkbenchView(ItemView) {
+  if (typeof ItemView !== "function") throw new Error("视频复刻工作台缺少 Obsidian ItemView。请重新加载插件。");
+
+  return class VideoReplicaWorkbenchView extends ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     this.plugin = plugin;
@@ -606,9 +608,10 @@ class VideoReplicaWorkbenchView extends ItemView {
     this.render();
     this.renderSignature = this.buildRenderSignature();
   }
+  };
 }
 
 module.exports = {
   VIEW_TYPE,
-  VideoReplicaWorkbenchView,
+  createVideoReplicaWorkbenchView,
 };

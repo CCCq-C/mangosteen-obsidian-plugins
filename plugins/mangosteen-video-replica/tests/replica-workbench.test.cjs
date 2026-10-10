@@ -112,8 +112,15 @@ global.ResizeObserver = class FakeResizeObserver {
 
 const {
   VIEW_TYPE,
-  VideoReplicaWorkbenchView,
+  createVideoReplicaWorkbenchView,
 } = require("../replica-workbench.cjs");
+const VideoReplicaWorkbenchView = createVideoReplicaWorkbenchView(FakeItemView);
+
+assert.strictEqual(
+  fs.readFileSync(path.resolve(__dirname, "../replica-workbench.cjs"), "utf8").includes('require("obsidian")'),
+  false,
+  "dynamically loaded workbench modules must receive Obsidian APIs from main.js",
+);
 
 const request = {
   version: 3,

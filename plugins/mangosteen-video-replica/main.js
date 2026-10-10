@@ -1,4 +1,4 @@
-const { Modal, Notice, Plugin, requestUrl } = require("obsidian");
+const { ItemView, Modal, Notice, Plugin, requestUrl } = require("obsidian");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
@@ -217,6 +217,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     replicaEditor = require(path.join(pluginRoot, "replica-editor.cjs"));
     workflow = require(path.join(pluginRoot, "replica-cli.cjs"));
     const workbench = require(path.join(pluginRoot, "replica-workbench.cjs"));
+    const VideoReplicaWorkbenchView = workbench.createVideoReplicaWorkbenchView(ItemView);
     this.pluginRoot = pluginRoot;
     this.workbenchViewType = workbench.VIEW_TYPE;
     this.instanceId = crypto.randomUUID();
@@ -225,7 +226,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     this.referenceAssetPromises = new Map();
     const savedSettings = typeof this.loadData === "function" ? await this.loadData() : null;
     this.settings = Object.assign({}, DEFAULT_SETTINGS, savedSettings && typeof savedSettings === "object" ? savedSettings : {});
-    this.registerView(this.workbenchViewType, (leaf) => new workbench.VideoReplicaWorkbenchView(leaf, this));
+    this.registerView(this.workbenchViewType, (leaf) => new VideoReplicaWorkbenchView(leaf, this));
     this.addRibbonIcon("clapperboard", "山竹视频复刻", () => void this.activateWorkbench());
     this.addCommand({ id: "open-video-replica-workbench", name: "打开视频复刻制作驾驶舱", callback: () => void this.activateWorkbench() });
     this.addCommand({ id: "prepare-local-video", name: "从本地视频新建复刻项目", callback: () => this.openPrepareModal() });
