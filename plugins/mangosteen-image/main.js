@@ -3,6 +3,7 @@ const path = require("path");
 
 const API_BASE = "https://apimodel.aihubkit.com";
 const HISTORY_ROOT = "生图记录";
+const IMAGE_TASK_WAIT_ATTEMPTS = 450;
 const DEFAULT_SETTINGS = { imageTasks: [], model: "gpt-image-2", size: "1024x1024", count: 1, editCount: 1 };
 const preferredImageModel = (models, current) => models.includes(current)
   ? current
@@ -551,7 +552,7 @@ module.exports = class MangosteenImagePlugin extends Plugin {
     return response.json;
   }
   async waitForImageTask(task) {
-    for (let attempt = 0; attempt < 90; attempt += 1) {
+    for (let attempt = 0; attempt < IMAGE_TASK_WAIT_ATTEMPTS; attempt += 1) {
       const response = await this.fetchImageTask(task);
       const results = this.extractResults(response);
       task.progress = this.api.readImageTaskProgress(response);

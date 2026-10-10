@@ -36,7 +36,7 @@ copy_plugin_files() {
 
 copy_plugin_files mangosteen-image \
   main.js image-api.cjs manifest.json styles.css \
-  tests/image-api.test.cjs
+  tests/image-api.test.cjs tests/image-plugin.test.cjs
 
 copy_plugin_files mangosteen-video \
   main.js video-api.cjs manifest.json styles.css \

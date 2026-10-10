@@ -356,6 +356,8 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
 
   await plugin.runGeneration(generatedV2Folder, requestV2, 457);
   assert.deepStrictEqual(generatedTextPrompts, ["固定人物参考板", "摄影棚场景"], "existing assets must be reused");
+  assert.strictEqual(editCalls.length, 3, "retrying an unchanged project must reuse saved keyframes");
+  assert.strictEqual(submittedV2Options.length, 2, "retrying a completed unchanged project must not submit duplicate videos");
 
   const concurrentFolders = ["山竹视频复刻/并发任务一", "山竹视频复刻/并发任务二"];
   for (const folder of concurrentFolders) {

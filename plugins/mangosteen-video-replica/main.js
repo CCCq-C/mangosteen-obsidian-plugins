@@ -278,6 +278,8 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
   async runAssetGeneration(projectFolder, request, requestMtimeMs, { image, video, model }) {
     const projectPath = path.join(this.absolute(projectFolder), "project.json");
     const project = this.readJson(projectPath);
+    const previousModel = String(project.videoModel || "");
+    const previousShots = new Map((Array.isArray(project.shots) ? project.shots : []).map((shot) => [String(shot.id), shot]));
     const state = { status: "processing", requestMtimeMs, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), currentStep: "人物资产" };
     this.writeState(projectFolder, state);
     project.status = "generating";
@@ -285,15 +287,40 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     project.videoModel = model;
     project.characterAsset = null;
     project.sceneAssets = [];
-    project.shots = request.shots.map((shot) => ({
-      ...shot,
-      status: "等待生成",
-      imagePath: "",
-      firstImagePath: "",
-      lastImagePath: "",
-      videoPath: "",
-      error: "",
-    }));
+    project.shots = request.shots.map((shot) => {
+      const previous = previousShots.get(String(shot.id));
+      const sameKeyframes = previous
+        && previous.title === shot.title
+        && previous.sceneId === shot.sceneId
+        && previous.imagePrompt === shot.imagePrompt
+        && String(previous.lastImagePrompt || "") === String(shot.lastImagePrompt || "");
+      const firstImagePath = `${projectFolder}/02-分镜脚本/镜头-${shot.id}-${core.safeSegment(shot.title)}-首帧.png`;
+      const lastImagePath = shot.lastImagePrompt
+        ? `${projectFolder}/02-分镜脚本/镜头-${shot.id}-${core.safeSegment(shot.title)}-尾帧.png`
+        : "";
+      const videoPath = `${projectFolder}/03-视频片段/镜头-${shot.id}-${core.safeSegment(shot.title)}.mp4`;
+      const reusable = (candidate, expected) => Boolean(
+        expected
+        && candidate === expected
+        && fs.statSync(this.absolute(expected), { throwIfNoEntry: false })?.isFile()
+      );
+      const reusableFirst = sameKeyframes && reusable(previous.firstImagePath || previous.imagePath, firstImagePath) ? firstImagePath : "";
+      const reusableLast = sameKeyframes && reusable(previous.lastImagePath, lastImagePath) ? lastImagePath : "";
+      const sameVideo = sameKeyframes
+        && previous.videoPrompt === shot.videoPrompt
+        && Number(previous.duration) === Number(shot.duration)
+        && previousModel === model;
+      const reusableVideo = sameVideo && reusable(previous.videoPath, videoPath) ? videoPath : "";
+      return {
+        ...shot,
+        status: reusableVideo ? "已完成" : "等待生成",
+        imagePath: reusableFirst,
+        firstImagePath: reusableFirst,
+        lastImagePath: reusableLast,
+        videoPath: reusableVideo,
+        error: "",
+      };
+    });
     this.saveProject(projectFolder, project);
 
     const character = await this.ensureReferenceAsset(
@@ -335,7 +362,8 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       state.currentStep = `镜头 ${shot.id}`;
       state.updatedAt = new Date().toISOString();
       this.writeState(projectFolder, state);
-      shot.status = "正在生成首帧";
+      if (shot.videoPath) continue;
+      shot.status = shot.firstImagePath ? "复用已有首帧" : "正在生成首帧";
       this.saveProject(projectFolder, project);
       try {
         const sceneAsset = sceneAssetsById.get(shot.sceneId);
@@ -343,15 +371,17 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         const referencePaths = [project.characterAsset.imagePath, sceneAsset.imagePath];
         const continuity = "保持参考人物的脸部、发型、服装和年龄一致，并保持场景一致。";
         const firstPrompt = `${shot.imagePrompt}\n${continuity}`;
-        const firstCandidate = await this.generateImageMulti(image, firstPrompt, referencePaths);
-        shot.firstImagePath = await this.saveImageCandidate(
-          image,
-          firstCandidate,
-          `${projectFolder}/02-分镜脚本/镜头-${shot.id}-${core.safeSegment(shot.title)}-首帧.png`,
-        );
+        if (!shot.firstImagePath) {
+          const firstCandidate = await this.generateImageMulti(image, firstPrompt, referencePaths);
+          shot.firstImagePath = await this.saveImageCandidate(
+            image,
+            firstCandidate,
+            `${projectFolder}/02-分镜脚本/镜头-${shot.id}-${core.safeSegment(shot.title)}-首帧.png`,
+          );
+        }
         shot.imagePath = shot.firstImagePath;
 
-        if (shot.lastImagePrompt) {
+        if (shot.lastImagePrompt && !shot.lastImagePath) {
           shot.status = "正在生成尾帧";
           this.saveProject(projectFolder, project);
           const lastCandidate = await this.generateImageMulti(image, `${shot.lastImagePrompt}\n${continuity}`, referencePaths);

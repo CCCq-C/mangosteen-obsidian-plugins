@@ -148,14 +148,14 @@ const baseOptions = {
   assert.strictEqual(limitPaidRequests, 0);
 
   let paidRequests = 0;
-  const failingPlugin = makePlugin(async () => ({ ok: false }));
+  const failingPlugin = makePlugin(async () => ({ ok: false, code: "NETWORK_UNAVAILABLE" }));
   failingPlugin.sendVideoPayload = async () => {
     paidRequests += 1;
     return { status: 200, json: { id: "must-not-exist" } };
   };
   await assert.rejects(
     failingPlugin.submitVideo({ ...baseOptions, referenceImageFiles: [files[0]] }),
-    /参考图片上传失败/
+    /参考图片上传失败.*NETWORK_UNAVAILABLE/
   );
   assert.strictEqual(paidRequests, 0);
 
