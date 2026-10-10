@@ -1,0 +1,9 @@
+{
+  "id": "mangosteen-video-replica",
+  "name": "山竹视频复刻",
+  "version": "1.0.0",
+  "minAppVersion": "1.4.0",
+  "description": "从本地视频拆解人物、台词和分镜，并调用山竹算力生成参考图与分镜视频。",
+  "author": "山竹智能体",
+  "isDesktopOnly": true
+}

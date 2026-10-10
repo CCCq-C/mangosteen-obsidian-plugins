@@ -1,0 +1,16 @@
+.mangosteen-replica-modal input[type="file"] {
+  display: block;
+  width: 100%;
+  margin: 14px 0;
+}
+
+.mangosteen-replica-modal button {
+  margin-top: 14px;
+}
+
+.mangosteen-replica-status {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--background-secondary);
+  color: var(--text-muted);
+}

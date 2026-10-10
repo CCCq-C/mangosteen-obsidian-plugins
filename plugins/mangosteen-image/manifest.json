@@ -1,0 +1,9 @@
+{
+  "id": "mangosteen-image",
+  "name": "山竹生图",
+  "version": "5.3.26",
+  "minAppVersion": "1.4.0",
+  "description": "在山竹智能体中使用自己的 AIHubKit API Key 生成和编辑图片。",
+  "author": "山竹智能体",
+  "isDesktopOnly": true
+}

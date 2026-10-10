@@ -1,0 +1,55 @@
+.mangosteen-video-modal { width: min(920px, 94vw); }
+.mangosteen-video-modal .modal-content { padding: 0; }
+.mangosteen-video-shell { display: grid; gap: 18px; padding: 24px; }
+.mangosteen-video-hero { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 20px; border: 1px solid var(--background-modifier-border); border-radius: 18px; background: linear-gradient(135deg, color-mix(in srgb, var(--interactive-accent) 18%, var(--background-primary)), var(--background-secondary)); }
+.mangosteen-video-hero h2 { margin: 0 0 6px; font-size: 28px; }
+.mangosteen-video-hero p { margin: 0; color: var(--text-muted); }
+.mangosteen-video-balance { flex: none; padding: 8px 12px; border-radius: 999px; background: var(--background-primary); font-weight: 650; }
+.mangosteen-video-section { display: grid; gap: 12px; padding: 18px; border: 1px solid var(--background-modifier-border); border-radius: 16px; background: var(--background-secondary); }
+.mangosteen-video-section h3 { margin: 0; }
+.mangosteen-video-field { display: grid; gap: 7px; }
+.mangosteen-video-field > label { color: var(--text-muted); font-size: 13px; font-weight: 650; }
+.mangosteen-video-field textarea { min-height: 120px; resize: vertical; }
+.mangosteen-video-field input,
+.mangosteen-video-field textarea,
+.mangosteen-video-field select { width: 100%; }
+.mangosteen-video-grid { display: grid; grid-template-columns: repeat(4, minmax(110px, 1fr)); gap: 10px; }
+.mangosteen-video-advanced { padding: 12px; border: 1px solid var(--background-modifier-border); border-radius: 12px; }
+.mangosteen-video-advanced summary { cursor: pointer; font-weight: 650; }
+.mangosteen-video-audio-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 14px; padding: 10px 12px; border-radius: 10px; background: var(--background-primary); }
+.mangosteen-video-audio-copy { display: grid; gap: 2px; }
+.mangosteen-video-audio-copy strong { font-size: 13px; }
+.mangosteen-video-audio-copy span { color: var(--text-muted); font-size: 11px; }
+.mangosteen-video-audio-toggle { position: relative; flex: none; width: 40px; height: 22px; cursor: pointer; }
+.mangosteen-video-audio-toggle input { position: absolute; inset: 0; z-index: 2; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+.mangosteen-video-audio-track { display: block; width: 100%; height: 100%; border-radius: 999px; background: var(--background-modifier-border-hover); transition: background .18s ease; }
+.mangosteen-video-audio-track::after { content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: var(--background-primary); box-shadow: 0 1px 4px rgba(0, 0, 0, .22); transition: transform .18s ease; }
+.mangosteen-video-audio-toggle input:checked + .mangosteen-video-audio-track { background: var(--interactive-accent); }
+.mangosteen-video-audio-toggle input:checked + .mangosteen-video-audio-track::after { transform: translateX(18px); }
+.mangosteen-video-audio-toggle input:focus-visible + .mangosteen-video-audio-track { outline: 2px solid var(--interactive-accent); outline-offset: 2px; }
+.mangosteen-video-frame-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 220px)); gap: 12px; margin-top: 12px; }
+.mangosteen-video-frame-item { position: relative; }
+.mangosteen-video-frame-upload { position: relative; display: grid; place-items: center; aspect-ratio: 1; overflow: hidden; border: 1px dashed var(--interactive-accent); border-radius: 12px; color: var(--text-muted); cursor: pointer; background: var(--background-primary); }
+.mangosteen-video-frame-upload input { position: absolute; inset: 0; z-index: 2; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
+.mangosteen-video-frame-placeholder { display: grid; gap: 6px; place-items: center; padding: 16px; text-align: center; }
+.mangosteen-video-frame-placeholder strong { color: var(--text-normal); }
+.mangosteen-video-frame-preview { width: 100%; height: 100%; object-fit: cover; }
+.mangosteen-video-frame-caption { position: absolute; z-index: 1; right: 8px; bottom: 8px; padding: 4px 7px; border-radius: 7px; color: white; font-size: 11px; background: rgba(0, 0, 0, .62); }
+.mangosteen-video-frame-clear { position: absolute; z-index: 3; top: 8px; right: 8px; min-width: 0; padding: 4px 8px; font-size: 11px; }
+.mangosteen-video-price { padding: 10px 12px; border-radius: 10px; background: var(--background-primary); color: var(--text-muted); font-weight: 650; }
+.mangosteen-video-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.mangosteen-video-primary { background: var(--interactive-accent); color: var(--text-on-accent); }
+.mangosteen-video-status { min-height: 22px; color: var(--interactive-accent); }
+.mangosteen-video-status.is-error { color: var(--text-error); }
+.mangosteen-video-task-list { display: grid; gap: 12px; }
+.mangosteen-video-task-card { display: grid; gap: 8px; padding: 14px; border: 1px solid var(--background-modifier-border); border-radius: 14px; background: var(--background-primary); }
+.mangosteen-video-task-card video { width: 100%; max-height: 420px; border-radius: 12px; background: #111; }
+.mangosteen-video-task-meta { color: var(--text-muted); font-size: 12px; }
+.mangosteen-video-task-log-detail { padding: 9px 10px; border-radius: 9px; background: var(--background-secondary); white-space: pre-wrap; }
+.mangosteen-video-task-log-meta { color: var(--text-muted); font-size: 11px; overflow-wrap: anywhere; }
+.mangosteen-video-progress { height: 7px; overflow: hidden; border-radius: 999px; background: var(--background-modifier-border); }
+.mangosteen-video-progress > span { display: block; height: 100%; width: var(--mangosteen-progress, 35%); background: linear-gradient(90deg, var(--interactive-accent), #a77cff); transition: width .25s ease; }
+.mangosteen-video-progress.is-indeterminate > span { width: 35%; animation: mangosteen-video-slide 1.4s ease-in-out infinite; }
+@keyframes mangosteen-video-slide { from { transform: translateX(-110%); } to { transform: translateX(300%); } }
+@media (max-width: 720px) { .mangosteen-video-grid { grid-template-columns: 1fr 1fr; } .mangosteen-video-hero { align-items: flex-start; flex-direction: column; } }
+@media (max-width: 520px) { .mangosteen-video-frame-grid { grid-template-columns: minmax(0, 1fr); } }
