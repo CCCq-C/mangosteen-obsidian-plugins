@@ -40,6 +40,45 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   plugin.app = { vault: { adapter: { getBasePath: () => vault } } };
   plugin.processing = new Set();
 
+  const blockedFolder = "山竹视频复刻/模型预检";
+  const blockedProject = path.join(vault, ...blockedFolder.split("/"));
+  fs.mkdirSync(blockedProject, { recursive: true });
+  fs.writeFileSync(path.join(blockedProject, "project.json"), JSON.stringify({ folder: blockedFolder, title: "模型预检", frames: [], shots: [] }));
+  const blockedCases = [
+    { name: "Kling", model: "KlingO3", accountModels: ["KlingO3", "MiniMax-H3"] },
+    { name: "Wan", model: "wan3.0-video-prime", accountModels: ["wan3.0-video-prime", "seedance-2.5"] },
+    { name: "unknown", model: "future-video-model", accountModels: ["future-video-model", "MiniMax-H3"] },
+    { name: "supported but unavailable", model: "MiniMax-H3", accountModels: ["seedance-2.5"] },
+  ];
+  for (const testCase of blockedCases) {
+    const calls = { generateText: 0, generateEdit: 0, generateEditMulti: 0, submitVideo: 0 };
+    const blockedImage = {
+      generateText: async () => { calls.generateText += 1; return {}; },
+      generateEdit: async () => { calls.generateEdit += 1; return {}; },
+      generateEditMulti: async () => { calls.generateEditMulti += 1; return {}; },
+      extractResults: () => [{ kind: "base64", value: Buffer.from("image").toString("base64") }],
+    };
+    const blockedVideo = {
+      settings: { model: testCase.model, resolution: "720p" },
+      refreshAgentAccess: async () => ({
+        videoModelKeys: Object.fromEntries(testCase.accountModels.map((model) => [model, "test-key"])),
+      }),
+      submitVideo: async () => { calls.submitVideo += 1; throw new Error("paid video operation reached"); },
+    };
+    plugin.getGenerationPlugins = () => ({ image: blockedImage, video: blockedVideo });
+    await assert.rejects(() => plugin.runGeneration(blockedFolder, {
+      character: { prompt: "人物三视图" },
+      settings: { ratio: "9:16", resolution: "720p", videoModel: testCase.model },
+      shots: [{ id: 1, title: "开场", duration: 5, imagePrompt: "人物站立", videoPrompt: "人物向前走" }],
+    }, 123), /视频复刻不能使用模型/, testCase.name);
+    assert.deepStrictEqual(calls, {
+      generateText: 0,
+      generateEdit: 0,
+      generateEditMulti: 0,
+      submitVideo: 0,
+    }, testCase.name);
+  }
+
   const requestPath = path.join(project, "generation-request.json");
   await plugin.processRequest(requestPath);
   const state = JSON.parse(fs.readFileSync(path.join(project, ".work/generation-state.json"), "utf8"));
