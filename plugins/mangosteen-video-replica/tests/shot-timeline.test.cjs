@@ -75,6 +75,11 @@ assert.deepStrictEqual(legacy, [{
   camera: "中景缓慢推进",
   environment: "明亮摄影棚",
 }]);
+assert.strictEqual(
+  legacyTimeline({ duration: 4, plot: "剧情摘要", videoPrompt: "包含完整运镜细节的视频提示词" })[0].action,
+  "包含完整运镜细节的视频提示词",
+  "legacy conversion must not discard the richer video prompt",
+);
 
 const prompt = compileTimelinePrompt(timeline, {
   duration: 14,

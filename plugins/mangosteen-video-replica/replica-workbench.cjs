@@ -217,7 +217,11 @@ function createVideoReplicaWorkbenchView(ItemView) {
       };
       const folderChanged = previousFolder !== text(nextSnapshot.project.folder);
       if (folderChanged) this.dirty = false;
-      if (!this.dirty || folderChanged || !this.draft) this.draft = editableRequest(nextSnapshot.request);
+      if (!this.dirty || folderChanged || !this.draft) {
+        const sourceVersion = Number(nextSnapshot.request?.version || 1);
+        this.draft = editableRequest(nextSnapshot.request);
+        if (sourceVersion < 4 && Number(this.draft?.version) === 4) this.dirty = true;
+      }
       this.snapshot = nextSnapshot;
       this.viewModel = deriveWorkbenchState(nextSnapshot);
       const availableShotIds = new Set(list(this.draft?.shots).map((shot) => String(shot.id)));

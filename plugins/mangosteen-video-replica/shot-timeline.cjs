@@ -44,7 +44,7 @@ function legacyTimeline(shot = {}) {
   return [{
     start: 0,
     end: Number.isFinite(duration) && duration > 0 ? duration : 4,
-    action: clean(shot.plot || shot.videoPrompt),
+    action: clean(shot.videoPrompt || shot.plot),
     dialogue: clean(shot.dialogue),
     performance: clean(shot.voiceDirection),
     camera: clean(shot.camera),

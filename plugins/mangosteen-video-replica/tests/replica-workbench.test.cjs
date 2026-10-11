@@ -463,12 +463,14 @@ function createView(plugin) {
       videoPrompt: "人物走入画面",
     }],
   };
-  const v1View = createView(createPlugin({
+  const v1Plugin = createPlugin({
     ...clone(readySnapshot),
     request: v1Request,
     project: { ...clone(readySnapshot.project), shots: [{ id: "001", title: "旧版开场", status: "等待生成" }] },
-  }));
+  });
+  const v1View = createView(v1Plugin);
   await v1View.onOpen();
+  assert.strictEqual(v1View.dirty, true, "an in-memory legacy migration must be saved before previewing paid generation");
   assert.strictEqual(v1View.draft.version, 4, "v1 drafts must migrate in memory before the timeline editor opens");
   assert.strictEqual(v1View.draft.shots[0].timeline.length, 1);
   assert.strictEqual(v1View.draft.shots[0].sceneId, "legacy-scene-001");
@@ -481,6 +483,19 @@ function createView(plugin) {
   await v1Action.dispatch("input");
   assert.strictEqual(v1View.draft.shots[0].timeline[0].action, "用户修改后的旧版动作");
   await v1View.onClose();
+
+  const v1DirectPlugin = createPlugin({
+    ...clone(readySnapshot),
+    request: v1Request,
+    project: { ...clone(readySnapshot.project), shots: [{ id: "001", title: "旧版开场", status: "等待生成" }] },
+  });
+  const v1DirectView = createView(v1DirectPlugin);
+  await v1DirectView.onOpen();
+  assert.strictEqual(await v1DirectView.generateShots(["001"]), true);
+  assert.strictEqual(v1DirectPlugin.saveCalls.length, 1, "direct generation must persist the migrated v4 draft first");
+  assert.strictEqual(v1DirectPlugin.saveCalls[0].request.version, 4);
+  assert.strictEqual(v1DirectPlugin.queueCalls.length, 1);
+  await v1DirectView.onClose();
 
   const duplicateIdentityRequest = {
     ...clone(request),
