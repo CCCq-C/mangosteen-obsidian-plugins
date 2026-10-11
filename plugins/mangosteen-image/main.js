@@ -638,10 +638,27 @@ module.exports = class MangosteenImagePlugin extends Plugin {
     if (response.status >= 400) throw new Error(this.extractApiError(response.json, response.status));
     return response.json;
   }
+  isRetryableTaskPollError(error) {
+    return /ERR_NETWORK_CHANGED|network|timeout|timed out|ENOTFOUND|ECONN|EAI_AGAIN|socket|fetch failed|load failed/i.test(String(error?.message || error || ""));
+  }
   async waitForImageTask(task) {
     for (let attempt = 0; attempt < IMAGE_TASK_WAIT_ATTEMPTS; attempt += 1) {
-      const response = await this.fetchImageTask(task);
+      let response;
+      try {
+        response = await this.fetchImageTask(task);
+      } catch (error) {
+        if (!this.isRetryableTaskPollError(error)) throw error;
+        task.status = "retrying";
+        task.lastCheckedAt = new Date().toISOString();
+        task.lastError = `查询中断，正在自动重新连接：${this.toChineseError(error).replace(/^生成失败：/, "")}`;
+        await this.saveSettings();
+        this.refreshImageTaskViews();
+        await new Promise((resolve) => window.setTimeout(resolve, 2000));
+        continue;
+      }
       const results = this.extractResults(response);
+      task.lastCheckedAt = new Date().toISOString();
+      task.lastError = "";
       task.progress = this.api.readImageTaskProgress(response);
       if (results.length) {
         task.status = "completed";

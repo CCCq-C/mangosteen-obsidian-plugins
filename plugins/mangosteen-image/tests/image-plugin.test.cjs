@@ -38,6 +38,31 @@ Module._load = originalLoad;
     assert.strictEqual(response.__mangosteenTaskId, task.id);
     assert.strictEqual(task.status, "completed");
     assert.strictEqual(polls, 91, "a valid image task taking just over three minutes must not be abandoned");
+
+    const reconnectingPlugin = new ImagePlugin();
+    reconnectingPlugin.settings = { model: "gpt-image-2", size: "1024x1024", imageTasks: [], submissionMarkers: [] };
+    reconnectingPlugin.api = {
+      readImageTaskProgress: () => null,
+      readImageTaskState: () => "processing",
+    };
+    let reconnectPolls = 0;
+    reconnectingPlugin.fetchImageTask = async () => {
+      reconnectPolls += 1;
+      if (reconnectPolls === 1) throw new Error("net::ERR_NETWORK_CHANGED");
+      return reconnectPolls === 2
+        ? { data: { status: "processing" } }
+        : { data: [{ url: "https://example.test/recovered.png" }] };
+    };
+    reconnectingPlugin.extractResults = (response) => response?.data?.[0]?.url
+      ? [{ kind: "url", value: response.data[0].url }]
+      : [];
+    reconnectingPlugin.saveSettings = async () => {};
+    reconnectingPlugin.refreshImageTaskViews = () => {};
+    const reconnectTask = { id: "accepted-image-task", status: "processing", submissionFingerprint: "sha256:accepted" };
+    const recovered = await reconnectingPlugin.waitForImageTask(reconnectTask);
+    assert.strictEqual(recovered.__mangosteenTaskId, reconnectTask.id);
+    assert.strictEqual(reconnectTask.status, "completed");
+    assert.strictEqual(reconnectPolls, 3, "a transient polling disconnect must keep querying the accepted paid task");
   } finally {
     global.window = originalWindow;
   }
