@@ -5,8 +5,10 @@ const {
   composeVideoPrompt,
   createGenerationFingerprint,
   eligibleModels,
+  normalizeVideoDuration,
   referenceRequirements,
   resolveVideoPrompt,
+  videoDurationRange,
 } = require("../generation-policy.cjs");
 
 const spokenPrompt = composeVideoPrompt({
@@ -62,6 +64,14 @@ assert.strictEqual(classifyModel("vendor-seedance-preview"), null);
 assert.strictEqual(classifyModel("sd-2.0-stable"), "seedance");
 assert.strictEqual(classifyModel("seedance-2.5_unknown"), null);
 assert.strictEqual(classifyModel("wan3.0-video-prime"), null);
+
+assert.deepStrictEqual(videoDurationRange("MiniMax-H3"), { min: 4, max: 15, step: 1 });
+assert.deepStrictEqual(videoDurationRange("seedance-2.5"), { min: 4, max: 30, step: 1 });
+assert.strictEqual(normalizeVideoDuration(13.5, "MiniMax-H3"), 14);
+assert.strictEqual(normalizeVideoDuration(14.2, "MiniMax-H3"), 15);
+assert.strictEqual(normalizeVideoDuration(8.4, "MiniMax-H3"), 9);
+assert.strictEqual(normalizeVideoDuration(2, "MiniMax-H3"), 4);
+assert.strictEqual(normalizeVideoDuration(29.2, "seedance-2.5"), 30);
 
 const firstImageFile = { name: "first.png" };
 const lastImageFile = { name: "last.png" };
@@ -201,7 +211,7 @@ assert.deepStrictEqual(referenceRequirements("seedance-2.5", "人物停下"), {
 
 assert.deepStrictEqual(
   Object.keys(require("../generation-policy.cjs")).sort(),
-  ["buildVideoOptions", "classifyModel", "composeVideoPrompt", "createGenerationFingerprint", "eligibleModels", "referenceRequirements", "resolveVideoPrompt"],
+  ["buildVideoOptions", "classifyModel", "composeVideoPrompt", "createGenerationFingerprint", "eligibleModels", "normalizeVideoDuration", "referenceRequirements", "resolveVideoPrompt", "videoDurationRange"],
 );
 
 console.log("generation-policy: ok");

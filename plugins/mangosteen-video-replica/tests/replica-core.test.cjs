@@ -50,6 +50,11 @@ assert.deepStrictEqual(requestV2.scenes, [{ id: "harbor", prompt: "海边集装�
 assert.strictEqual(requestV2.shots[0].sceneId, "harbor");
 assert.strictEqual(requestV2.shots[0].lastImagePrompt, "人物停在集装箱前");
 assert.strictEqual(requestV2.shots[0].voiceDirection, "自然介绍，语速中等，句尾轻微上扬。");
+const fractionalRequest = core.normalizeGenerationRequest({
+  ...requestV2Input,
+  shots: [{ ...requestV2Input.shots[0], duration: 13.5 }],
+});
+assert.strictEqual(fractionalRequest.shots[0].duration, 14, "fractional provider durations must round up to an accepted integer");
 
 assert.throws(
   () => core.normalizeGenerationRequest({ ...requestV2Input, shots: [{ ...requestV2Input.shots[0], sceneId: "missing" }] }),
@@ -130,6 +135,13 @@ assert.strictEqual(analysisDraft.shots[0].duration, 4);
 assert.deepStrictEqual(analysisDraft.shots[0].productIds, ["headphones"]);
 assert.strictEqual(analysisDraft.character.voiceProfile, "年轻清亮的中文女声，普通话，声音有亲和力。");
 assert.strictEqual(analysisDraft.shots[0].voiceDirection, "轻松打招呼，语速中等，尾音自然上扬。");
+const fractionalAnalysisDraft = core.buildGenerationDraft({ width: 1080, height: 1920 }, {
+  character: analysisDraft.character,
+  products: analysisDraft.products,
+  scenes: analysisDraft.scenes,
+  shots: [{ ...analysisDraft.shots[0], startTime: 0, endTime: 13.5 }],
+}, { videoModel: "MiniMax-H3", resolution: "768p" });
+assert.strictEqual(fractionalAnalysisDraft.shots[0].duration, 14);
 const storyboard = core.analysisStoryboardMarkdown({ title: "测试" }, analysisDraft);
 assert.match(storyboard, /原片截图只用于分析/);
 assert.match(storyboard, /产品参考提示词/);

@@ -1,6 +1,6 @@
 const fs = require("fs");
 const path = require("path");
-const { classifyModel } = require("./generation-policy.cjs");
+const { classifyModel, normalizeVideoDuration } = require("./generation-policy.cjs");
 const { assertAssetId } = require("./reference-assets.cjs");
 
 const ALLOWED_VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".m4v"]);
@@ -162,7 +162,7 @@ function normalizeGenerationRequest(input) {
           title,
           sceneId,
           ...(version >= 3 ? { productIds: shotProductIds } : {}),
-          duration: Math.max(2, Math.min(15, Number(shot?.duration) || 5)),
+          duration: normalizeVideoDuration(shot?.duration, model),
           dialogue: cleanText(shot?.dialogue),
           voiceDirection: cleanText(shot?.voiceDirection),
           plot: cleanText(shot?.plot),
@@ -201,7 +201,7 @@ function normalizeGenerationRequest(input) {
       return {
         id,
         title,
-        duration: Math.max(2, Math.min(15, Number(shot?.duration) || 5)),
+        duration: normalizeVideoDuration(shot?.duration, input.settings?.videoModel),
         dialogue: cleanText(shot?.dialogue),
         voiceDirection: cleanText(shot?.voiceDirection),
         plot: cleanText(shot?.plot),
@@ -249,7 +249,10 @@ function buildGenerationDraft(project, analysis, settings = {}) {
       title: cleanText(shot?.title),
       sceneId: cleanText(shot?.sceneId),
       productIds: Array.isArray(shot?.productIds) ? shot.productIds.map((id) => cleanText(id)).filter(Boolean) : [],
-      duration: Math.max(2, Math.min(15, Number(shot?.endTime) - Number(shot?.startTime) || Number(shot?.duration) || 4)),
+      duration: normalizeVideoDuration(
+        Number(shot?.endTime) - Number(shot?.startTime) || Number(shot?.duration) || 4,
+        settings.videoModel || "MiniMax-H3",
+      ),
       dialogue: cleanText(shot?.dialogue),
       voiceDirection: cleanText(shot?.voiceDirection),
       plot: cleanText(shot?.plot),

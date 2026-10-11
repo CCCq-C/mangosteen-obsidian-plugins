@@ -269,6 +269,15 @@ function createView(plugin) {
     element.tagName === "INPUT" && element.attributes.type === "checkbox" && element.dataset.shotId === "001"
   ));
   assert(firstShotCheckbox, "each shot must expose a selection checkbox");
+  const durationInput = view.contentEl.find((element) => (
+    element.tagName === "INPUT"
+      && element.dataset.section === "shot"
+      && element.dataset.field === "duration"
+  ));
+  assert(durationInput, "each shot must expose an integer duration input");
+  assert.strictEqual(durationInput.attributes.min, "4");
+  assert.strictEqual(durationInput.attributes.max, "15");
+  assert.strictEqual(durationInput.attributes.step, "1");
   firstShotCheckbox.checked = true;
   await firstShotCheckbox.dispatch("change");
   const selectedGenerateButton = view.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "生成所选（1）");

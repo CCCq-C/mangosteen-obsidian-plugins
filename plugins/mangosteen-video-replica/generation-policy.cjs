@@ -9,6 +9,19 @@ function classifyModel(modelId) {
   return null;
 }
 
+function videoDurationRange(model) {
+  const id = clean(model).toLowerCase();
+  const max = ["seedance-2.5", "seedance-2.5_k1", "seedance-2.5_y2"].includes(id) ? 30 : 15;
+  return { min: 4, max, step: 1 };
+}
+
+function normalizeVideoDuration(value, model) {
+  const { min, max } = videoDurationRange(model);
+  const numeric = Number(value);
+  const seconds = Number.isFinite(numeric) && numeric > 0 ? Math.ceil(numeric) : min;
+  return Math.max(min, Math.min(max, seconds));
+}
+
 function referenceRequirements(model, lastImagePrompt = "") {
   const family = classifyModel(model);
   if (!family) throw new Error(`视频复刻不支持模型：${String(model || "未选择")}`);
@@ -100,6 +113,8 @@ module.exports = {
   composeVideoPrompt,
   createGenerationFingerprint,
   eligibleModels,
+  normalizeVideoDuration,
   referenceRequirements,
   resolveVideoPrompt,
+  videoDurationRange,
 };

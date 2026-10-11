@@ -1,4 +1,5 @@
 const { normalizeGenerationRequest } = require("./replica-core.cjs");
+const { videoDurationRange } = require("./generation-policy.cjs");
 const {
   isDraftLocked,
   moveShot,
@@ -415,6 +416,7 @@ function createVideoReplicaWorkbenchView(ItemView) {
   }
 
   renderShots(parent) {
+    const durationRange = videoDurationRange(this.draft?.settings?.videoModel);
     this.renderPageTitle(parent, "分镜编辑", "勾选一个或多个镜头，确认最终视频提示词后按草案顺序生成。");
     const queueTools = parent.createDiv({ cls: "mangosteen-replica-shot-queue-tools" });
     const selectAllLabel = queueTools.createEl("label", { cls: "mangosteen-replica-shot-select-all" });
@@ -476,7 +478,14 @@ function createVideoReplicaWorkbenchView(ItemView) {
       }, { className: "is-title", disabled: shotLocked });
       this.createDraftControl(summaryRow, "时长（秒）", "input", shot.duration, {
         section: "shot", index, field: "duration",
-      }, { inputType: "number", min: "2", max: "15", className: "is-duration", disabled: shotLocked });
+      }, {
+        inputType: "number",
+        min: String(durationRange.min),
+        max: String(durationRange.max),
+        step: String(durationRange.step),
+        className: "is-duration",
+        disabled: shotLocked,
+      });
       this.createDraftControl(summaryRow, "场景", "select", shot.sceneId, {
         section: "shot", index, field: "sceneId",
       }, {
@@ -635,6 +644,7 @@ function createVideoReplicaWorkbenchView(ItemView) {
     if (options.inputType) control.setAttr("type", options.inputType);
     if (options.min) control.setAttr("min", options.min);
     if (options.max) control.setAttr("max", options.max);
+    if (options.step) control.setAttr("step", options.step);
     control.value = value === undefined || value === null ? "" : String(value);
     control.disabled = this.editingLocked() || Boolean(options.disabled);
     control.addEventListener(tagName === "select" ? "change" : "input", async () => {
