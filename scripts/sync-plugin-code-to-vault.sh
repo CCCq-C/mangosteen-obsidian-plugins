@@ -39,8 +39,8 @@ copy_plugin_files mangosteen-image \
   tests/image-api.test.cjs tests/image-plugin.test.cjs tests/output-storage.test.cjs
 
 copy_plugin_files mangosteen-video \
-  main.js video-api.cjs manifest.json styles.css \
-  tests/video-api.test.cjs tests/video-plugin.test.cjs
+  main.js video-api.cjs output-storage.cjs manifest.json styles.css \
+  tests/video-api.test.cjs tests/video-plugin.test.cjs tests/output-storage.test.cjs
 
 copy_plugin_files mangosteen-video-replica \
   main.js generation-policy.cjs generation-queue.cjs reference-assets.cjs replica-core.cjs replica-cli.cjs replica-editor.cjs replica-logic-api.cjs replica-ui-state.cjs replica-workbench.cjs shot-timeline.cjs visual-style.cjs video-analysis-schema.json manifest.json styles.css \

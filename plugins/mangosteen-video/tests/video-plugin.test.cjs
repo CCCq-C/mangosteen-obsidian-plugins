@@ -28,6 +28,20 @@ const makeFile = (name, type, contents) => {
   };
 };
 
+function createVault(initialFiles = {}) {
+  const files = new Map(Object.entries(initialFiles).map(([filePath, value]) => [filePath, Buffer.from(value)]));
+  const folders = new Set();
+  const createdBinaryPaths = [];
+  const modifiedBinaryPaths = [];
+  const vault = {
+    getAbstractFileByPath: (filePath) => files.has(filePath) || folders.has(filePath) ? { path: filePath } : null,
+    createFolder: async (folderPath) => { folders.add(folderPath); },
+    createBinary: async (filePath, value) => { createdBinaryPaths.push(filePath); files.set(filePath, Buffer.from(value)); },
+    modifyBinary: async (file, value) => { modifiedBinaryPaths.push(file.path); files.set(file.path, Buffer.from(value)); },
+  };
+  return { vault, files, folders, createdBinaryPaths, modifiedBinaryPaths };
+}
+
 const makePlugin = (uploadTemporaryImage) => {
   const plugin = new VideoPlugin();
   plugin.api = videoApi;
@@ -50,6 +64,14 @@ const baseOptions = {
   duration: 5,
   ratio: "16:9",
   resolution: "720p",
+};
+
+const outputTarget = {
+  owner: "video-replica",
+  projectId: "project-1",
+  shotId: "008",
+  assetType: "shot-video",
+  destinationPath: "山竹视频复刻/project-1/03-分镜/008/视频.mp4",
 };
 
 (async () => {
@@ -177,6 +199,7 @@ const baseOptions = {
   persistencePlugin.saveSettings = async () => {};
   const persisted = await persistencePlugin.rememberVideoTask({
     id: "persisted-task",
+    outputTarget,
     payload: {
       model: "seedance-2.5",
       prompt: "safe prompt",
@@ -206,6 +229,151 @@ const baseOptions = {
   }
   assert.strictEqual(persisted.requestShape.referenceImageCount, 1);
   assert.strictEqual(JSON.stringify(persisted).includes("signed.example"), false);
+  assert.deepStrictEqual(persisted.outputTarget, { ...outputTarget, overwrite: "replace-current" });
+
+  const targetPlugin = new VideoPlugin();
+  const fingerprintInputs = [];
+  targetPlugin.api = {
+    ...videoApi,
+    createSubmissionFingerprint(value) {
+      fingerprintInputs.push(value);
+      return videoApi.createSubmissionFingerprint(value);
+    },
+  };
+  targetPlugin.settings = { resolutionsByModel: {}, videoTasks: [], submissionMarkers: [] };
+  targetPlugin.videoAccess = { accountUserId: "user-1" };
+  targetPlugin.getRawQuota = async () => 100;
+  targetPlugin.saveSettings = async () => {};
+  const targetPayloads = [];
+  targetPlugin.sendVideoPayload = async (payload) => {
+    targetPayloads.push(payload);
+    return { status: 200, json: { id: "project-video-task" } };
+  };
+  const targetTask = await targetPlugin.submitVideo({ ...baseOptions, outputTarget });
+  assert.deepStrictEqual(targetTask.outputTarget, { ...outputTarget, overwrite: "replace-current" });
+  assert.strictEqual(targetPayloads.length, 1);
+  assert.strictEqual(Object.hasOwn(targetPayloads[0], "outputTarget"), false, "outputTarget must stay out of provider payloads");
+  assert.strictEqual(JSON.stringify(targetPayloads).includes(outputTarget.destinationPath), false);
+  assert.strictEqual(Object.hasOwn(targetTask.requestShape, "outputTarget"), false, "outputTarget must stay out of request shapes");
+  assert.strictEqual(targetTask.requestShape.fields.includes("outputTarget"), false);
+  assert.strictEqual(JSON.stringify(targetTask.requestShape).includes(outputTarget.destinationPath), false);
+  assert.strictEqual(fingerprintInputs.length, 1);
+  assert.strictEqual(Object.hasOwn(fingerprintInputs[0], "outputTarget"), false, "outputTarget must stay out of paid fingerprints");
+  assert.strictEqual(JSON.stringify(fingerprintInputs).includes(outputTarget.destinationPath), false);
+  assert.strictEqual(JSON.stringify(targetPlugin.settings.submissionMarkers).includes(outputTarget.destinationPath), false, "submission markers must not persist local paths");
+
+  const usageTask = {
+    ...targetTask,
+    status: "completed",
+    saved: true,
+    localPath: outputTarget.destinationPath,
+    usageRequestId: "",
+    usageGroup: "",
+  };
+  let usageBridgePayload;
+  const usageBridge = {
+    getAccountUserId: () => "user-1",
+    matchMediaUsage: async (tasks) => {
+      usageBridgePayload = tasks;
+      return {
+        ok: true,
+        matches: {
+          [usageTask.id]: {
+            accountUserId: "user-1",
+            costUsd: "1.25",
+            detail: "matched video usage",
+            requestId: "request-1",
+            tokenName: "video-token",
+            group: "video-group",
+          },
+        },
+      };
+    },
+  };
+  const usagePlugin = new VideoPlugin();
+  usagePlugin.settings = { resolutionsByModel: {}, videoTasks: [usageTask], submissionMarkers: [] };
+  usagePlugin.app = { plugins: { getPlugin: () => ({ getAccountBridge: () => usageBridge }) } };
+  usagePlugin.saveSettings = async () => {};
+  await usagePlugin.refreshTaskUsageRecords();
+  assert.deepStrictEqual(usageBridgePayload, [{
+    kind: "video",
+    id: usageTask.id,
+    model: usageTask.model,
+    group: usageTask.group,
+    accountUserId: usageTask.accountUserId,
+    createdAt: usageTask.createdAt,
+    status: usageTask.status,
+    usageRequestId: "",
+    usageGroup: "",
+  }]);
+  assert.strictEqual(Object.hasOwn(usageBridgePayload[0], "outputTarget"), false);
+  assert.strictEqual(JSON.stringify(usageBridgePayload).includes(outputTarget.destinationPath), false, "usage bridge payload must exclude every local destination path");
+  assert.strictEqual(usageTask.usageLogMatched, true, "safe usage payload must still match usage records");
+  assert.strictEqual(usageTask.cost, 1.25);
+
+  const persistedSettings = JSON.parse(JSON.stringify(targetPlugin.settings));
+  const projectVault = createVault({ [outputTarget.destinationPath]: "old video" });
+  const restartedPlugin = new VideoPlugin();
+  restartedPlugin.api = videoApi;
+  restartedPlugin.settings = persistedSettings;
+  restartedPlugin.app = { vault: projectVault.vault, plugins: {} };
+  restartedPlugin.fetchVideoTask = async (task) => ({ id: task.id, status: "completed", url: "https://downloads.example/project.mp4" });
+  restartedPlugin.request = async () => ({ status: 200, arrayBuffer: Buffer.from("new video") });
+  restartedPlugin.getRawQuota = async () => 99;
+  restartedPlugin.saveSettings = async () => {};
+  restartedPlugin.refreshTaskUsageRecords = async () => {};
+  await restartedPlugin.refreshVideoTasksNow();
+  const restoredTask = restartedPlugin.settings.videoTasks.find((task) => task.id === targetTask.id);
+  assert.strictEqual(restoredTask.saved, true);
+  assert.strictEqual(restoredTask.localPath, outputTarget.destinationPath);
+  assert.deepStrictEqual(projectVault.modifiedBinaryPaths, [outputTarget.destinationPath], "existing project video must be replaced with modifyBinary");
+  assert.ok(![...projectVault.files.keys()].some((filePath) => filePath.startsWith("山竹创作记录/视频/")), "project tasks must not create a standalone copy");
+  assert.strictEqual(restartedPlugin.settings.submissionMarkers.length, 0, "saved project output must reconcile its paid submission marker");
+
+  const standaloneVault = createVault();
+  const standalonePlugin = new VideoPlugin();
+  standalonePlugin.api = videoApi;
+  standalonePlugin.settings = { resolutionsByModel: {}, videoTasks: [], submissionMarkers: [] };
+  standalonePlugin.app = { vault: standaloneVault.vault, plugins: {} };
+  standalonePlugin.request = async () => ({ status: 200, arrayBuffer: Buffer.from("standalone video") });
+  for (let index = 1; index <= 10; index += 1) {
+    await standalonePlugin.saveCompletedVideo(
+      { id: `standalone-task-${index}`, model: "seedance-2.5", prompt: `standalone ${index}` },
+      { id: `standalone-task-${index}`, status: "completed", url: `https://downloads.example/${index}.mp4` },
+    );
+  }
+  assert.strictEqual(standaloneVault.createdBinaryPaths.length, 10);
+  assert.strictEqual(new Set(standaloneVault.createdBinaryPaths.map((filePath) => filePath.split("/").slice(0, -1).join("/"))).size, 1, "standalone videos must share one monthly directory");
+  assert.ok(standaloneVault.createdBinaryPaths.every((filePath) => /^山竹创作记录\/视频\/\d{4}-\d{2}\/[^/]+\.mp4$/.test(filePath)), "standalone videos must not create one directory per task");
+
+  const downloadFailurePlugin = new VideoPlugin();
+  downloadFailurePlugin.api = videoApi;
+  downloadFailurePlugin.settings = { resolutionsByModel: {}, videoTasks: [], submissionMarkers: [] };
+  downloadFailurePlugin.videoAccess = { accountUserId: "user-1" };
+  downloadFailurePlugin.getRawQuota = async () => 100;
+  downloadFailurePlugin.saveSettings = async () => {};
+  let downloadFailurePosts = 0;
+  downloadFailurePlugin.sendVideoPayload = async () => {
+    downloadFailurePosts += 1;
+    return { status: 200, json: { id: "accepted-download-failure" } };
+  };
+  const acceptedTask = await downloadFailurePlugin.submitVideo({ ...baseOptions, outputTarget });
+  downloadFailurePlugin.fetchVideoTask = async () => ({ id: acceptedTask.id, status: "completed", url: "https://downloads.example/fail.mp4" });
+  downloadFailurePlugin.request = async () => ({ status: 503 });
+  await downloadFailurePlugin.refreshVideoTasksNow();
+  assert.strictEqual(downloadFailurePlugin.settings.videoTasks[0].id, acceptedTask.id, "download failure must retain the accepted task");
+  assert.strictEqual(downloadFailurePlugin.settings.videoTasks[0].status, "retrying");
+  assert.strictEqual(downloadFailurePlugin.settings.submissionMarkers[0].status, "accepted");
+  const changedOutputTarget = {
+    ...outputTarget,
+    shotId: "009",
+    destinationPath: "山竹视频复刻/project-1/03-分镜/009/视频.mp4",
+  };
+  await assert.rejects(
+    downloadFailurePlugin.submitVideo({ ...baseOptions, outputTarget: changedOutputTarget }),
+    /已阻止重复提交/,
+  );
+  assert.strictEqual(downloadFailurePosts, 1, "changing only the local destination must not bypass duplicate paid-request protection");
 
   const successPlugin = new VideoPlugin();
   successPlugin.api = videoApi;

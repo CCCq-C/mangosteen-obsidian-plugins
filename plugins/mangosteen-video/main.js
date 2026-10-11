@@ -1,6 +1,7 @@
 const { Plugin, Modal, Notice, requestUrl } = require("obsidian");
 const path = require("path");
 const fs = require("fs");
+const { normalizeVideoOutputTarget, standaloneVideoPath } = require("./output-storage.cjs");
 
 const API_BASE = "https://apimodel.aihubkit.com";
 const DEFAULT_SETTINGS = {
@@ -548,6 +549,7 @@ module.exports = class MangosteenVideoPlugin extends Plugin {
     delete payload.referenceImages;
     delete payload.referenceVideos;
     delete payload.referenceAudios;
+    const outputTarget = normalizeVideoOutputTarget(task.outputTarget);
     const saved = Object.assign({
       accountUserId: String(this.videoAccess?.accountUserId || ""),
       createdAt: new Date().toISOString(),
@@ -555,7 +557,7 @@ module.exports = class MangosteenVideoPlugin extends Plugin {
       progress: null,
       saved: false,
       lastError: "",
-    }, task, { payload });
+    }, task, { payload, outputTarget });
     const previousTasks = this.settings.videoTasks || [];
     const previousMarkers = (this.settings.submissionMarkers || []).map((item) => ({ ...item }));
     const marker = task.submissionFingerprint ? this.submissionMarker(task.submissionFingerprint) : null;
@@ -580,7 +582,17 @@ module.exports = class MangosteenVideoPlugin extends Plugin {
     const accountUserId = String(bridge?.getAccountUserId?.() || "");
     const tasks = (this.settings.videoTasks || []).filter((task) => ["completed", "failed"].includes(task.status) && (!task.usageLogMatched || !task.accountUserId) && (!task.accountUserId || String(task.accountUserId) === accountUserId));
     if (!tasks.length) return;
-    const result = await bridge?.matchMediaUsage?.(tasks.map((task) => Object.assign({ kind: "video" }, task)));
+    const result = await bridge?.matchMediaUsage?.(tasks.map((task) => ({
+      kind: "video",
+      id: task.id,
+      model: task.model,
+      group: task.group,
+      accountUserId: task.accountUserId,
+      createdAt: task.createdAt,
+      status: task.status,
+      usageRequestId: task.usageRequestId,
+      usageGroup: task.usageGroup,
+    })));
     if (!result?.ok) return;
     let changed = false;
     for (const task of tasks) {
@@ -619,8 +631,11 @@ module.exports = class MangosteenVideoPlugin extends Plugin {
 
   async submitVideo(options) {
     if (!Array.isArray(this.settings.submissionMarkers)) this.settings.submissionMarkers = [];
-    const originalOptions = Object.assign({}, options);
-    const payloadOptions = Object.assign({}, options, { allowedResolutions: this.settings.resolutionsByModel?.[options.model] });
+    const outputTarget = normalizeVideoOutputTarget(options.outputTarget);
+    const payloadOptions = { ...options };
+    delete payloadOptions.outputTarget;
+    const originalOptions = { ...payloadOptions };
+    payloadOptions.allowedResolutions = this.settings.resolutionsByModel?.[payloadOptions.model];
     const referenceImageFiles = Array.from(payloadOptions.referenceImageFiles || []);
     const referenceImages = Array.isArray(payloadOptions.referenceImages) ? [...payloadOptions.referenceImages] : [];
     for (const [label, urlField, fileField] of [["首帧", "firstImage", "firstImageFile"], ["尾帧", "lastImage", "lastImageFile"]]) {
@@ -666,6 +681,7 @@ module.exports = class MangosteenVideoPlugin extends Plugin {
       submissionFingerprint: fingerprint,
       group: response.__mangosteenGroup,
       beforeQuota,
+      outputTarget,
     });
   }
 
@@ -681,7 +697,11 @@ module.exports = class MangosteenVideoPlugin extends Plugin {
   }
 
   async ensureVaultFolder(folder) {
-    if (!this.app?.vault?.getAbstractFileByPath?.(folder)) await this.app.vault.createFolder(folder);
+    let current = "";
+    for (const segment of String(folder || "").split("/").filter(Boolean)) {
+      current = current ? `${current}/${segment}` : segment;
+      if (!this.app?.vault?.getAbstractFileByPath?.(current)) await this.app.vault.createFolder(current);
+    }
   }
 
   async saveCompletedVideo(task, response) {
@@ -698,14 +718,14 @@ module.exports = class MangosteenVideoPlugin extends Plugin {
     }
     if (download.status >= 400 || !download.arrayBuffer) throw new Error("视频已经生成，但保存失败，请稍后重新保存。");
     this.api.assertVideoDownloadSize(download);
-    const root = "山竹视频";
-    const folder = `${root}/${this.api.safeVideoTaskSegment(task.id)}`;
-    await this.ensureVaultFolder(root);
+    const outputTarget = normalizeVideoOutputTarget(task.outputTarget);
+    const filePath = outputTarget?.destinationPath || standaloneVideoPath({ now: new Date(), taskId: task.id });
+    const folder = filePath.split("/").slice(0, -1).join("/");
     await this.ensureVaultFolder(folder);
-    const filePath = `${folder}/${this.api.safeVideoFilename(`${task.prompt || task.id}.mp4`)}`;
     const existing = this.app.vault.getAbstractFileByPath?.(filePath);
     if (existing && typeof this.app.vault.modifyBinary === "function") await this.app.vault.modifyBinary(existing, Buffer.from(download.arrayBuffer));
     else await this.app.vault.createBinary(filePath, Buffer.from(download.arrayBuffer));
+    task.localPath = filePath;
     return filePath;
   }
 
