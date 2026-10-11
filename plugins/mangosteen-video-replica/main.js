@@ -8,6 +8,7 @@ let generationPolicy;
 let referenceAssets;
 let replicaEditor;
 let replicaLogicApi;
+let shotTimeline;
 let workflow;
 
 const ROOT = "山竹视频复刻";
@@ -217,6 +218,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     const pluginRoot = path.join(this.vaultPath(), ...String(this.manifest.dir || "").split(/[\\/]/).filter(Boolean));
     core = require(path.join(pluginRoot, "replica-core.cjs"));
     generationPolicy = require(path.join(pluginRoot, "generation-policy.cjs"));
+    shotTimeline = require(path.join(pluginRoot, "shot-timeline.cjs"));
     referenceAssets = require(path.join(pluginRoot, "reference-assets.cjs"));
     replicaEditor = require(path.join(pluginRoot, "replica-editor.cjs"));
     replicaLogicApi = require(path.join(pluginRoot, "replica-logic-api.cjs"));
@@ -1778,14 +1780,21 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     });
     const latestProject = this.readJson(paths.projectPath);
     const existing = (latestProject.shots || []).find((item) => String(item.id) === String(shot.id)) || {};
-    const firstImagePath = paths.folder + "/02-分镜脚本/镜头-" + shot.id + "-" + core.safeSegment(shot.title) + "-首帧.png";
-    const lastImagePath = shot.lastImagePrompt
+    const structuredTimeline = Array.isArray(shot.timeline) && shot.timeline.length > 0;
+    const modelFamily = generationPolicy.classifyModel(model);
+    const directReferenceMode = structuredTimeline && modelFamily === "seedance";
+    const needsFirstFrame = !directReferenceMode;
+    const needsLastFrame = !structuredTimeline && Boolean(shot.lastImagePrompt);
+    const firstImagePath = needsFirstFrame
+      ? paths.folder + "/02-分镜脚本/镜头-" + shot.id + "-" + core.safeSegment(shot.title) + "-首帧.png"
+      : "";
+    const lastImagePath = needsLastFrame
       ? paths.folder + "/02-分镜脚本/镜头-" + shot.id + "-" + core.safeSegment(shot.title) + "-尾帧.png"
       : "";
     const videoPath = paths.folder + "/03-视频片段/镜头-" + shot.id + "-" + core.safeSegment(shot.title) + ".mp4";
     const sameGeneration = existing.generationFingerprint === fingerprint;
-    const reusableFirst = sameGeneration && existing.firstImagePath === firstImagePath && this.projectFileExists(paths.folder, firstImagePath);
-    const reusableLast = !lastImagePath || (sameGeneration && existing.lastImagePath === lastImagePath && this.projectFileExists(paths.folder, lastImagePath));
+    const reusableFirst = !needsFirstFrame || (sameGeneration && existing.firstImagePath === firstImagePath && this.projectFileExists(paths.folder, firstImagePath));
+    const reusableLast = !needsLastFrame || (sameGeneration && existing.lastImagePath === lastImagePath && this.projectFileExists(paths.folder, lastImagePath));
     const reusableVideo = sameGeneration && reusableFirst && reusableLast
       && existing.videoPath === videoPath && this.projectFileExists(paths.folder, videoPath);
     const resumableVideoTaskId = existing.videoTaskId
@@ -1824,10 +1833,11 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         "参考图2是纯环境场景板：只参考空间、固定陈设、光线、天气与环境质感，不得从中创造人物或核心产品。",
         ...productSources.map(({ asset }, index) => "参考图" + (index + 3) + "是产品设定板（" + asset.id + "）：产品外形、颜色、材质、比例、包装和标识位置必须严格一致。"),
       ].join("\n");
-      if (!videoTaskId && !currentFirstImagePath) {
+      if (!videoTaskId && needsFirstFrame && !currentFirstImagePath) {
         this.assertWorkbenchQueueRunnerLock(paths.folder, context.queueId);
         this.updateProjectShot(paths.folder, shot.id, { status: "正在生成首帧" });
-        const candidate = await this.generateImageMulti(image, shot.imagePrompt + "\n" + continuity, referencePaths, imageModel);
+        const framePrompt = structuredTimeline ? shotTimeline.firstFramePrompt(shot.timeline) : String(shot.imagePrompt || "");
+        const candidate = await this.generateImageMulti(image, framePrompt + "\n" + continuity, referencePaths, imageModel);
         currentFirstImagePath = await this.saveImageCandidate(image, candidate, firstImagePath);
         this.updateProjectShot(paths.folder, shot.id, {
           firstImagePath: currentFirstImagePath,
@@ -1835,7 +1845,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
           status: "首帧已完成",
         });
       }
-      if (!videoTaskId && lastImagePath && !currentLastImagePath) {
+      if (!videoTaskId && needsLastFrame && !currentLastImagePath) {
         this.assertWorkbenchQueueRunnerLock(paths.folder, context.queueId);
         this.updateProjectShot(paths.folder, shot.id, { status: "正在生成尾帧" });
         const candidate = await this.generateImageMulti(image, shot.lastImagePrompt + "\n" + continuity, referencePaths, imageModel);
@@ -1854,8 +1864,9 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
             duration: shot.duration,
             ratio: context.settings.ratio,
             resolution,
-            firstImageFile: this.localImage(currentFirstImagePath),
+            firstImageFile: currentFirstImagePath ? this.localImage(currentFirstImagePath) : null,
             lastImageFile: currentLastImagePath ? this.localImage(currentLastImagePath) : null,
+            referenceImageFiles: directReferenceMode ? referencePaths.map((referencePath) => this.localImage(referencePath)) : undefined,
           }));
         } catch (error) {
           throw this.generationModelError("video", model, error);

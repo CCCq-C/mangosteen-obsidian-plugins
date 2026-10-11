@@ -107,7 +107,7 @@ function eligibleModels(modelIds) {
   return (Array.isArray(modelIds) ? modelIds : []).filter((modelId) => classifyModel(modelId));
 }
 
-function buildVideoOptions({ model, prompt, duration, ratio, resolution, firstImageFile, lastImageFile } = {}) {
+function buildVideoOptions({ model, prompt, duration, ratio, resolution, firstImageFile, lastImageFile, referenceImageFiles } = {}) {
   const family = classifyModel(model);
   if (!family) throw new Error(`视频复刻不支持模型：${String(model || "未选择")}`);
 
@@ -118,7 +118,9 @@ function buildVideoOptions({ model, prompt, duration, ratio, resolution, firstIm
     return options;
   }
 
-  options.referenceImageFiles = [firstImageFile, lastImageFile].filter(Boolean);
+  options.referenceImageFiles = Array.isArray(referenceImageFiles)
+    ? referenceImageFiles.filter(Boolean)
+    : [firstImageFile, lastImageFile].filter(Boolean);
   return options;
 }
 

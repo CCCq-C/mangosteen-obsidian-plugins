@@ -339,6 +339,64 @@ function request() {
     "shot generation must merge into the latest project instead of overwriting unrelated edits",
   );
 
+  const directRuntimeResolver = plugin.resolveQueueGenerationRuntime;
+  async function runTimelineReferenceCase(model, resolution) {
+    const caseFolder = `山竹视频复刻/时间轴参考-${model}`;
+    const caseRoot = path.join(vault, ...caseFolder.split("/"));
+    fs.mkdirSync(path.join(caseRoot, ".work"), { recursive: true });
+    fs.writeFileSync(path.join(caseRoot, "project.json"), JSON.stringify({ folder: caseFolder, title: model, shots: [] }));
+    fs.writeFileSync(path.join(caseRoot, ".work/generation-queue.json"), JSON.stringify({}));
+    const calls = { frames: 0, options: null };
+    plugin.resolveQueueGenerationRuntime = async () => ({
+      image: {},
+      video: { submitVideo: async (options) => { calls.options = options; return { id: `task-${model}` }; } },
+      imageModel: "gpt-image-2-w",
+      model,
+      resolution,
+    });
+    plugin.generateImageMulti = async () => { calls.frames += 1; return { kind: "base64", value: "eA==" }; };
+    plugin.waitForVideo = async () => ({ localPath: "山竹视频资产库/generated.mp4" });
+    const context = {
+      queueId: `queue-${model}`,
+      planId: `plan-${model}`,
+      character: { id: "hero", prompt: "固定人物三视图", voiceProfile: "固定女声" },
+      products: [{ id: "phone", prompt: "银色手机" }],
+      scenes: [{ id: "room", prompt: "明亮客厅" }],
+      settings: { imageModel: "gpt-image-2-w", videoModel: model, ratio: "9:16", resolution },
+    };
+    const shot = {
+      id: "001",
+      title: "时间轴镜头",
+      sceneId: "room",
+      productIds: ["phone"],
+      duration: 6,
+      timeline: [
+        { start: 0, end: 2, action: "人物走入客厅", dialogue: "", performance: "自然", camera: "远景跟拍", environment: "明亮客厅" },
+        { start: 2, end: 6, action: "人物举起手机", dialogue: "就是这款。", performance: "惊喜", camera: "中景推进", environment: "同一客厅" },
+      ],
+      effectiveVideoPrompt: "已确认的时间轴提示词",
+    };
+    await plugin.runWorkbenchQueueShot(caseFolder, shot, context);
+    return calls;
+  }
+
+  const h3TimelineCalls = await runTimelineReferenceCase("MiniMax-H3", "768p");
+  assert.strictEqual(h3TimelineCalls.frames, 1, "MiniMax-H3 timeline shots must generate one automatic first frame");
+  assert(h3TimelineCalls.options.firstImageFile, "MiniMax-H3 must submit the automatic first frame");
+  assert.strictEqual(Object.hasOwn(h3TimelineCalls.options, "lastImageFile"), false, "MiniMax-H3 must not invent a last frame");
+  assert.strictEqual(Object.hasOwn(h3TimelineCalls.options, "referenceImageFiles"), false, "MiniMax-H3 cannot accept reference image arrays");
+
+  const seedanceTimelineCalls = await runTimelineReferenceCase("seedance-2.5", "720p");
+  assert.strictEqual(seedanceTimelineCalls.frames, 0, "Seedance timeline shots must not generate per-shot frames");
+  assert.strictEqual(Object.hasOwn(seedanceTimelineCalls.options, "firstImageFile"), false);
+  assert.strictEqual(Object.hasOwn(seedanceTimelineCalls.options, "lastImageFile"), false);
+  assert.deepStrictEqual(
+    seedanceTimelineCalls.options.referenceImageFiles.map((file) => file.name),
+    ["hero.png", "room.png", "phone.png"],
+    "Seedance must receive the shared character, scene, and product assets directly",
+  );
+  plugin.resolveQueueGenerationRuntime = directRuntimeResolver;
+
   const recoverProject = JSON.parse(fs.readFileSync(path.join(root, "project.json")));
   const recoverShot = recoverProject.shots.find((shot) => shot.id === "002");
   recoverShot.videoPath = "";

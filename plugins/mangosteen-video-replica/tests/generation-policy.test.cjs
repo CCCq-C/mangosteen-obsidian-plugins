@@ -87,6 +87,7 @@ assert.strictEqual(normalizeVideoDuration(29.2, "seedance-2.5"), 30);
 
 const firstImageFile = { name: "first.png" };
 const lastImageFile = { name: "last.png" };
+const directReferenceFiles = [{ name: "character.png" }, { name: "scene.png" }, { name: "product.png" }];
 const common = {
   prompt: "人物向前走，镜头缓慢推进",
   duration: 4,
@@ -107,6 +108,20 @@ assert.deepStrictEqual(buildVideoOptions({
   resolution: "768p",
   firstImageFile,
   lastImageFile,
+});
+
+assert.deepStrictEqual(buildVideoOptions({
+  ...common,
+  model: "seedance-2.5",
+  resolution: "720p",
+  referenceImageFiles: directReferenceFiles,
+}), {
+  model: "seedance-2.5",
+  prompt: common.prompt,
+  duration: 4,
+  ratio: "9:16",
+  resolution: "720p",
+  referenceImageFiles: directReferenceFiles,
 });
 
 assert.deepStrictEqual(buildVideoOptions({
