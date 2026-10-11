@@ -448,6 +448,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     const isV6 = fs.existsSync(versionSixProjectPath);
     const queueLockRelativePath = isV6 ? `${versionSix.metadataRoot}/active-run.lock` : QUEUE_LOCK_FILE;
     const submissionGateRelativePath = `${versionSix.metadataRoot}/paid-submission.lock`;
+    const pendingStopRelativePath = `${versionSix.metadataRoot}/pending-stop.json`;
     return {
       folder: checked.folder,
       isV6,
@@ -465,6 +466,10 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       submissionGatePath: isV6
         ? this.checkedProjectPath(checked.folder, submissionGateRelativePath, { createParents: createWorkDirectory })
         : null,
+      pendingStopPath: isV6
+        ? this.checkedProjectPath(checked.folder, pendingStopRelativePath, { createParents: createWorkDirectory })
+        : null,
+      pendingStopRelativePath,
     };
   }
 
@@ -650,6 +655,17 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       saveStop: async (queue) => {
         const persistStop = async () => {
           const persisted = this.currentWorkbenchQueue(paths.folder);
+          if (!persisted && paths.isV6) {
+            const runId = String(queue.runId || queue.queueId || "");
+            const archivedPath = /^[A-Za-z0-9_-]+$/.test(runId)
+              ? this.checkedProjectPath(paths.folder, `${paths.runsRelativePath}/${runId}.json`)
+              : "";
+            const archived = archivedPath ? this.readOptionalJson(archivedPath) : null;
+            if (archived && String(archived.runId || archived.queueId || "") === runId && archived.stopRequested === true) {
+              replaceObject(queue, archived);
+              return queue;
+            }
+          }
           if (!persisted || persisted.queueId !== queue.queueId) {
             throw new Error("活动运行已变化，已拒绝用旧窗口状态覆盖当前任务。");
           }
@@ -660,12 +676,17 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
           this.requestWorkbenchRefresh();
           return queue;
         };
-        return paths.isV6 ? this.withWorkbenchSubmissionGate(paths.folder, persistStop) : persistStop();
+        if (!paths.isV6) return persistStop();
+        this.recordPendingWorkbenchStop(paths, queue);
+        return this.withWorkbenchSubmissionGate(paths.folder, persistStop);
       },
       isStopRequested: async ({ queueId, runId }) => {
+        const expectedId = String(runId || queueId || "");
+        const pending = paths.isV6 ? this.readOptionalJson(paths.pendingStopPath) : null;
+        if (pending && String(pending.runId || pending.queueId || "") === expectedId) return true;
         const persisted = this.currentWorkbenchQueue(paths.folder);
         if (!persisted) throw new Error("活动运行状态缺失，已停止后续付费任务。");
-        if (String(persisted.queueId || persisted.runId || "") !== String(queueId || runId || "")) {
+        if (String(persisted.queueId || persisted.runId || "") !== expectedId) {
           throw new Error("活动运行已变化，已停止后续付费任务。");
         }
         return persisted.stopRequested === true;
@@ -678,9 +699,9 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
   }
 
   async acquireWorkbenchSubmissionGate(folder, {
-    timeoutMs = SUBMISSION_GATE_TIMEOUT_MS,
-    staleMs = SUBMISSION_GATE_STALE_MS,
-    retryMs = SUBMISSION_GATE_RETRY_MS,
+    timeoutMs,
+    staleMs,
+    retryMs,
   } = {}) {
     const paths = this.workbenchProjectPaths(folder, { createWorkDirectory: true });
     if (!paths.isV6 || !paths.submissionGatePath) return null;
@@ -697,7 +718,10 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       try { fs.writeFileSync(descriptor, `${JSON.stringify(payload)}\n`); }
       finally { fs.closeSync(descriptor); }
     };
-    const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
+    const effectiveTimeoutMs = timeoutMs ?? this.submissionGateTimeoutMs ?? SUBMISSION_GATE_TIMEOUT_MS;
+    const effectiveStaleMs = staleMs ?? this.submissionGateStaleMs ?? SUBMISSION_GATE_STALE_MS;
+    const effectiveRetryMs = retryMs ?? this.submissionGateRetryMs ?? SUBMISSION_GATE_RETRY_MS;
+    const deadline = Date.now() + Math.max(0, Number(effectiveTimeoutMs) || 0);
     while (true) {
       try {
         create();
@@ -706,7 +730,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         if (error?.code !== "EEXIST") throw error;
         const stat = fs.statSync(paths.submissionGatePath, { throwIfNoEntry: false });
         if (!stat) continue;
-        if (Date.now() - stat.mtimeMs > Math.max(1, Number(staleMs) || SUBMISSION_GATE_STALE_MS)) {
+        if (Date.now() - stat.mtimeMs > Math.max(1, Number(effectiveStaleMs) || SUBMISSION_GATE_STALE_MS)) {
           fs.rmSync(paths.submissionGatePath, { force: true });
           continue;
         }
@@ -715,7 +739,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
           timeout.code = "SUBMISSION_GATE_TIMEOUT";
           throw timeout;
         }
-        await sleep(Math.max(1, Math.min(Number(retryMs) || SUBMISSION_GATE_RETRY_MS, deadline - Date.now())));
+        await sleep(Math.max(1, Math.min(Number(effectiveRetryMs) || SUBMISSION_GATE_RETRY_MS, deadline - Date.now())));
       }
     }
     const lock = { folder: paths.folder, lockPath: paths.submissionGatePath, token, payload, heartbeat: null, lostError: null };
@@ -749,17 +773,66 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     } catch (_) { /* another process owns or already released this gate */ }
   }
 
+  recordPendingWorkbenchStop(pathsOrFolder, identity = {}) {
+    const paths = typeof pathsOrFolder === "string"
+      ? this.workbenchProjectPaths(pathsOrFolder, { createWorkDirectory: true })
+      : pathsOrFolder;
+    if (!paths?.isV6 || !paths.pendingStopPath) return null;
+    const runId = String(identity?.runId || identity?.queueId || "").trim();
+    if (!runId) throw new Error("停止请求缺少活动运行 ID。");
+    const pending = {
+      version: 1,
+      runId,
+      queueId: runId,
+      requestId: crypto.randomUUID(),
+      requestedAt: new Date().toISOString(),
+      status: "pending",
+    };
+    projectStorage.atomicWriteJson({
+      resolveSafe: this.projectStorageResolver(paths.folder),
+      relativePath: paths.pendingStopRelativePath,
+      value: pending,
+    });
+    return pending;
+  }
+
+  mergePendingWorkbenchStop(pathsOrFolder) {
+    const paths = typeof pathsOrFolder === "string"
+      ? this.workbenchProjectPaths(pathsOrFolder, { createWorkDirectory: true })
+      : pathsOrFolder;
+    if (!paths?.isV6 || !paths.pendingStopPath) return null;
+    const pending = this.readOptionalJson(paths.pendingStopPath);
+    if (!pending) return null;
+    const active = this.readOptionalJson(paths.activeRunPath);
+    const pendingId = String(pending.runId || pending.queueId || "");
+    const activeId = String(active?.runId || active?.queueId || "");
+    if (!active || !pendingId || activeId !== pendingId) return active;
+    const stopped = runState.requestRunStop(active, pending.requestedAt);
+    this.persistWorkbenchRun(paths, stopped);
+    const currentPending = this.readOptionalJson(paths.pendingStopPath);
+    if (currentPending && String(currentPending.runId || currentPending.queueId || "") === activeId) {
+      fs.rmSync(paths.pendingStopPath, { force: true });
+    }
+    return stopped;
+  }
+
   async withWorkbenchSubmissionGate(folder, operation) {
     if (typeof operation !== "function") throw new Error("付费提交闸门缺少操作函数。");
     const lock = await this.acquireWorkbenchSubmissionGate(folder);
     if (!lock) return operation();
     try {
       this.assertWorkbenchSubmissionGateOwned(lock);
+      this.mergePendingWorkbenchStop(folder);
       const result = await operation();
       this.assertWorkbenchSubmissionGateOwned(lock);
       return result;
     } finally {
-      this.releaseWorkbenchSubmissionGate(lock);
+      try {
+        this.assertWorkbenchSubmissionGateOwned(lock);
+        this.mergePendingWorkbenchStop(folder);
+      } finally {
+        this.releaseWorkbenchSubmissionGate(lock);
+      }
     }
   }
 
@@ -772,15 +845,59 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       const persistedId = String(persisted.runId || persisted.queueId || "");
       const expectedId = String(identity?.runId || identity?.queueId || "");
       if (!expectedId || persistedId !== expectedId) throw new Error("活动运行已变化，已停止后续付费任务。");
-      if (paths.isV6 && Number(persisted.revision) !== Number(identity?.revision)) {
-        throw new Error("活动运行版本已变化，已停止本次付费提交。");
-      }
       if (persisted.stopRequested === true) {
         const stopped = new Error("用户已停止生成；不会再提交新的付费任务。");
         stopped.code = GENERATION_STOPPED_CODE;
         throw stopped;
       }
-      return operation(persisted);
+      if (paths.isV6 && Number(persisted.revision) !== Number(identity?.revision)) {
+        throw new Error("活动运行版本已变化，已停止本次付费提交。");
+      }
+      if (!paths.isV6) return operation(persisted, null);
+      const shotId = String(identity?.shotId || "").trim();
+      const boundary = String(identity?.boundary || "paid-submission").trim() || "paid-submission";
+      const shot = persisted.shots?.[shotId];
+      if (!shot) throw new Error("活动运行找不到待提交镜头，已停止本次付费提交。");
+      if (shot.submissionReservation?.status === "submission-reserved") {
+        const unsafe = new Error("UNSAFE_PAID_SUBMISSION_RECOVERY：检测到未决付费提交，请人工检查供应商记录；不再自动重提。");
+        unsafe.code = "UNSAFE_PAID_SUBMISSION_RECOVERY";
+        const recovery = runState.updateShotState(persisted, shotId, {
+          status: "recovery-pending",
+          stage: shot.submissionReservation.boundary || boundary,
+          submissionUncertain: true,
+          error: unsafe,
+        });
+        this.persistWorkbenchRun(paths, recovery);
+        throw unsafe;
+      }
+      const reservation = {
+        runId: persistedId,
+        shotId,
+        boundary,
+        reservationId: crypto.randomUUID(),
+        createdAt: new Date().toISOString(),
+        status: "submission-reserved",
+        previousStatus: String(shot.status || "processing"),
+        previousStage: String(shot.stage || "preflight"),
+      };
+      const reserved = runState.updateShotState(persisted, shotId, {
+        status: "submission-reserved",
+        stage: boundary,
+        submissionReservation: reservation,
+        submissionUncertain: true,
+      });
+      this.persistWorkbenchRun(paths, reserved);
+      const result = await operation(reserved, reservation);
+      const resolved = this.currentWorkbenchQueue(paths.folder);
+      const resolvedShot = resolved?.shots?.[shotId];
+      if (resolvedShot?.submissionReservation?.reservationId === reservation.reservationId
+        || resolvedShot?.lastSubmissionResult?.reservationId !== reservation.reservationId
+        || resolvedShot?.lastSubmissionResult?.status !== "resolved") {
+        const unsafe = new Error("UNSAFE_PAID_SUBMISSION_RECOVERY：付费提交结果未安全落盘，请人工检查供应商记录；不再自动重提。");
+        unsafe.code = "UNSAFE_PAID_SUBMISSION_RECOVERY";
+        throw unsafe;
+      }
+      return result;
     };
     return paths.isV6 ? this.withWorkbenchSubmissionGate(paths.folder, submit) : submit();
   }
@@ -1017,9 +1134,27 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       if (["processing", "stopping"].includes(queue.status)) {
         const project = this.readJson(paths.projectPath);
         let unsafeRecovery = false;
+        let unsafeSubmissionRecovery = false;
         for (const id of queue.queue) {
           const shot = queue.shots[id];
           if (!shot || ["queued", "completed", "failed", "stopped"].includes(String(shot.status))) continue;
+          if (shot.submissionReservation?.status === "submission-reserved") {
+            const unsafe = new Error("检测到未决付费提交。为避免重复付费，已停止自动恢复，请人工检查供应商记录。");
+            unsafe.code = "UNSAFE_PAID_SUBMISSION_RECOVERY";
+            shot.status = "recovery-pending";
+            shot.stage = shot.submissionReservation.boundary || shot.stage || "provider-submission";
+            shot.submissionUncertain = true;
+            shot.error = runState.normalizeGenerationError(unsafe, {
+              code: "UNSAFE_PAID_SUBMISSION_RECOVERY",
+              stage: shot.stage,
+              action: "人工检查供应商记录；确认未受理前不要重新提交",
+              retryable: false,
+              paidTaskSubmitted: shot.paidTaskSubmitted === true,
+              now: new Date().toISOString(),
+            });
+            unsafeSubmissionRecovery = true;
+            continue;
+          }
           const projectShot = (project.shots || []).find((item) => String(item.id) === String(shot.id));
           const shotPlanId = String(shot.generationContext?.planId || queue.planId || "");
           const activeRunTaskId = shotPlanId && shot.confirmedPayloadSignature
@@ -1042,6 +1177,19 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
             );
             unsafeRecovery = true;
           }
+        }
+        if (unsafeSubmissionRecovery) {
+          queue.status = queue.stopRequested === true ? "stopping" : "processing";
+          queue.activeShotId = queue.queue.find((id) => queue.shots[id]?.submissionReservation?.status === "submission-reserved") || null;
+          queue.completedAt = null;
+          queue.updatedAt = new Date().toISOString();
+          if (paths.isV6) await this.withWorkbenchSubmissionGate(paths.folder, async () => this.persistWorkbenchRun(paths, queue));
+          else this.persistWorkbenchRun(paths, queue);
+          this.mutateProject(paths.folder, (currentProject) => {
+            currentProject.status = "completed_with_errors";
+            currentProject.statusText = "检测到未决付费提交。为避免重复付费，未自动重提，请人工检查供应商记录。";
+          });
+          return false;
         }
         if (unsafeRecovery) {
           for (const id of queue.queue) if (queue.shots[id]?.status === "queued") queue.shots[id].status = "stopped";
@@ -2116,9 +2264,19 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         : kind === "scene"
           ? referenceAssets.resolveSceneAsset
           : referenceAssets.resolveProductAsset;
-      const resolved = await withPaidSubmissionGate({ kind: "reference-asset", assetKind: kind, assetId: String(source.id || "") }, async () => {
+      const resolved = await withPaidSubmissionGate({ kind: "reference-asset", assetKind: kind, assetId: String(source.id || "") }, async ({ resolve } = {}) => {
         const accepted = await this.ensureReferenceAsset(image, resolver(this.vaultPath(), source.id), source.prompt, imageModel, context.visualStyle);
-        if (accepted.reused !== true) await report({ status: "reference-processing", stage: "reference-assets", paidTaskSubmitted: true });
+        await (resolve || report)({
+          status: "reference-processing",
+          stage: "reference-assets",
+          ...(accepted.reused !== true ? { paidTaskSubmitted: true } : {}),
+          recoveryContext: {
+            boundary: "reference-asset",
+            assetKind: kind,
+            assetId: String(source.id || ""),
+            imagePath: String(accepted.imagePath || ""),
+          },
+        });
         return accepted;
       });
       this.updateProjectShot(paths.folder, shot.id, { status: `${label}参考图已就绪 · ${String(source.id || "")}` });
@@ -2231,29 +2389,41 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         await report({ status: "image-processing", stage: "first-frame" });
         this.updateProjectShot(paths.folder, shot.id, { status: "正在生成首帧" });
         const framePrompt = structuredTimeline ? shotTimeline.firstFramePrompt(shot.timeline) : String(shot.imagePrompt || "");
-        const candidate = await withPaidSubmissionGate({ kind: "first-frame" }, async () => {
+        currentFirstImagePath = await withPaidSubmissionGate({ kind: "first-frame" }, async ({ accept, resolve } = {}) => {
           const accepted = await this.generateImageMulti(image, visualStyle.applyVisualStyle(framePrompt + "\n" + continuity, context.visualStyle), referencePaths, imageModel);
-          await report({ status: "image-processing", stage: "first-frame", paidTaskSubmitted: true });
-          return accepted;
-        });
-        currentFirstImagePath = await this.saveImageCandidate(image, candidate, firstImagePath);
-        this.updateProjectShot(paths.folder, shot.id, {
-          firstImagePath: currentFirstImagePath,
-          imagePath: currentFirstImagePath,
-          status: "首帧已完成",
+          await (accept || report)({ status: "submission-reserved", stage: "first-frame", paidTaskSubmitted: true });
+          const savedPath = await this.saveImageCandidate(image, accepted, firstImagePath);
+          this.updateProjectShot(paths.folder, shot.id, {
+            firstImagePath: savedPath,
+            imagePath: savedPath,
+            status: "首帧已完成",
+          });
+          await (resolve || report)({
+            status: "image-processing",
+            stage: "first-frame",
+            paidTaskSubmitted: true,
+            recoveryContext: { boundary: "first-frame", imagePath: savedPath },
+          });
+          return savedPath;
         });
       }
       if (!videoTaskId && needsLastFrame && !currentLastImagePath) {
         this.assertWorkbenchQueueRunnerLock(paths.folder, context.queueId);
         await report({ status: "image-processing", stage: "last-frame" });
         this.updateProjectShot(paths.folder, shot.id, { status: "正在生成尾帧" });
-        const candidate = await withPaidSubmissionGate({ kind: "last-frame" }, async () => {
+        currentLastImagePath = await withPaidSubmissionGate({ kind: "last-frame" }, async ({ accept, resolve } = {}) => {
           const accepted = await this.generateImageMulti(image, visualStyle.applyVisualStyle(shot.lastImagePrompt + "\n" + continuity, context.visualStyle), referencePaths, imageModel);
-          await report({ status: "image-processing", stage: "last-frame", paidTaskSubmitted: true });
-          return accepted;
+          await (accept || report)({ status: "submission-reserved", stage: "last-frame", paidTaskSubmitted: true });
+          const savedPath = await this.saveImageCandidate(image, accepted, lastImagePath);
+          this.updateProjectShot(paths.folder, shot.id, { lastImagePath: savedPath, status: "尾帧已完成" });
+          await (resolve || report)({
+            status: "image-processing",
+            stage: "last-frame",
+            paidTaskSubmitted: true,
+            recoveryContext: { boundary: "last-frame", imagePath: savedPath },
+          });
+          return savedPath;
         });
-        currentLastImagePath = await this.saveImageCandidate(image, candidate, lastImagePath);
-        this.updateProjectShot(paths.folder, shot.id, { lastImagePath: currentLastImagePath, status: "尾帧已完成" });
       }
 
       if (!videoTaskId) {
@@ -2262,7 +2432,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         this.updateProjectShot(paths.folder, shot.id, { status: "正在提交视频任务" });
         let task;
         try {
-          task = await withPaidSubmissionGate({ kind: "video-submission" }, async () => {
+          task = await withPaidSubmissionGate({ kind: "video-submission" }, async ({ accept, resolve } = {}) => {
             const accepted = await video.submitVideo(generationPolicy.buildVideoOptions({
               model,
               prompt: visualStyle.applyVisualStyle(String(shot.effectiveVideoPrompt || ""), context.visualStyle),
@@ -2275,10 +2445,23 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
             }));
             const acceptedTaskId = String(accepted?.id || "").trim();
             if (!acceptedTaskId) {
-              await report({ status: "video-submitting", stage: "provider-submission", paidTaskSubmitted: true });
+              await (accept || report)({ status: "submission-reserved", stage: "provider-submission", paidTaskSubmitted: true });
               const missingTaskId = new Error("视频平台未返回任务编号，已停止等待以避免重复提交。");
               missingTaskId.paidTaskSubmitted = true;
               throw missingTaskId;
+            }
+            try {
+              await (accept || report)({
+                status: "submission-reserved",
+                stage: "provider-submission",
+                taskId: acceptedTaskId,
+                paidTaskSubmitted: true,
+                recoveryContext: { boundary: "video-submission", taskId: acceptedTaskId, accepted: true },
+              });
+            } catch (error) {
+              error.taskId ||= acceptedTaskId;
+              error.paidTaskSubmitted = true;
+              throw error;
             }
             let projectTaskWriteError = null;
             try {
@@ -2295,11 +2478,12 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
               projectTaskWriteError = error;
             }
             try {
-              await report({
+              await (resolve || report)({
                 status: "video-processing",
                 stage: "provider-generation",
                 taskId: acceptedTaskId,
                 paidTaskSubmitted: true,
+                recoveryContext: { boundary: "video-submission", taskId: acceptedTaskId },
               });
             } catch (error) {
               error.taskId ||= acceptedTaskId;

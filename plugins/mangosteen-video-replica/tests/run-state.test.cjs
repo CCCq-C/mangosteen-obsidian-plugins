@@ -117,6 +117,9 @@ assert.strictEqual(monotonicStop.shots["008"].progress, 71);
 assert.deepStrictEqual(monotonicStop.shots["008"].error, structuredError);
 assert.deepStrictEqual(monotonicStop.shots["008"].recoveryContext, { pollAttempt: 4, lastProviderStatus: "unknown" });
 assert.strictEqual(recoverableProcessing.stopRequested, false, "the monotonic stop transition must not mutate its authoritative input");
+const lateProviderState = updateShotState(recoverableProcessing, "008", { now: "2026-10-11T15:18:00.000Z", progress: 72 });
+const earlierPendingStop = requestRunStop(lateProviderState, "2026-10-11T15:17:00.000Z");
+assert.strictEqual(earlierPendingStop.updatedAt, "2026-10-11T15:18:00.000Z", "merging an older pending stop must not regress authoritative timestamps");
 
 const authoritativeStopped = requestRunStop(updateShotState(recoverableProcessing, "008", {
   taskId: "task-linearized",
@@ -137,6 +140,91 @@ assert.strictEqual(monotonicMerge.shots["008"].paidTaskSubmitted, true);
 assert.strictEqual(monotonicMerge.shots["008"].progress, 73);
 assert.deepStrictEqual(monotonicMerge.shots["008"].recoveryContext, { pollAttempt: 5, lastProviderStatus: "processing" });
 assert.strictEqual(monotonicMerge.revision, 10, "each persisted merge must advance the authoritative revision");
+
+const authoritativeProcessing = updateShotState(run, "008", {
+  status: "video-processing",
+  stage: "provider-generation",
+  progress: 41,
+  recoveryContext: { pollAttempt: 2 },
+});
+authoritativeProcessing.revision = 5;
+authoritativeProcessing.activeShotId = "008";
+const staleQueued = JSON.parse(JSON.stringify(run));
+staleQueued.revision = 4;
+staleQueued.updatedAt = "2026-10-11T14:00:00.000Z";
+const mergedStaleQueued = mergeRunState(authoritativeProcessing, staleQueued, "2026-10-11T15:11:00.000Z");
+assert.strictEqual(mergedStaleQueued.shots["008"].status, "video-processing", "stale queued state must not regress authoritative processing");
+assert.strictEqual(mergedStaleQueued.shots["008"].progress, 41);
+assert.deepStrictEqual(mergedStaleQueued.shots["008"].recoveryContext, { pollAttempt: 2 });
+assert.strictEqual(mergedStaleQueued.activeShotId, "008");
+
+const authoritativeRecovery = updateShotState(authoritativeProcessing, "008", {
+  status: "recovery-pending",
+  error: normalizeGenerationError(new Error("查询结果未知"), {
+    code: "PROVIDER_QUERY_UNKNOWN",
+    retryable: true,
+    taskId: "task-recovery",
+    now: "2026-10-11T15:12:00.000Z",
+  }),
+  taskId: "task-recovery",
+  paidTaskSubmitted: true,
+  progress: 44,
+  recoveryContext: { pollAttempt: 3, lastProviderStatus: "unknown" },
+});
+authoritativeRecovery.revision = 8;
+const staleTerminalFailure = updateShotState(processing, "008", {
+  status: "failed",
+  error: new Error("旧窗口误判失败"),
+});
+staleTerminalFailure.revision = 7;
+const mergedStaleFailure = mergeRunState(authoritativeRecovery, staleTerminalFailure, "2026-10-11T15:13:00.000Z");
+assert.strictEqual(mergedStaleFailure.shots["008"].status, "recovery-pending", "stale terminal failure must not unlock newer recovery-pending state");
+assert.strictEqual(mergedStaleFailure.shots["008"].error.code, "PROVIDER_QUERY_UNKNOWN");
+assert.strictEqual(mergedStaleFailure.shots["008"].progress, 44);
+assert.deepStrictEqual(mergedStaleFailure.shots["008"].recoveryContext, { pollAttempt: 3, lastProviderStatus: "unknown" });
+
+const reservedAuthoritative = updateShotState(authoritativeRecovery, "008", {
+  status: "submission-reserved",
+  stage: "video-submission",
+  submissionReservation: {
+    runId: authoritativeRecovery.runId,
+    shotId: "008",
+    boundary: "video-submission",
+    reservationId: "reservation-stale-resolution",
+    createdAt: "2026-10-11T15:14:00.000Z",
+    status: "submission-reserved",
+  },
+  submissionUncertain: true,
+});
+reservedAuthoritative.revision = 10;
+const staleAcceptedResolution = updateShotState(reservedAuthoritative, "008", {
+  status: "video-processing",
+  stage: "provider-generation",
+  taskId: "task-after-pending-stop",
+  paidTaskSubmitted: true,
+  progress: null,
+  error: null,
+  recoveryContext: { boundary: "video-submission", taskId: "task-after-pending-stop" },
+  submissionReservation: null,
+  submissionUncertain: false,
+  lastSubmissionResult: {
+    reservationId: "reservation-stale-resolution",
+    boundary: "video-submission",
+    status: "resolved",
+  },
+});
+staleAcceptedResolution.revision = 9;
+const mergedStaleResolution = mergeRunState(reservedAuthoritative, staleAcceptedResolution, "2026-10-11T15:15:00.000Z");
+assert.strictEqual(mergedStaleResolution.shots["008"].submissionReservation, null);
+assert.strictEqual(mergedStaleResolution.shots["008"].taskId, "task-recovery", "an existing accepted task ID remains authoritative");
+assert.strictEqual(mergedStaleResolution.shots["008"].progress, 44, "stale reservation resolution must not erase newer progress");
+assert.strictEqual(mergedStaleResolution.shots["008"].error.code, "PROVIDER_QUERY_UNKNOWN", "stale reservation resolution must not erase newer error context");
+assert.deepStrictEqual(mergedStaleResolution.shots["008"].recoveryContext, {
+  boundary: "video-submission",
+  taskId: "task-after-pending-stop",
+  pollAttempt: 3,
+  lastProviderStatus: "unknown",
+});
 
 assert.strictEqual(
   selectCurrentRun({ activeRun: processing, legacyState: { status: "stopped" } }).status,

@@ -735,6 +735,7 @@ function request() {
   fs.writeFileSync(gateActiveRunPath, JSON.stringify(makeGateRun()));
   plugin.queueApis.delete(gateFolder);
   plugin.activeQueueObjects.delete(gateFolder);
+  assert.strictEqual(typeof plugin.recordPendingWorkbenchStop, "function", "v6 stop must durably record intent before waiting for the paid gate");
 
   const realAcquireSubmissionGate = plugin.acquireWorkbenchSubmissionGate.bind(plugin);
   let releaseStopGate;
@@ -781,7 +782,9 @@ function request() {
     queueId: reverseRun.queueId,
     runId: reverseRun.runId,
     revision: reverseRun.revision,
-  }, async () => {
+    shotId: "001",
+    boundary: "video-submission",
+  }, async (_reserved, reservation) => {
     paidBeforeStopWon += 1;
     acceptedProviderCalled();
     await acceptedSubmissionPause;
@@ -792,6 +795,16 @@ function request() {
       taskId: "linearized-provider-task",
       paidTaskSubmitted: true,
       progress: null,
+      submissionReservation: null,
+      submissionUncertain: false,
+      lastSubmissionResult: {
+        runId: reverseRun.runId,
+        shotId: "001",
+        boundary: "video-submission",
+        reservationId: reservation.reservationId,
+        status: "resolved",
+        resolvedAt: new Date().toISOString(),
+      },
     });
     plugin.persistWorkbenchRun(plugin.workbenchProjectPaths(gateFolder), accepted);
     return { id: "linearized-provider-task" };
@@ -820,6 +833,25 @@ function request() {
   assert.strictEqual(afterStaleRunnerSave.shots["001"].taskId, "linearized-provider-task", "a stale runner save must retain accepted recovery data");
   assert.strictEqual(afterStaleRunnerSave.shots["001"].paidTaskSubmitted, true);
 
+  const newerRecoveryRun = runState.updateShotState(afterStaleRunnerSave, "001", {
+    status: "recovery-pending",
+    stage: "provider-generation",
+    progress: 63,
+    error: Object.assign(new Error("供应商查询结果暂不确定"), { code: "PROVIDER_QUERY_UNKNOWN", retryable: true }),
+    recoveryContext: { pollAttempt: 6, lastProviderStatus: "unknown" },
+  });
+  plugin.persistWorkbenchRun(plugin.workbenchProjectPaths(gateFolder), newerRecoveryRun);
+  const staleTerminalSave = makeGateRun();
+  staleTerminalSave.revision = Math.max(0, newerRecoveryRun.revision - 1);
+  staleTerminalSave.shots["001"].status = "failed";
+  staleTerminalSave.shots["001"].error = { code: "STALE_FAILURE", message: "旧窗口误判失败" };
+  plugin.persistWorkbenchRun(plugin.workbenchProjectPaths(gateFolder), staleTerminalSave);
+  const afterStaleTerminalSave = JSON.parse(fs.readFileSync(gateActiveRunPath, "utf8"));
+  assert.strictEqual(afterStaleTerminalSave.shots["001"].status, "recovery-pending");
+  assert.strictEqual(afterStaleTerminalSave.shots["001"].progress, 63);
+  assert.strictEqual(afterStaleTerminalSave.shots["001"].error.code, "PROVIDER_QUERY_UNKNOWN");
+  assert.deepStrictEqual(afterStaleTerminalSave.shots["001"].recoveryContext, { pollAttempt: 6, lastProviderStatus: "unknown" });
+
   const staleGateRun = makeGateRun();
   fs.writeFileSync(gateActiveRunPath, JSON.stringify(staleGateRun));
   const gatePaths = plugin.workbenchProjectPaths(gateFolder, { createWorkDirectory: true });
@@ -827,13 +859,287 @@ function request() {
   const staleGateTime = new Date(Date.now() - 6 * 60 * 1000);
   fs.utimesSync(gatePaths.submissionGatePath, staleGateTime, staleGateTime);
   let reclaimedGateCalls = 0;
-  await plugin.withWorkbenchPaidSubmissionGate(gateFolder, {
-    queueId: staleGateRun.queueId,
-    runId: staleGateRun.runId,
-    revision: staleGateRun.revision,
-  }, async () => { reclaimedGateCalls += 1; });
+  await plugin.withWorkbenchSubmissionGate(gateFolder, async () => { reclaimedGateCalls += 1; });
   assert.strictEqual(reclaimedGateCalls, 1, "a crashed stale gate owner must not deadlock future submissions");
   assert.strictEqual(fs.existsSync(gatePaths.submissionGatePath), false, "the bounded gate must release after recovery");
+
+  const crashRun = makeGateRun();
+  fs.writeFileSync(gateActiveRunPath, JSON.stringify(crashRun));
+  let firstCrashProviderCalls = 0;
+  await assert.rejects(
+    () => plugin.withWorkbenchPaidSubmissionGate(gateFolder, {
+      queueId: crashRun.queueId,
+      runId: crashRun.runId,
+      revision: crashRun.revision,
+      shotId: "001",
+      boundary: "video-submission",
+    }, async (reserved) => {
+      const reservation = reserved.shots["001"].submissionReservation;
+      assert.strictEqual(reservation.status, "submission-reserved", "reservation must be persisted before provider entry");
+      firstCrashProviderCalls += 1;
+      throw new Error("模拟 provider 返回后进程崩溃");
+    }),
+    /模拟 provider 返回后进程崩溃/,
+  );
+  assert.strictEqual(firstCrashProviderCalls, 1);
+  const crashPersisted = JSON.parse(fs.readFileSync(gateActiveRunPath, "utf8"));
+  assert.strictEqual(crashPersisted.shots["001"].submissionReservation.status, "submission-reserved");
+  fs.writeFileSync(gatePaths.submissionGatePath, JSON.stringify({ token: "crashed-after-provider" }));
+  fs.utimesSync(gatePaths.submissionGatePath, staleGateTime, staleGateTime);
+  let secondWindowProviderCalls = 0;
+  await assert.rejects(
+    () => plugin.withWorkbenchPaidSubmissionGate(gateFolder, {
+      queueId: crashRun.queueId,
+      runId: crashRun.runId,
+      revision: crashPersisted.revision,
+      shotId: "001",
+      boundary: "video-submission",
+    }, async () => { secondWindowProviderCalls += 1; }),
+    /UNSAFE_PAID_SUBMISSION_RECOVERY|人工检查|不再自动重提/,
+  );
+  assert.strictEqual(secondWindowProviderCalls, 0, "stale gate cleanup must not authorize resubmission past an unresolved reservation");
+
+  const pendingRun = makeGateRun();
+  fs.writeFileSync(gateActiveRunPath, JSON.stringify(pendingRun));
+  plugin.submissionGateTimeoutMs = 30;
+  let releaseLongGate;
+  let longGateStarted;
+  const longGatePause = new Promise((resolve) => { releaseLongGate = resolve; });
+  const longGateReady = new Promise((resolve) => { longGateStarted = resolve; });
+  const longGate = plugin.withWorkbenchSubmissionGate(gateFolder, async () => {
+    longGateStarted();
+    await longGatePause;
+  });
+  await longGateReady;
+  await assert.rejects(
+    () => plugin.stopWorkbenchGeneration(gateFolder),
+    (error) => error?.code === "SUBMISSION_GATE_TIMEOUT",
+    "stop may time out waiting for a long provider operation but its intent must remain durable",
+  );
+  const pendingStopPath = plugin.workbenchProjectPaths(gateFolder).pendingStopPath;
+  assert.strictEqual(fs.existsSync(pendingStopPath), true, "timed-out stop intent must remain on disk");
+  releaseLongGate();
+  await longGate;
+  const stoppedAfterTimeout = JSON.parse(fs.readFileSync(gateActiveRunPath, "utf8"));
+  assert.strictEqual(stoppedAfterTimeout.stopRequested, true, "gate holder must merge pending stop before release");
+  assert.strictEqual(fs.existsSync(pendingStopPath), false, "pending intent clears only after active-run records the stop");
+  delete plugin.submissionGateTimeoutMs;
+
+  const originalPaidGateMethod = plugin.withWorkbenchPaidSubmissionGate;
+  const originalEnsureBoundaryAsset = plugin.ensureReferenceAsset;
+  const originalGenerateBoundaryImage = plugin.generateImageMulti;
+  const originalSaveBoundaryImage = plugin.saveImageCandidate;
+  const originalLocalBoundaryImage = plugin.localImage;
+  const originalCopyBoundaryFile = plugin.copyVaultFile;
+  const originalWaitBoundaryVideo = plugin.waitForVideo;
+  const originalBoundaryRuntime = plugin.resolveQueueGenerationRuntime;
+  const writeBoundaryProject = (name) => {
+    const caseFolder = `山竹视频复刻/${name}`;
+    const caseRoot = path.join(vault, ...caseFolder.split("/"));
+    fs.mkdirSync(path.join(caseRoot, ".mangosteen/runs"), { recursive: true });
+    fs.writeFileSync(path.join(caseRoot, ".mangosteen/project.json"), JSON.stringify({
+      schemaVersion: 6,
+      folder: caseFolder,
+      title: name,
+      status: "analysis_ready",
+      shots: request().shots.map((shot) => ({ ...shot, status: "等待生成" })),
+    }));
+    fs.writeFileSync(path.join(caseRoot, ".mangosteen/draft.json"), JSON.stringify({ ...request(), schemaVersion: 6 }));
+    return { caseFolder, caseRoot };
+  };
+  const readBoundaryArchive = (caseRoot) => {
+    const runsRoot = path.join(caseRoot, ".mangosteen/runs");
+    const names = fs.readdirSync(runsRoot).filter((name) => name.endsWith(".json"));
+    assert.strictEqual(names.length, 1, "each real-path case must archive exactly one terminal run");
+    return JSON.parse(fs.readFileSync(path.join(runsRoot, names[0]), "utf8"));
+  };
+  const configureBoundaryProviders = ({ targetBoundary, pauseTarget = false }) => {
+    const calls = { references: 0, images: 0, videos: 0 };
+    let releaseTarget;
+    let targetReached;
+    let targetSeen = false;
+    const targetPause = new Promise((resolve) => { releaseTarget = resolve; });
+    const targetReady = new Promise((resolve) => { targetReached = resolve; });
+    const pause = async (kind) => {
+      if (!pauseTarget || targetSeen || kind !== targetBoundary) return;
+      targetSeen = true;
+      targetReached();
+      await targetPause;
+    };
+    plugin.ensureReferenceAsset = async (_image, asset) => {
+      calls.references += 1;
+      await pause("reference-asset");
+      return {
+        ...asset,
+        imagePath: `山竹视频资产库/${asset.kind}/${asset.id}.png`,
+        metadataPath: `山竹视频资产库/${asset.kind}/${asset.id}.json`,
+        contentHash: `${asset.kind}-${asset.id}-hash`,
+        reused: false,
+      };
+    };
+    plugin.generateImageMulti = async () => {
+      calls.images += 1;
+      await pause(calls.images === 1 ? "first-frame" : "last-frame");
+      return { kind: "base64", value: "eA==" };
+    };
+    plugin.saveImageCandidate = async (_image, _candidate, targetPath) => targetPath;
+    plugin.localImage = (vaultPath) => ({ vaultPath });
+    plugin.copyVaultFile = (_source, targetPath) => targetPath;
+    plugin.waitForVideo = async () => ({ localPath: "/tmp/completed-boundary.mp4" });
+    plugin.resolveQueueGenerationRuntime = async () => ({
+      image: {},
+      video: {
+        submitVideo: async () => {
+          calls.videos += 1;
+          await pause("video-submission");
+          return { id: `task-${targetBoundary}` };
+        },
+      },
+      imageModel: "gpt-image-2-w",
+      model: "MiniMax-H3",
+      resolution: "768p",
+    });
+    return { calls, targetReady, releaseTarget };
+  };
+  const stopFirstExpectations = {
+    "reference-asset": { references: 0, images: 0, videos: 0 },
+    "first-frame": { references: 2, images: 0, videos: 0 },
+    "last-frame": { references: 2, images: 1, videos: 0 },
+    "video-submission": { references: 2, images: 2, videos: 0 },
+  };
+  for (const [targetBoundary, expectedCalls] of Object.entries(stopFirstExpectations)) {
+    const { caseFolder, caseRoot } = writeBoundaryProject(`真实停止优先-${targetBoundary}`);
+    const { calls } = configureBoundaryProviders({ targetBoundary });
+    let stopInjected = false;
+    plugin.withWorkbenchPaidSubmissionGate = async function stopBeforeProvider(folderName, identity, operation) {
+      if (folderName === caseFolder && identity.boundary === targetBoundary && !stopInjected) {
+        stopInjected = true;
+        this.recordPendingWorkbenchStop(this.workbenchProjectPaths(folderName), identity);
+        await this.withWorkbenchSubmissionGate(folderName, async () => {});
+      }
+      return originalPaidGateMethod.call(this, folderName, identity, operation);
+    };
+    const preview = await plugin.previewWorkbenchGeneration(caseFolder, ["002"]);
+    await plugin.startWorkbenchGeneration(caseFolder, preview);
+    await plugin.queueRuns.get(caseFolder);
+    assert.deepStrictEqual(calls, expectedCalls, `${targetBoundary} stop-first must block its real provider call`);
+    const archived = readBoundaryArchive(caseRoot);
+    assert.strictEqual(archived.stopRequested, true);
+    assert.strictEqual(archived.shots["002"].status, "stopped", `${targetBoundary} stop-first must end stopped, not failed`);
+  }
+  plugin.withWorkbenchPaidSubmissionGate = originalPaidGateMethod;
+
+  for (const targetBoundary of Object.keys(stopFirstExpectations)) {
+    const { caseFolder, caseRoot } = writeBoundaryProject(`真实提交优先-${targetBoundary}`);
+    const { calls, targetReady, releaseTarget } = configureBoundaryProviders({ targetBoundary, pauseTarget: true });
+    const preview = await plugin.previewWorkbenchGeneration(caseFolder, ["002"]);
+    await plugin.startWorkbenchGeneration(caseFolder, preview);
+    const run = plugin.queueRuns.get(caseFolder);
+    await targetReady;
+    if (targetBoundary === "reference-asset") plugin.submissionGateTimeoutMs = 30;
+    const stop = plugin.stopWorkbenchGeneration(caseFolder);
+    const stopResult = targetBoundary === "reference-asset"
+      ? assert.rejects(stop, (error) => error?.code === "SUBMISSION_GATE_TIMEOUT")
+      : stop;
+    if (targetBoundary === "reference-asset") {
+      await stopResult;
+      assert.strictEqual(fs.existsSync(plugin.workbenchProjectPaths(caseFolder).pendingStopPath), true);
+    } else {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.strictEqual(fs.existsSync(plugin.workbenchProjectPaths(caseFolder).pendingStopPath), true);
+    }
+    releaseTarget();
+    if (targetBoundary !== "reference-asset") await stopResult;
+    await run;
+    delete plugin.submissionGateTimeoutMs;
+    assert.strictEqual(
+      targetBoundary === "reference-asset" ? calls.references
+        : targetBoundary === "first-frame" ? calls.images
+          : targetBoundary === "last-frame" ? calls.images
+            : calls.videos,
+      targetBoundary === "last-frame" ? 2 : 1,
+      `${targetBoundary} submission-first must execute its target provider operation exactly once`,
+    );
+    const archived = readBoundaryArchive(caseRoot);
+    assert.strictEqual(archived.stopRequested, true, `${targetBoundary} holder must merge pending stop before release`);
+    if (targetBoundary === "video-submission") {
+      assert.strictEqual(archived.shots["002"].taskId, "task-video-submission");
+      assert.strictEqual(archived.shots["002"].paidTaskSubmitted, true);
+    }
+  }
+
+  const { caseFolder: crashChainFolder, caseRoot: crashChainRoot } = writeBoundaryProject("真实提交返回后崩溃");
+  const crashChain = configureBoundaryProviders({ targetBoundary: "video-submission" });
+  let crashChainProviderReturned = false;
+  plugin.resolveQueueGenerationRuntime = async () => ({
+    image: {},
+    video: {
+      submitVideo: async () => {
+        crashChain.calls.videos += 1;
+        crashChainProviderReturned = true;
+        return { id: "task-crash-after-accept" };
+      },
+    },
+    imageModel: "gpt-image-2-w",
+    model: "MiniMax-H3",
+    resolution: "768p",
+  });
+  const originalPersistWorkbenchRun = plugin.persistWorkbenchRun;
+  plugin.persistWorkbenchRun = function failAcceptedResolution(paths, queue) {
+    const shot = queue?.shots?.["002"];
+    if (crashChainProviderReturned
+      && shot?.lastSubmissionResult?.boundary === "video-submission"
+      && shot?.submissionReservation == null) {
+      throw new Error("模拟 provider 已接受后、active-run 确认前崩溃");
+    }
+    return originalPersistWorkbenchRun.call(this, paths, queue);
+  };
+  const crashPreview = await plugin.previewWorkbenchGeneration(crashChainFolder, ["002"]);
+  await plugin.startWorkbenchGeneration(crashChainFolder, crashPreview);
+  await assert.rejects(
+    plugin.queueRuns.get(crashChainFolder),
+    /模拟 provider 已接受后、active-run 确认前崩溃/,
+  );
+  plugin.persistWorkbenchRun = originalPersistWorkbenchRun;
+  assert.strictEqual(crashChain.calls.videos, 1);
+  const crashChainActivePath = path.join(crashChainRoot, ".mangosteen/active-run.json");
+  const unresolvedAfterCrash = JSON.parse(fs.readFileSync(crashChainActivePath, "utf8"));
+  assert.strictEqual(unresolvedAfterCrash.shots["002"].submissionReservation.boundary, "video-submission");
+  assert.strictEqual(unresolvedAfterCrash.shots["002"].taskId, "task-crash-after-accept");
+  assert.strictEqual(unresolvedAfterCrash.shots["002"].paidTaskSubmitted, true);
+  plugin.queueApis.delete(crashChainFolder);
+  plugin.activeQueueObjects.delete(crashChainFolder);
+  plugin.queueRuns.delete(crashChainFolder);
+  let secondWindowSubmissions = 0;
+  let secondWindowQueries = 0;
+  plugin.resolveQueueGenerationRuntime = async () => ({
+    image: {},
+    video: { submitVideo: async () => { secondWindowSubmissions += 1; return { id: "must-not-resubmit" }; } },
+    imageModel: "gpt-image-2-w",
+    model: "MiniMax-H3",
+    resolution: "768p",
+  });
+  plugin.waitForVideo = async () => {
+    secondWindowQueries += 1;
+    throw new Error("未决 reservation 不应自动查询或重提");
+  };
+  const crashRecoveryStarted = await plugin.recoverWorkbenchQueue(crashChainFolder);
+  if (crashRecoveryStarted) await plugin.queueRuns.get(crashChainFolder)?.catch(() => {});
+  assert.strictEqual(crashRecoveryStarted, false, "unresolved paid reservation must fail closed during restart recovery");
+  assert.strictEqual(secondWindowSubmissions, 0);
+  assert.strictEqual(secondWindowQueries, 0);
+  const crashRecoveryState = JSON.parse(fs.readFileSync(crashChainActivePath, "utf8"));
+  assert.strictEqual(crashRecoveryState.shots["002"].status, "recovery-pending");
+  assert.strictEqual(crashRecoveryState.shots["002"].error.code, "UNSAFE_PAID_SUBMISSION_RECOVERY");
+  assert.strictEqual(crashRecoveryState.shots["002"].submissionReservation.boundary, "video-submission");
+
+  plugin.ensureReferenceAsset = originalEnsureBoundaryAsset;
+  plugin.generateImageMulti = originalGenerateBoundaryImage;
+  plugin.saveImageCandidate = originalSaveBoundaryImage;
+  plugin.localImage = originalLocalBoundaryImage;
+  plugin.copyVaultFile = originalCopyBoundaryFile;
+  plugin.waitForVideo = originalWaitBoundaryVideo;
+  plugin.resolveQueueGenerationRuntime = originalBoundaryRuntime;
   fs.rmSync(gateRoot, { recursive: true, force: true });
 
   const v6Plan = await plugin.previewWorkbenchGeneration(v6Folder, ["001", "002"]);

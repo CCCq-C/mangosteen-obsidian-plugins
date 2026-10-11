@@ -312,14 +312,43 @@ async function runGenerationQueue(queue, runShot, {
             revision: queue.revision,
             shotId,
             boundary: String(boundary?.kind || boundary || "paid-submission"),
-          }, async (...args) => {
+          }, async (persistedRun = null, reservation = null) => {
             paidSubmissionGateDepth += 1;
-            try { return await operation(...args); }
+            try {
+              if (persistedRun && typeof persistedRun === "object"
+                && String(persistedRun.runId || persistedRun.queueId || "") === String(queue.runId || queue.queueId || "")) {
+                replaceRun(queue, persistedRun);
+              }
+              const activeReservation = reservation || queue.shots?.[shotId]?.submissionReservation || null;
+              const accept = async (patch = {}) => updateState({
+                ...patch,
+                ...(activeReservation ? {
+                  submissionReservation: activeReservation,
+                  submissionUncertain: true,
+                } : {}),
+              });
+              const resolve = async (patch = {}) => {
+                const resolution = activeReservation ? {
+                  submissionReservation: null,
+                  submissionUncertain: false,
+                  lastSubmissionResult: {
+                    runId: String(queue.runId || queue.queueId || ""),
+                    shotId,
+                    boundary: String(activeReservation.boundary || boundary?.kind || boundary || "paid-submission"),
+                    reservationId: String(activeReservation.reservationId || ""),
+                    status: "resolved",
+                    resolvedAt: new Date().toISOString(),
+                  },
+                } : {};
+                return updateState({ ...patch, ...resolution });
+              };
+              return await operation({ reservation: activeReservation, accept, resolve });
+            }
             finally { paidSubmissionGateDepth -= 1; }
           });
         }
         await assertPaidSubmissionAllowed();
-        return operation();
+        return operation({ reservation: null, accept: updateState, resolve: updateState });
       };
       const context = deepFreeze({
         queueId: queue.queueId,
@@ -342,13 +371,17 @@ async function runGenerationQueue(queue, runShot, {
       }));
     } catch (error) {
       shot = queue.shots[shotId];
+      const unresolvedReservation = shot?.submissionReservation?.status === "submission-reserved"
+        ? shot.submissionReservation
+        : null;
       const errorTaskId = String(error?.taskId || error?.videoTaskId || "").trim();
       const acceptedTaskId = errorTaskId || String(shot?.taskId || "").trim();
       const acceptedTask = Boolean(acceptedTaskId)
         && (shot?.paidTaskSubmitted === true || error?.paidTaskSubmitted === true || Boolean(errorTaskId));
       const terminalTaskFailure = error?.terminalTaskFailure === true || error?.code === "VIDEO_TASK_FAILED";
       let recoverableFailure = false;
-      if (error?.code === "GENERATION_STOPPED" && queue.stopRequested === true && !acceptedTask) {
+      if (error?.code === "GENERATION_STOPPED" && !acceptedTask && !unresolvedReservation) {
+        if (queue.stopRequested !== true) replaceRun(queue, requestRunStop(queue));
         replaceRun(queue, updateShotState(queue, shotId, {
           status: "stopped",
           stage: "stopped",
@@ -356,6 +389,38 @@ async function runGenerationQueue(queue, runShot, {
           error: null,
           now: new Date().toISOString(),
         }));
+      } else if (unresolvedReservation) {
+        const providerError = normalizeGenerationError(error, {
+          source: error?.source || "video-replica",
+          stage: unresolvedReservation.boundary || shot?.stage || "provider-submission",
+          taskId: acceptedTaskId,
+          paidTaskSubmitted: shot?.paidTaskSubmitted === true || Boolean(acceptedTaskId),
+          retryable: error?.retryable === true,
+          now: new Date().toISOString(),
+        });
+        const unsafeError = Object.assign(new Error(providerError.message), {
+          code: "UNSAFE_PAID_SUBMISSION_RECOVERY",
+          source: providerError.source,
+          stage: providerError.stage,
+          action: "人工检查供应商记录；确认未受理前不要重新提交",
+          retryable: false,
+          paidTaskSubmitted: providerError.paidTaskSubmitted,
+        });
+        replaceRun(queue, updateShotState(queue, shotId, {
+          status: "recovery-pending",
+          stage: unresolvedReservation.boundary || shot?.stage || "provider-submission",
+          result: null,
+          submissionReservation: unresolvedReservation,
+          submissionUncertain: true,
+          error: unsafeError,
+          recoveryContext: {
+            ...(shot?.recoveryContext && typeof shot.recoveryContext === "object" ? shot.recoveryContext : {}),
+            submissionReservation: clone(unresolvedReservation),
+            providerError,
+          },
+          now: new Date().toISOString(),
+        }));
+        recoverableFailure = true;
       } else if (acceptedTask && !terminalTaskFailure) {
         replaceRun(queue, updateShotState(queue, shotId, {
           status: "recovery-pending",

@@ -9,6 +9,7 @@ const {
   requestQueueStop,
   runGenerationQueue,
 } = require("../generation-queue.cjs");
+const { updateShotState } = require("../run-state.cjs");
 
 assert.strictEqual(typeof appendGenerationPlan, "function", "an active queue must support appending later shot plans");
 
@@ -355,6 +356,115 @@ for (const changed of [
     shotId: "001",
     boundary: "video-submission",
   }], "the queue must pass current run identity and revision into the shared paid-submission gate");
+
+  const reservationQueue = createGenerationQueue(firstOnly, { now: "2026-10-12T00:00:07.000Z" });
+  reservationQueue.revision = 20;
+  const reservationStates = [];
+  await runGenerationQueue(reservationQueue, async (_shot, context) => context.withPaidSubmissionGate(
+    { kind: "video-submission" },
+    async ({ reservation, accept, resolve }) => {
+      assert.strictEqual(reservation.status, "submission-reserved");
+      assert.strictEqual(reservation.boundary, "video-submission");
+      assert.strictEqual(reservation.shotId, "001");
+      assert.strictEqual(reservationQueue.shots["001"].submissionUncertain, true, "reservation must be visible before provider entry");
+      await accept({
+        status: "submission-reserved",
+        stage: "video-submission",
+        taskId: "reserved-task",
+        paidTaskSubmitted: true,
+      });
+      assert.strictEqual(reservationQueue.shots["001"].submissionReservation.reservationId, "reservation-1");
+      assert.strictEqual(reservationQueue.shots["001"].paidTaskSubmitted, true, "accepted provider work must be durable before result handoff");
+      await resolve({
+        status: "video-processing",
+        stage: "provider-generation",
+        taskId: "reserved-task",
+        paidTaskSubmitted: true,
+      });
+      return { videoPath: "reserved.mp4", taskId: "reserved-task" };
+    },
+  ), {
+    onUpdate: async (state) => { reservationStates.push(state); },
+    withPaidSubmissionGate: async (identity, operation) => {
+      const reservation = {
+        runId: identity.runId,
+        shotId: identity.shotId,
+        boundary: identity.boundary,
+        reservationId: "reservation-1",
+        createdAt: "2026-10-12T00:00:08.000Z",
+        status: "submission-reserved",
+        previousStatus: reservationQueue.shots[identity.shotId].status,
+        previousStage: reservationQueue.shots[identity.shotId].stage,
+      };
+      const reserved = updateShotState(reservationQueue, identity.shotId, {
+        status: "submission-reserved",
+        stage: identity.boundary,
+        submissionReservation: reservation,
+        submissionUncertain: true,
+      });
+      reserved.revision = identity.revision + 1;
+      return operation(reserved, reservation);
+    },
+  });
+  assert.strictEqual(reservationQueue.shots["001"].submissionReservation, null);
+  assert.strictEqual(reservationQueue.shots["001"].lastSubmissionResult.reservationId, "reservation-1");
+  assert.strictEqual(reservationQueue.shots["001"].paidTaskSubmitted, true);
+
+  const crashedReservationQueue = createGenerationQueue(firstOnly, { now: "2026-10-12T00:00:09.000Z" });
+  crashedReservationQueue.revision = 30;
+  let crashedProviderCalls = 0;
+  await assert.rejects(
+    runGenerationQueue(crashedReservationQueue, async (_shot, context) => context.withPaidSubmissionGate(
+      { kind: "first-frame" },
+      async () => {
+        crashedProviderCalls += 1;
+        throw Object.assign(new Error("模拟 provider 已接受后进程中断"), { code: "PROVIDER_TIMEOUT" });
+      },
+    ), {
+      withPaidSubmissionGate: async (identity, operation) => {
+        const reservation = {
+          runId: identity.runId,
+          shotId: identity.shotId,
+          boundary: identity.boundary,
+          reservationId: "reservation-crash",
+          createdAt: "2026-10-12T00:00:10.000Z",
+          status: "submission-reserved",
+          previousStatus: crashedReservationQueue.shots[identity.shotId].status,
+          previousStage: crashedReservationQueue.shots[identity.shotId].stage,
+        };
+        const reserved = updateShotState(crashedReservationQueue, identity.shotId, {
+          status: "submission-reserved",
+          stage: identity.boundary,
+          submissionReservation: reservation,
+          submissionUncertain: true,
+        });
+        reserved.revision = identity.revision + 1;
+        return operation(reserved, reservation);
+      },
+    }),
+    /模拟 provider 已接受后进程中断/,
+  );
+  assert.strictEqual(crashedProviderCalls, 1);
+  assert.strictEqual(crashedReservationQueue.shots["001"].status, "recovery-pending");
+  assert.strictEqual(crashedReservationQueue.shots["001"].submissionReservation.reservationId, "reservation-crash");
+  assert.strictEqual(crashedReservationQueue.shots["001"].error.code, "UNSAFE_PAID_SUBMISSION_RECOVERY");
+  assert.deepStrictEqual(lockedShotIds(crashedReservationQueue), ["001"]);
+
+  const gateStoppedQueue = createGenerationQueue(firstOnly, { now: "2026-10-12T00:00:11.000Z" });
+  let stoppedGateCalls = 0;
+  await runGenerationQueue(gateStoppedQueue, async (_shot, context) => context.withPaidSubmissionGate(
+    { kind: "reference-asset" },
+    async () => { stoppedGateCalls += 1; },
+  ), {
+    withPaidSubmissionGate: async () => {
+      const stopped = new Error("另一个窗口已持久化停止");
+      stopped.code = "GENERATION_STOPPED";
+      throw stopped;
+    },
+  });
+  assert.strictEqual(stoppedGateCalls, 0);
+  assert.strictEqual(gateStoppedQueue.stopRequested, true, "gate stop must request the local monotonic stop transition");
+  assert.strictEqual(gateStoppedQueue.shots["001"].status, "stopped", "stop-first must not be recorded as failed");
 
   console.log("generation-queue: ok");
 })().catch((error) => {

@@ -159,7 +159,9 @@ function deriveRunStatus(run) {
 function requestRunStop(activeRun, now) {
   if (!activeRun || typeof activeRun !== "object" || Array.isArray(activeRun)) throw new Error("活动运行格式错误。");
   const next = clone(activeRun);
-  const stoppedAt = timestamp(now) || new Date().toISOString();
+  const requestedAt = timestamp(now) || new Date().toISOString();
+  const authoritativeAt = timestamp(activeRun.updatedAt);
+  const stoppedAt = Date.parse(authoritativeAt) > Date.parse(requestedAt) ? authoritativeAt : requestedAt;
   next.stopRequested = true;
   next.updatedAt = stoppedAt;
   if (next.status === "queued") {
@@ -190,43 +192,103 @@ function mergeRunState(authoritative, candidate, now) {
   if (!authoritativeId || authoritativeId !== candidateId) throw new Error("活动运行已变化，已拒绝保存旧状态。");
   const authoritativeRevision = Number.isSafeInteger(authoritative.revision) && authoritative.revision >= 0 ? authoritative.revision : 0;
   const candidateRevision = Number.isSafeInteger(candidate.revision) && candidate.revision >= 0 ? candidate.revision : 0;
-
-  let next = clone(candidate);
+  const candidateIsStale = candidateRevision < authoritativeRevision;
+  let next = clone(candidateIsStale ? authoritative : candidate);
   next.shots ||= {};
   for (const [id, authoritativeShot] of Object.entries(authoritative.shots || {})) {
-    const candidateShot = next.shots[id];
+    const candidateShot = candidate.shots?.[id];
     if (!candidateShot) {
       next.shots[id] = clone(authoritativeShot);
       continue;
     }
     const authoritativeTaskId = String(authoritativeShot?.taskId || "").trim();
     const candidateTaskId = String(candidateShot?.taskId || "").trim();
-    const conflictingAcceptedTask = authoritativeTaskId && authoritativeTaskId !== candidateTaskId;
-    const authoritativeUpdatedAt = Date.parse(authoritativeShot?.updatedAt || "");
-    const candidateUpdatedAt = Date.parse(candidateShot?.updatedAt || "");
-    const authoritativeNewer = authoritativeUpdatedAt > candidateUpdatedAt
-      || (candidateRevision < authoritativeRevision
-        && (!Number.isFinite(candidateUpdatedAt) || !Number.isFinite(authoritativeUpdatedAt) || authoritativeUpdatedAt >= candidateUpdatedAt));
-    const candidateTerminal = TERMINAL_SHOT_STATUSES.has(String(candidateShot?.status || ""));
-    if (conflictingAcceptedTask) {
-      next.shots[id] = clone(authoritativeShot);
-      continue;
+    const authoritativeReservationId = String(authoritativeShot?.submissionReservation?.reservationId || "").trim();
+    const resolvedReservationId = String(candidateShot?.lastSubmissionResult?.reservationId || "").trim();
+    const resolvesAuthoritativeReservation = Boolean(authoritativeReservationId)
+      && authoritativeReservationId === resolvedReservationId
+      && candidateShot?.submissionReservation == null
+      && candidateShot?.lastSubmissionResult?.status === "resolved";
+    const authoritativeStatus = String(authoritativeShot?.status || "");
+    const candidateStatus = String(candidateShot?.status || "");
+    const staleCompletion = candidateIsStale
+      && candidateStatus === "completed"
+      && !TERMINAL_SHOT_STATUSES.has(authoritativeStatus)
+      && authoritativeStatus !== "recovery-pending"
+      && !authoritativeReservationId
+      && (!authoritativeTaskId || !candidateTaskId || authoritativeTaskId === candidateTaskId);
+    const staleStop = candidateIsStale
+      && candidateStatus === "stopped"
+      && authoritative.stopRequested === true
+      && !authoritativeTaskId
+      && !authoritativeReservationId;
+    const mergedShot = clone(candidateIsStale ? authoritativeShot : candidateShot);
+    if (candidateIsStale && resolvesAuthoritativeReservation) {
+      mergedShot.status = candidateStatus;
+      mergedShot.stage = candidateShot.stage;
+      mergedShot.result = clone(candidateShot.result);
+      mergedShot.recoveryContext = {
+        ...(candidateShot.recoveryContext && typeof candidateShot.recoveryContext === "object" ? clone(candidateShot.recoveryContext) : {}),
+        ...(authoritativeShot.recoveryContext && typeof authoritativeShot.recoveryContext === "object" ? clone(authoritativeShot.recoveryContext) : {}),
+      };
+      const authoritativeUpdatedAt = timestamp(authoritativeShot.updatedAt);
+      const candidateUpdatedAt = timestamp(candidateShot.updatedAt);
+      mergedShot.updatedAt = Date.parse(candidateUpdatedAt) > Date.parse(authoritativeUpdatedAt)
+        ? candidateUpdatedAt
+        : authoritativeUpdatedAt;
     }
-    if (authoritativeNewer && !candidateTerminal) {
-      for (const key of ["status", "stage", "progress", "elapsedMs", "error", "result", "recoveryContext", "updatedAt"]) {
-        if (Object.prototype.hasOwnProperty.call(authoritativeShot, key)) next.shots[id][key] = clone(authoritativeShot[key]);
+    if (staleCompletion || staleStop) {
+      mergedShot.status = candidateStatus;
+      mergedShot.stage = candidateShot.stage;
+      mergedShot.result = staleCompletion ? clone(candidateShot.result) : null;
+      const authoritativeUpdatedAt = timestamp(authoritativeShot.updatedAt);
+      const candidateUpdatedAt = timestamp(candidateShot.updatedAt);
+      mergedShot.updatedAt = Date.parse(candidateUpdatedAt) > Date.parse(authoritativeUpdatedAt)
+        ? candidateUpdatedAt
+        : authoritativeUpdatedAt;
+    }
+
+    if (authoritativeTaskId) mergedShot.taskId = authoritativeTaskId;
+    else if (candidateTaskId) mergedShot.taskId = candidateTaskId;
+    if (authoritativeShot.paidTaskSubmitted === true || candidateShot.paidTaskSubmitted === true || mergedShot.taskId) {
+      mergedShot.paidTaskSubmitted = true;
+    }
+
+    if (authoritativeReservationId && !resolvesAuthoritativeReservation) {
+      mergedShot.submissionReservation = clone(authoritativeShot.submissionReservation);
+      mergedShot.submissionUncertain = true;
+      if (candidateIsStale || candidateShot.submissionReservation == null) {
+        mergedShot.status = authoritativeShot.status;
+        mergedShot.stage = authoritativeShot.stage;
       }
-    } else if (next.shots[id].recoveryContext === undefined && authoritativeShot.recoveryContext !== undefined) {
-      next.shots[id].recoveryContext = clone(authoritativeShot.recoveryContext);
+    } else if (resolvesAuthoritativeReservation) {
+      mergedShot.submissionReservation = null;
+      mergedShot.submissionUncertain = false;
+      mergedShot.lastSubmissionResult = clone(candidateShot.lastSubmissionResult);
     }
-    if (!candidateTaskId && authoritativeTaskId) next.shots[id].taskId = authoritativeTaskId;
-    if (authoritativeShot.paidTaskSubmitted === true || authoritativeTaskId) next.shots[id].paidTaskSubmitted = true;
+
+    next.shots[id] = mergedShot;
   }
 
   if (authoritative.stopRequested === true || candidate.stopRequested === true) {
     next = requestRunStop(next, now);
   } else {
-    next.updatedAt = timestamp(now) || timestamp(candidate.updatedAt) || timestamp(authoritative.updatedAt) || new Date().toISOString();
+    next.status = deriveRunStatus(next);
+    if (ACTIVE_RUN_STATUSES.has(next.status)) {
+      const activeId = candidateIsStale ? authoritative.activeShotId : candidate.activeShotId;
+      const activeStatus = String(next.shots?.[activeId]?.status || "");
+      next.activeShotId = activeId && !TERMINAL_SHOT_STATUSES.has(activeStatus) && activeStatus !== "queued"
+        ? activeId
+        : Object.keys(next.shots || {}).find((id) => {
+          const status = String(next.shots[id]?.status || "");
+          return status && status !== "queued" && !TERMINAL_SHOT_STATUSES.has(status);
+        }) || null;
+      next.completedAt = null;
+    } else {
+      next.activeShotId = null;
+      next.completedAt = timestamp(next.completedAt) || timestamp(authoritative.completedAt) || timestamp(candidate.completedAt) || timestamp(now);
+    }
+    next.updatedAt = timestamp(now) || timestamp(candidateIsStale ? authoritative.updatedAt : candidate.updatedAt) || new Date().toISOString();
   }
   next.revision = Math.max(authoritativeRevision, candidateRevision) + 1;
   return next;
