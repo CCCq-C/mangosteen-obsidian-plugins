@@ -46,7 +46,7 @@ const request = {
 
   assert.deepStrictEqual(
     Object.keys(api).sort(),
-    ["confirm", "enqueue", "isLocked", "lockedShotIds", "preview", "run", "stop"],
+    ["append", "confirm", "enqueue", "isLocked", "lockedShotIds", "preview", "run", "stop"],
   );
   const plan = api.preview(request, ["002"]);
   assert.deepStrictEqual(plan.selectedShotIds, ["002"]);

@@ -444,7 +444,7 @@ function createVideoReplicaWorkbenchView(ItemView) {
     if (this.viewModel.queueStatus) {
       queueTools.createEl("span", {
         cls: "mangosteen-replica-muted",
-        text: `当前队列：${this.queueStatusLabel(this.viewModel.queueStatus)}`,
+        text: `当前队列：${this.queueStatusLabel(this.viewModel.queueStatus)}${this.viewModel.current.step ? ` · ${this.viewModel.current.step}` : ""}`,
       });
     }
     const shotGrid = parent.createDiv({ cls: "mangosteen-replica-shot-list" });

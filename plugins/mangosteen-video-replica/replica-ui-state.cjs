@@ -17,9 +17,22 @@ function calculateStageProgress(options = {}) {
   const project = plainObject(input.project);
   const request = plainObject(input.request);
   const generationState = plainObject(input.generationState);
+  const generationQueue = plainObject(input.generationQueue);
 
   if (text(project.finalVideoPath)) return { percent: 100, indeterminate: false, label: "成片完成" };
   if (generationState.currentStep === "拼接成片") return { percent: 95, indeterminate: true, label: "拼接成片" };
+
+  const queueShots = records(generationQueue.shots);
+  const queueActive = queueShots.some((shot) => shot.status === "queued" || shot.status === "processing")
+    && ["idle", "processing"].includes(text(generationQueue.status));
+  if (queueActive) {
+    const terminal = queueShots.filter((shot) => ["completed", "failed", "stopped"].includes(text(shot.status))).length;
+    return {
+      percent: Math.round(45 + (terminal / Math.max(1, queueShots.length)) * 45),
+      indeterminate: queueShots.some((shot) => shot.status === "processing"),
+      label: "分镜队列",
+    };
+  }
 
   const shots = records(project.shots);
   const total = Math.max(shots.length, Array.isArray(request.shots) ? request.shots.length : 0);
@@ -85,7 +98,16 @@ function deriveWorkbenchState(options = {}) {
   const locked = empty || request.confirmed === true || processing
     || (!queueKnown && !generationState.status && project.status === "generating");
   const requestedSettings = plainObject(request.settings);
-  const startedAtMs = Date.parse(text(generationState.startedAt));
+  const processingQueueShot = queueShots.find((shot) => shot.status === "processing");
+  const processingProjectShot = processingQueueShot
+    ? shots.find((shot) => text(shot.id) === text(processingQueueShot.id))
+    : null;
+  const queueStep = processingQueueShot
+    ? `镜头 ${text(processingQueueShot.id, "-")} · ${text(processingProjectShot?.status, "生成中")}`
+    : queueShots.some((shot) => shot.status === "queued")
+      ? "等待生成下一个镜头"
+      : "";
+  const startedAtMs = Date.parse(text(generationState.startedAt) || text(generationQueue.startedAt) || text(generationQueue.createdAt));
   const currentNowMs = Number.isFinite(input.nowMs) ? input.nowMs : Date.now();
   const elapsedMs = Number.isFinite(startedAtMs)
     ? Math.max(0, currentNowMs - startedAtMs)
@@ -94,7 +116,7 @@ function deriveWorkbenchState(options = {}) {
   const projectError = errorStatus(generationState.status) || errorStatus(project.status)
     ? text(project.statusText)
     : "";
-  const shotError = shots.map((shot) => text(shot.error)).find(Boolean) || "";
+  const shotError = [...shots, ...queueShots].map((shot) => text(shot.error)).find(Boolean) || "";
   const characterAsset = plainObject(project.characterAsset);
   const authoritativeStatusText = text(generationState.statusText)
     || (["stopped", "failed"].includes(generationState.status) ? stateError : "");
@@ -104,12 +126,12 @@ function deriveWorkbenchState(options = {}) {
     empty,
     folder: text(project.folder),
     title: text(project.title),
-    status: text(generationState.status || project.status),
-    statusText: authoritativeStatusText || text(project.statusText),
+    status: text(queueActive ? generationQueue.status : generationState.status || project.status),
+    statusText: queueStep || authoritativeStatusText || text(project.statusText),
     locked,
     canConfirm: !locked && project.status === "analysis_ready" && request.confirmed === false,
     canGenerate: !locked
-      && !queueActive
+      && generationQueue.stopRequested !== true
       && request.confirmed !== true
       && ["analysis_ready", "generating", "completed", "completed_with_errors"].includes(text(project.status)),
     canStop: (queueActive && generationQueue.stopRequested !== true)
@@ -117,9 +139,9 @@ function deriveWorkbenchState(options = {}) {
     queueStatus: text(generationQueue.status),
     queueShots,
     lockedShotIds,
-    progress: calculateStageProgress({ project: progressProject, request, generationState }),
+    progress: calculateStageProgress({ project: progressProject, request, generationState, generationQueue }),
     current: {
-      step: text(generationState.currentStep),
+      step: queueStep || text(generationState.currentStep),
       model: text(generationState.model || project.videoModel || requestedSettings.videoModel || project.imageModel || requestedSettings.imageModel),
       elapsedMs,
     },

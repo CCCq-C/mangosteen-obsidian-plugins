@@ -612,12 +612,40 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     return this.workbenchQueueApi(paths.folder).preview(request, selectedShotIds);
   }
 
+  async appendWorkbenchGeneration(paths, plan, persistedQueue) {
+    const queueId = String(persistedQueue?.queueId || "");
+    const queue = this.activeQueueObjects.get(paths.folder);
+    const lock = this.queueRunnerLocks.get(queueId);
+    if (!queue || queue.queueId !== queueId || !lock || !this.queueRunnerLockRequired.has(queueId)) {
+      throw new Error("当前生成队列由另一个 Obsidian 窗口运行，请在原窗口追加镜头。");
+    }
+    this.assertWorkbenchQueueLockOwned(lock);
+    const request = this.readJson(paths.requestPath);
+    if (request.confirmed === true) throw new Error("不能使用旧版 confirmed=true 整项目任务追加分镜。");
+    await this.validatedProjectGenerationModels(request);
+    this.assertWorkbenchQueueLockOwned(lock);
+    const latestQueue = this.currentWorkbenchQueue(paths.folder);
+    if (latestQueue?.queueId !== queueId || !["idle", "processing"].includes(String(latestQueue.status))) {
+      throw new Error("当前生成队列状态已变化，请刷新后重新选择镜头。");
+    }
+    const api = this.workbenchQueueApi(paths.folder);
+    const confirmedPlan = api.confirm(plan, this.readJson(paths.requestPath));
+    const appended = await api.append(queue, confirmedPlan);
+    this.requestWorkbenchRefresh();
+    return JSON.parse(JSON.stringify(appended));
+  }
+
   async startWorkbenchGeneration(folder, plan) {
     const paths = this.workbenchProjectPaths(folder, { createWorkDirectory: true });
+    const activeQueue = this.currentWorkbenchQueue(paths.folder);
+    const api = this.workbenchQueueApi(paths.folder);
+    if (activeQueue && api.lockedShotIds(activeQueue).length
+      && ["idle", "processing"].includes(String(activeQueue.status))) {
+      return this.appendWorkbenchGeneration(paths, plan, activeQueue);
+    }
     const lock = this.acquireWorkbenchQueueLock(paths.folder);
     let lockTransferredToRun = false;
     try {
-      const api = this.workbenchQueueApi(paths.folder);
       const assertNoActiveQueue = () => {
         const activeQueue = this.currentWorkbenchQueue(paths.folder);
         if (activeQueue && api.lockedShotIds(activeQueue).length) {
@@ -705,7 +733,8 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         for (const shot of queue.shots) {
           if (shot.status !== "processing") continue;
           const projectShot = (project.shots || []).find((item) => String(item.id) === String(shot.id));
-          if (projectShot?.videoTaskId && projectShot.videoTaskPlanId === queue.planId) {
+          const shotPlanId = String(shot.generationContext?.planId || queue.planId || "");
+          if (projectShot?.videoTaskId && projectShot.videoTaskPlanId === shotPlanId) {
             shot.status = "queued";
             shot.error = "";
           } else {
@@ -1670,15 +1699,37 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         throw error;
       }
     }
-    const { image, video, imageModel, model, resolution } = await this.resolveQueueGenerationRuntime(context.settings);
+    this.updateProjectShot(paths.folder, shot.id, {
+      status: "正在读取生成模型",
+      error: "",
+    }, {
+      status: "generating",
+      statusText: `镜头 ${shot.id} · 正在读取生成模型`,
+    });
+    let runtime;
+    try {
+      runtime = await this.resolveQueueGenerationRuntime(context.settings);
+    } catch (error) {
+      this.updateProjectShot(paths.folder, shot.id, { status: "失败", error: String(error?.message || error) });
+      throw error;
+    }
+    const { image, video, imageModel, model, resolution } = runtime;
     const ensureAsset = async (kind, source) => {
       this.assertWorkbenchQueueRunnerLock(paths.folder, context.queueId);
+      const label = kind === "character" ? "人物" : kind === "scene" ? "场景" : "产品";
+      this.updateProjectShot(paths.folder, shot.id, {
+        status: `正在准备${label}参考图 · ${String(source.id || "")}`,
+      }, {
+        status: "generating",
+        statusText: `镜头 ${shot.id} · 正在准备${label}参考图`,
+      });
       const resolver = kind === "character"
         ? referenceAssets.resolveCharacterAsset
         : kind === "scene"
           ? referenceAssets.resolveSceneAsset
           : referenceAssets.resolveProductAsset;
       const resolved = await this.ensureReferenceAsset(image, resolver(this.vaultPath(), source.id), source.prompt, imageModel);
+      this.updateProjectShot(paths.folder, shot.id, { status: `${label}参考图已就绪 · ${String(source.id || "")}` });
       return {
         id: resolved.id,
         imagePath: resolved.imagePath,

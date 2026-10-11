@@ -1,6 +1,7 @@
 const assert = require("assert");
 const {
   CONFIRMATION_WARNING,
+  appendGenerationPlan,
   confirmGenerationPlan,
   createGenerationQueue,
   lockedShotIds,
@@ -8,6 +9,8 @@ const {
   requestQueueStop,
   runGenerationQueue,
 } = require("../generation-queue.cjs");
+
+assert.strictEqual(typeof appendGenerationPlan, "function", "an active queue must support appending later shot plans");
 
 function draft() {
   return {
@@ -102,6 +105,36 @@ for (const changed of [
 }
 
 (async () => {
+  const firstOnly = confirmGenerationPlan(prepareGenerationPlan(draft(), ["001"]), draft());
+  const laterOnly = confirmGenerationPlan(prepareGenerationPlan(draft(), ["003"]), draft());
+  const appendQueue = createGenerationQueue(firstOnly, { now: "2026-10-11T00:00:00.000Z" });
+  const appendOrder = [];
+  const appendContexts = [];
+  let releaseFirstShot;
+  let firstShotReached;
+  const firstShotGate = new Promise((resolve) => { releaseFirstShot = resolve; });
+  const firstShotStarted = new Promise((resolve) => { firstShotReached = resolve; });
+  const appendRun = runGenerationQueue(appendQueue, async (shot, context) => {
+    appendOrder.push(shot.id);
+    appendContexts.push({ id: shot.id, planId: context.planId, scenes: context.scenes.map((scene) => scene.id) });
+    if (shot.id === "001") {
+      firstShotReached();
+      await firstShotGate;
+    }
+    return { videoPath: `${shot.id}.mp4` };
+  });
+  await firstShotStarted;
+  appendGenerationPlan(appendQueue, laterOnly);
+  assert.deepStrictEqual(lockedShotIds(appendQueue), ["001", "003"], "the running and newly queued shots must both be locked");
+  assert.throws(() => appendGenerationPlan(appendQueue, laterOnly), /镜头 003.*队列/);
+  releaseFirstShot();
+  await appendRun;
+  assert.deepStrictEqual(appendOrder, ["001", "003"], "later submissions must run after the current shot in append order");
+  assert.deepStrictEqual(appendContexts, [
+    { id: "001", planId: firstOnly.planId, scenes: ["room"] },
+    { id: "003", planId: laterOnly.planId, scenes: ["harbor"] },
+  ], "each appended shot must keep the exact assets and plan snapshot confirmed for that submission");
+
   const confirmedBatch = confirmGenerationPlan(prepareGenerationPlan(draft(), ["001", "003"]), draft());
   const tamperedConfirmed = JSON.parse(JSON.stringify(confirmedBatch));
   tamperedConfirmed.shots[0].effectiveVideoPrompt = "确认后又被替换的提示词";

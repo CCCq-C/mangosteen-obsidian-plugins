@@ -611,11 +611,17 @@ function createView(plugin) {
   ));
   assert.strictEqual(lockedPrompt.disabled, true, "queued or processing shots must be locked");
   assert.strictEqual(editablePrompt.disabled, false, "unselected shots must remain editable");
-  assert.strictEqual(
-    partialLockView.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "生成此镜头").disabled,
-    true,
-    "a project must not start a second queue while its current queue is active",
-  );
+  const partialShotCheckboxes = partialLockView.contentEl.findAll((element) => (
+    element.tagName === "INPUT" && element.attributes.type === "checkbox" && element.dataset.shotId
+  ));
+  assert.strictEqual(partialShotCheckboxes[0].disabled, true, "the processing shot must not be selectable again");
+  assert.strictEqual(partialShotCheckboxes[1].disabled, false, "an unqueued shot must remain selectable during generation");
+  const partialGenerateButtons = partialLockView.contentEl.findAll((element) => (
+    element.tagName === "BUTTON" && element.textContent === "生成此镜头"
+  ));
+  assert.strictEqual(partialGenerateButtons[0].disabled, true, "the processing shot generation button must stay locked");
+  assert.strictEqual(partialGenerateButtons[1].disabled, false, "an unqueued shot must be appendable to the running queue");
+  assert(partialLockView.contentEl.find((element) => element.textContent.includes("镜头 001")), "the active shot progress must be visible in the workbench");
   await partialLockView.onClose();
 
   const emptyView = createView(createPlugin({ project: {}, request: {}, generationState: {} }, []));

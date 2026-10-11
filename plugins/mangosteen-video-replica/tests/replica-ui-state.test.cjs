@@ -49,18 +49,26 @@ assert.strictEqual(ready.canGenerate, true);
 assert.strictEqual(ready.canStop, false);
 
 const queued = deriveWorkbenchState({
-  project: { folder: "山竹视频复刻/排队", status: "analysis_ready", shots: [{ id: "001" }, { id: "002" }] },
-  request: { confirmed: false, shots: [{ id: "001" }, { id: "002" }] },
+  project: {
+    folder: "山竹视频复刻/排队",
+    status: "analysis_ready",
+    shots: [{ id: "001", status: "正在生成产品参考图" }, { id: "002", status: "等待生成" }],
+  },
+  request: { confirmed: false, shots: [{ id: "001" }, { id: "002" }], settings: { videoModel: "MiniMax-H3" } },
   generationQueue: {
     status: "processing",
     stopRequested: false,
+    startedAt: "2026-10-11T00:00:00Z",
     shots: [{ id: "001", status: "processing" }, { id: "002", status: "completed" }],
   },
+  nowMs,
 });
 assert.deepStrictEqual(queued.lockedShotIds, ["001"]);
 assert.strictEqual(queued.locked, false, "a queue must not lock the whole draft");
-assert.strictEqual(queued.canGenerate, false, "one project must run one persisted queue at a time");
+assert.strictEqual(queued.canGenerate, true, "unlocked shots must remain selectable while another shot is running");
 assert.strictEqual(queued.canStop, true);
+assert.deepStrictEqual(queued.progress, { percent: 68, indeterminate: true, label: "分镜队列" });
+assert.deepStrictEqual(queued.current, { step: "镜头 001 · 正在生成产品参考图", model: "MiniMax-H3", elapsedMs: 120000 });
 
 const assetsReady = deriveWorkbenchState({
   project: {

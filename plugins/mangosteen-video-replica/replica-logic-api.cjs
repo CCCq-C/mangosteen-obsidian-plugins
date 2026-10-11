@@ -1,4 +1,5 @@
 const {
+  appendGenerationPlan,
   confirmGenerationPlan,
   createGenerationQueue,
   lockedShotIds,
@@ -33,6 +34,19 @@ function createReplicaLogicApi({ activeQueues = [], saveQueue = async () => {}, 
       } catch (error) {
         const index = knownQueues.indexOf(queue);
         if (index >= 0) knownQueues.splice(index, 1);
+        throw error;
+      }
+      return queue;
+    },
+
+    async append(queue, confirmedPlan) {
+      const snapshot = JSON.parse(JSON.stringify(queue));
+      appendGenerationPlan(queue, confirmedPlan);
+      try {
+        await saveQueue(queue);
+      } catch (error) {
+        for (const key of Object.keys(queue)) delete queue[key];
+        Object.assign(queue, snapshot);
         throw error;
       }
       return queue;

@@ -100,6 +100,27 @@ function lockedShotIds(queue) {
     .map((shot) => String(shot.id));
 }
 
+function generationContext(plan) {
+  return {
+    planId: String(plan.planId),
+    character: clone(plan.character),
+    products: clone(plan.products || []),
+    scenes: clone(plan.scenes || []),
+    settings: clone(plan.settings),
+  };
+}
+
+function queuedShots(plan) {
+  const context = generationContext(plan);
+  return clone(plan.shots).map((shot) => ({
+    ...shot,
+    generationContext: clone(context),
+    status: "queued",
+    error: "",
+    result: null,
+  }));
+}
+
 function createGenerationQueue(confirmedPlan, { activeQueues = [], now = new Date().toISOString() } = {}) {
   if (!confirmedPlan || confirmedPlan.confirmed !== true) throw new Error("生成计划尚未确认，不能加入队列。");
   if (sha256(planSnapshot(confirmedPlan)) !== confirmedPlan.planId) throw new Error("生成计划内容已变化，请重新预览并确认生成。");
@@ -122,13 +143,26 @@ function createGenerationQueue(confirmedPlan, { activeQueues = [], now = new Dat
     scenes: clone(confirmedPlan.scenes || []),
     settings: clone(confirmedPlan.settings),
     selectedShotIds: clone(confirmedPlan.selectedShotIds),
-    shots: clone(confirmedPlan.shots).map((shot) => ({
-      ...shot,
-      status: "queued",
-      error: "",
-      result: null,
-    })),
+    shots: queuedShots(confirmedPlan),
   };
+  return queue;
+}
+
+function appendGenerationPlan(queue, confirmedPlan) {
+  if (!queue || !Array.isArray(queue.shots)) throw new Error("生成队列格式错误。");
+  if (!["idle", "processing"].includes(String(queue.status)) || queue.stopRequested === true) {
+    throw new Error(`生成队列当前状态不能追加镜头：${String(queue.status)}`);
+  }
+  if (!confirmedPlan || confirmedPlan.confirmed !== true) throw new Error("生成计划尚未确认，不能加入队列。");
+  if (sha256(planSnapshot(confirmedPlan)) !== confirmedPlan.planId) throw new Error("生成计划内容已变化，请重新预览并确认生成。");
+  const existingIds = new Set(queue.shots.map((shot) => String(shot.id)));
+  for (const id of confirmedPlan.selectedShotIds || []) {
+    if (existingIds.has(String(id))) throw new Error(`镜头 ${id} 已经在当前队列中，请勿重复提交。`);
+  }
+  const additions = queuedShots(confirmedPlan);
+  queue.shots.push(...additions);
+  queue.selectedShotIds = [...(queue.selectedShotIds || []), ...additions.map((shot) => String(shot.id))];
+  queue.updatedAt = new Date().toISOString();
   return queue;
 }
 
@@ -154,15 +188,6 @@ async function runGenerationQueue(queue, runShot, { onUpdate = null } = {}) {
     queue.updatedAt = new Date().toISOString();
     if (typeof onUpdate === "function") await onUpdate(clone(queue));
   };
-  const context = deepFreeze({
-    queueId: queue.queueId,
-    planId: queue.planId,
-    character: clone(queue.character),
-    products: clone(queue.products),
-    scenes: clone(queue.scenes),
-    settings: clone(queue.settings),
-  });
-
   queue.status = "processing";
   queue.startedAt = new Date().toISOString();
   await notify();
@@ -175,7 +200,17 @@ async function runGenerationQueue(queue, runShot, { onUpdate = null } = {}) {
     shot.status = "processing";
     await notify();
     try {
-      const result = await runShot(deepFreeze(clone(shot)), context);
+      const shotContext = shot.generationContext || {
+        planId: queue.planId,
+        character: queue.character,
+        products: queue.products || [],
+        scenes: queue.scenes || [],
+        settings: queue.settings,
+      };
+      const context = deepFreeze({ queueId: queue.queueId, ...clone(shotContext) });
+      const runnableShot = clone(shot);
+      delete runnableShot.generationContext;
+      const result = await runShot(deepFreeze(runnableShot), context);
       shot.result = clone(result ?? null);
       shot.status = "completed";
       shot.error = "";
@@ -202,6 +237,7 @@ async function runGenerationQueue(queue, runShot, { onUpdate = null } = {}) {
 
 module.exports = {
   CONFIRMATION_WARNING,
+  appendGenerationPlan,
   confirmGenerationPlan,
   createGenerationQueue,
   lockedShotIds,

@@ -125,6 +125,35 @@ function request() {
   assert.strictEqual(JSON.parse(fs.readFileSync(path.join(root, "generation-request.json"))).confirmed, false, "queue generation must never set confirmed=true");
   assert.strictEqual(plugin.loadWorkbenchProject(folder).generationQueue.status, "completed");
 
+  const appendFirstPlan = await plugin.previewWorkbenchGeneration(folder, ["001"]);
+  let releaseAppendFirst;
+  let appendFirstReached;
+  const appendFirstGate = new Promise((resolve) => { releaseAppendFirst = resolve; });
+  const appendFirstStarted = new Promise((resolve) => { appendFirstReached = resolve; });
+  const appendedSubmissions = [];
+  plugin.runWorkbenchQueueShot = async (_folder, shot, context) => {
+    appendedSubmissions.push({ id: shot.id, planId: context.planId, prompt: shot.effectiveVideoPrompt });
+    if (shot.id === "001") {
+      appendFirstReached();
+      await appendFirstGate;
+    }
+    return { videoPath: `${folder}/03-视频片段/${shot.id}-append.mp4` };
+  };
+  await plugin.startWorkbenchGeneration(folder, appendFirstPlan);
+  await appendFirstStarted;
+  const appendSecondPlan = await plugin.previewWorkbenchGeneration(folder, ["002"]);
+  const appendedQueue = await plugin.startWorkbenchGeneration(folder, appendSecondPlan);
+  assert.deepStrictEqual(
+    appendedQueue.shots.map((shot) => [shot.id, shot.status]),
+    [["001", "processing"], ["002", "queued"]],
+    "a later selected shot must append to the live queue instead of starting a conflicting queue",
+  );
+  releaseAppendFirst();
+  await plugin.queueRuns.get(folder);
+  assert.deepStrictEqual(appendedSubmissions.map((item) => item.id), ["001", "002"]);
+  assert.notStrictEqual(appendedSubmissions[0].planId, appendedSubmissions[1].planId, "each submission must retain its own confirmed plan snapshot");
+  assert.strictEqual(appendedSubmissions[1].prompt, "用户确认后的完整视频提示词。");
+
   const stalePlan = await plugin.previewWorkbenchGeneration(folder, ["001"]);
   let releaseStaleValidation;
   let staleValidationReached;
@@ -140,6 +169,10 @@ function request() {
     return { imageModels: ["gpt-image-2-w"], videoModels: ["MiniMax-H3"] };
   };
   const submissionsBeforeStaleRace = submitted.length;
+  plugin.runWorkbenchQueueShot = async (_folder, shot) => {
+    submitted.push(shot.id);
+    return { videoPath: `${folder}/03-视频片段/${shot.id}-stale.mp4` };
+  };
   const staleFirstStart = plugin.startWorkbenchGeneration(folder, stalePlan);
   const staleFirstRejected = assert.rejects(
     staleFirstStart,
@@ -182,10 +215,16 @@ function request() {
   fs.utimesSync(lostLockPath, lostLockStaleTime, lostLockStaleTime);
   await assert.rejects(
     () => plugin.startWorkbenchGeneration(folder, lostLockPlan),
-    /已有生成队列/,
-    "a replacement start may take a stale file lock but must not detach the running queue from its own lock",
+    /已经在当前队列中|请勿重复提交/,
+    "a duplicate submission must not detach the running queue from its own lock",
   );
   assert.strictEqual(plugin.queueRunnerLocks.size, 1, "the old run must retain its queue-specific lost-lock state");
+  const replacedLock = JSON.parse(fs.readFileSync(lostLockPath));
+  fs.writeFileSync(lostLockPath, JSON.stringify({
+    ...replacedLock,
+    token: "replacement-owner-token",
+    heartbeatAt: new Date().toISOString(),
+  }));
   releaseLostLockShot();
   await assert.rejects(
     plugin.queueRuns.get(folder),
@@ -195,6 +234,7 @@ function request() {
   assert.deepStrictEqual(lostLockSubmitted, ["001"], "lock loss must prevent every later shot submission");
   assert.strictEqual(plugin.queueRunnerLocks.size, 0, "the stopped old run must clean up its queue-specific lock state");
   assert.strictEqual(plugin.queueRunnerLockRequired.size, 0, "the stopped old run must clean up its lock requirement");
+  fs.rmSync(lostLockPath, { force: true });
   plugin.activeQueueObjects.delete(folder);
   plugin.queueApis.delete(folder);
   fs.writeFileSync(path.join(root, ".work/generation-queue.json"), JSON.stringify(persistedQueue));
@@ -236,7 +276,7 @@ function request() {
   const otherPlan = await plugin.previewWorkbenchGeneration(folder, ["002"]);
   await assert.rejects(
     () => plugin.startWorkbenchGeneration(folder, otherPlan),
-    /已有生成队列.*停止.*完成/,
+    /另一个 Obsidian 窗口运行/,
     "one project queue file must not be overwritten by a concurrent queue",
   );
 
