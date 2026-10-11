@@ -434,6 +434,47 @@ function createView(plugin) {
   assert.strictEqual(retryCatalogView.contentEl.find((element) => element.textContent.includes("目录暂时不可用")), null);
   await retryCatalogView.onClose();
 
+  const overrideRequest = clone(request);
+  overrideRequest.shots[0].videoPromptOverride = "旧项目保留的最终视频提示词。";
+  const overrideView = createView(createPlugin({ ...clone(readySnapshot), request: overrideRequest }));
+  await overrideView.onOpen();
+  await overrideView.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "分镜").dispatch("click");
+  const overridePreview = overrideView.contentEl.find((element) => element.attributes["aria-label"] === "最终视频提示词预览");
+  assert.strictEqual(overridePreview.value, "旧项目保留的最终视频提示词。", "preview and paid submission must resolve the same final prompt");
+  await overrideView.onClose();
+
+  const v1Request = {
+    version: 1,
+    confirmed: false,
+    character: { prompt: "旧版固定人物" },
+    settings: { imageModel: "gpt-image-2", videoModel: "MiniMax-H3", ratio: "9:16", resolution: "768p" },
+    shots: [{
+      title: "旧版开场",
+      duration: 4,
+      dialogue: "旧版台词",
+      plot: "人物走入画面",
+      environment: "明亮客厅",
+      camera: "中景推进",
+      imagePrompt: "人物在明亮客厅走入画面",
+      videoPrompt: "人物走入画面",
+    }],
+  };
+  const v1View = createView(createPlugin({
+    ...clone(readySnapshot),
+    request: v1Request,
+    project: { ...clone(readySnapshot.project), shots: [{ id: "001", title: "旧版开场", status: "等待生成" }] },
+  }));
+  await v1View.onOpen();
+  assert.strictEqual(v1View.draft.version, 4, "v1 drafts must migrate in memory before the timeline editor opens");
+  assert.strictEqual(v1View.draft.shots[0].timeline.length, 1);
+  assert.strictEqual(v1View.draft.shots[0].sceneId, "legacy-scene-001");
+  await v1View.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "分镜").dispatch("click");
+  const v1Action = v1View.contentEl.find((element) => element.dataset.section === "timeline" && element.dataset.field === "action");
+  v1Action.value = "用户修改后的旧版动作";
+  await v1Action.dispatch("input");
+  assert.strictEqual(v1View.draft.shots[0].timeline[0].action, "用户修改后的旧版动作");
+  await v1View.onClose();
+
   const duplicateIdentityRequest = {
     ...clone(request),
     shots: [

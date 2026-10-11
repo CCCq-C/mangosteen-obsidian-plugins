@@ -359,6 +359,7 @@ function request() {
     const context = {
       queueId: `queue-${model}`,
       planId: `plan-${model}`,
+      requestVersion: 4,
       character: { id: "hero", prompt: "固定人物三视图", voiceProfile: "固定女声" },
       products: [{ id: "phone", prompt: "银色手机" }],
       scenes: [{ id: "room", prompt: "明亮客厅" }],
@@ -395,6 +396,52 @@ function request() {
     ["hero.png", "room.png", "phone.png"],
     "Seedance must receive the shared character, scene, and product assets directly",
   );
+
+  async function runLegacyReferenceCase(model) {
+    const caseFolder = `山竹视频复刻/旧版参考-${model}`;
+    const caseRoot = path.join(vault, ...caseFolder.split("/"));
+    fs.mkdirSync(path.join(caseRoot, ".work"), { recursive: true });
+    fs.writeFileSync(path.join(caseRoot, "project.json"), JSON.stringify({ folder: caseFolder, title: model, shots: [] }));
+    fs.writeFileSync(path.join(caseRoot, ".work/generation-queue.json"), JSON.stringify({}));
+    const calls = { frames: 0, options: null };
+    plugin.resolveQueueGenerationRuntime = async () => ({
+      image: {},
+      video: { submitVideo: async (options) => { calls.options = options; return { id: `legacy-${model}` }; } },
+      imageModel: "gpt-image-2-w",
+      model,
+      resolution: "768p",
+    });
+    plugin.generateImageMulti = async () => { calls.frames += 1; return { kind: "base64", value: "eA==" }; };
+    plugin.waitForVideo = async () => ({ localPath: "山竹视频资产库/generated.mp4" });
+    await plugin.runWorkbenchQueueShot(caseFolder, {
+      id: "001",
+      title: "旧版镜头",
+      sceneId: "room",
+      productIds: ["phone"],
+      duration: 6,
+      timeline: [{ start: 0, end: 6, action: "旧版动作", dialogue: "旧版台词", performance: "自然", camera: "中景", environment: "客厅" }],
+      imagePrompt: "旧版首帧提示词",
+      lastImagePrompt: "旧版尾帧提示词",
+      effectiveVideoPrompt: "旧版已确认提示词",
+    }, {
+      queueId: `legacy-queue-${model}`,
+      planId: `legacy-plan-${model}`,
+      requestVersion: 3,
+      character: { id: "hero", prompt: "固定人物三视图", voiceProfile: "固定女声" },
+      products: [{ id: "phone", prompt: "银色手机" }],
+      scenes: [{ id: "room", prompt: "明亮客厅" }],
+      settings: { imageModel: "gpt-image-2-w", videoModel: model, ratio: "9:16", resolution: "768p" },
+    });
+    return calls;
+  }
+
+  const legacyH3Calls = await runLegacyReferenceCase("MiniMax-H3");
+  assert.strictEqual(legacyH3Calls.frames, 2, "legacy H3 queues must keep their confirmed first and last frame flow");
+  assert(legacyH3Calls.options.firstImageFile);
+  assert(legacyH3Calls.options.lastImageFile);
+  const legacySeedanceCalls = await runLegacyReferenceCase("seedance-2.5");
+  assert.strictEqual(legacySeedanceCalls.frames, 2, "legacy Seedance queues must keep their confirmed first and last frame flow");
+  assert.strictEqual(legacySeedanceCalls.options.referenceImageFiles.length, 2);
   plugin.resolveQueueGenerationRuntime = directRuntimeResolver;
 
   const recoverProject = JSON.parse(fs.readFileSync(path.join(root, "project.json")));

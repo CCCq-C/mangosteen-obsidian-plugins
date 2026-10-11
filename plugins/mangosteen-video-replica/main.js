@@ -1781,7 +1781,8 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     });
     const latestProject = this.readJson(paths.projectPath);
     const existing = (latestProject.shots || []).find((item) => String(item.id) === String(shot.id)) || {};
-    const structuredTimeline = Array.isArray(shot.timeline) && shot.timeline.length > 0;
+    const structuredTimeline = Number(context.requestVersion) >= 4
+      && Array.isArray(shot.timeline) && shot.timeline.length > 0;
     const modelFamily = generationPolicy.classifyModel(model);
     const directReferenceMode = structuredTimeline && modelFamily === "seedance";
     const needsFirstFrame = !directReferenceMode;

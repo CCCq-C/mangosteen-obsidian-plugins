@@ -73,6 +73,7 @@ assert.throws(() => prepareGenerationPlan(draft(), ["001", "001"]), /重复选�
 
 const request = draft();
 const plan = prepareGenerationPlan(request, ["003", "001"]);
+assert.strictEqual(plan.requestVersion, 3, "the immutable plan must retain the source request schema version");
 assert.strictEqual(plan.warning, CONFIRMATION_WARNING);
 assert.strictEqual(CONFIRMATION_WARNING, "确认后，所选分镜在本次生成期间将无法更改。");
 assert.match(plan.planId, /^sha256:[a-f0-9]{64}$/);
@@ -101,6 +102,7 @@ assert.strictEqual(confirmed.planId, plan.planId);
 assert.strictEqual(Object.isFrozen(confirmed), true);
 
 const timelinePlan = prepareGenerationPlan(timelineDraft(), ["001"]);
+assert.strictEqual(timelinePlan.requestVersion, 4);
 assert.match(timelinePlan.shots[0].effectiveVideoPrompt, /【0～2\.5 秒】/);
 assert.match(timelinePlan.shots[0].effectiveVideoPrompt, /人物台词：就是这款。/);
 assert.strictEqual((timelinePlan.shots[0].effectiveVideoPrompt.match(/年轻清亮的中文女声/g) || []).length, 1);
@@ -141,7 +143,7 @@ for (const changed of [
   const firstShotStarted = new Promise((resolve) => { firstShotReached = resolve; });
   const appendRun = runGenerationQueue(appendQueue, async (shot, context) => {
     appendOrder.push(shot.id);
-    appendContexts.push({ id: shot.id, planId: context.planId, scenes: context.scenes.map((scene) => scene.id) });
+    appendContexts.push({ id: shot.id, planId: context.planId, requestVersion: context.requestVersion, scenes: context.scenes.map((scene) => scene.id) });
     if (shot.id === "001") {
       firstShotReached();
       await firstShotGate;
@@ -156,8 +158,8 @@ for (const changed of [
   await appendRun;
   assert.deepStrictEqual(appendOrder, ["001", "003"], "later submissions must run after the current shot in append order");
   assert.deepStrictEqual(appendContexts, [
-    { id: "001", planId: firstOnly.planId, scenes: ["room"] },
-    { id: "003", planId: laterOnly.planId, scenes: ["harbor"] },
+    { id: "001", planId: firstOnly.planId, requestVersion: 3, scenes: ["room"] },
+    { id: "003", planId: laterOnly.planId, requestVersion: 3, scenes: ["harbor"] },
   ], "each appended shot must keep the exact assets and plan snapshot confirmed for that submission");
 
   const confirmedBatch = confirmGenerationPlan(prepareGenerationPlan(draft(), ["001", "003"]), draft());
@@ -180,6 +182,17 @@ for (const changed of [
     ),
     /镜头 001.*已经在生成队列/,
   );
+
+  const tamperedQueue = createGenerationQueue(confirmedBatch, { now: "2026-10-11T00:00:01.000Z" });
+  tamperedQueue.shots[0].effectiveVideoPrompt = "持久化后被替换的未确认提示词";
+  let tamperedPaidCalls = 0;
+  await runGenerationQueue(tamperedQueue, async () => {
+    tamperedPaidCalls += 1;
+    return { videoPath: "should-not-run.mp4" };
+  });
+  assert.strictEqual(tamperedPaidCalls, 1, "only the untouched later shot may reach the paid runner");
+  assert.strictEqual(tamperedQueue.shots[0].status, "failed");
+  assert.match(tamperedQueue.shots[0].error, /队列内容已变化.*不会提交付费任务/);
 
   const callOrder = [];
   const finished = await runGenerationQueue(queue, async (shot, context) => {

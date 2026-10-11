@@ -25,6 +25,7 @@ function sha256(value) {
 function planSnapshot(plan) {
   return {
     version: Number(plan?.version),
+    requestVersion: Number(plan?.requestVersion),
     character: clone(plan?.character),
     products: clone(plan?.products || []),
     scenes: clone(plan?.scenes || []),
@@ -70,6 +71,7 @@ function prepareGenerationPlan(request, selectedShotIds) {
   const productIds = new Set(shots.flatMap((shot) => shot.productIds || []));
   const snapshot = {
     version: 1,
+    requestVersion: normalized.version,
     character: clone(normalized.character),
     products: clone((normalized.products || []).filter((product) => productIds.has(product.id))),
     scenes: clone((normalized.scenes || []).filter((scene) => sceneIds.has(scene.id))),
@@ -105,6 +107,7 @@ function lockedShotIds(queue) {
 function generationContext(plan) {
   return {
     planId: String(plan.planId),
+    requestVersion: Number(plan.requestVersion),
     character: clone(plan.character),
     products: clone(plan.products || []),
     scenes: clone(plan.scenes || []),
@@ -114,13 +117,32 @@ function generationContext(plan) {
 
 function queuedShots(plan) {
   const context = generationContext(plan);
-  return clone(plan.shots).map((shot) => ({
-    ...shot,
-    generationContext: clone(context),
-    status: "queued",
-    error: "",
-    result: null,
-  }));
+  return clone(plan.shots).map((shot) => {
+    const generationContextSnapshot = clone(context);
+    return {
+      ...shot,
+      generationContext: generationContextSnapshot,
+      confirmedPayloadSignature: sha256({ shot, context: generationContextSnapshot }),
+      status: "queued",
+      error: "",
+      result: null,
+    };
+  });
+}
+
+function verifyQueuedShot(shot) {
+  const signature = String(shot?.confirmedPayloadSignature || "");
+  if (!signature) return;
+  const payload = clone(shot);
+  const context = clone(payload.generationContext);
+  delete payload.generationContext;
+  delete payload.confirmedPayloadSignature;
+  delete payload.status;
+  delete payload.error;
+  delete payload.result;
+  if (sha256({ shot: payload, context }) !== signature) {
+    throw new Error("队列内容已变化，与确认内容不一致；系统不会提交付费任务，请重新预览并确认。");
+  }
 }
 
 function createGenerationQueue(confirmedPlan, { activeQueues = [], now = new Date().toISOString() } = {}) {
@@ -202,6 +224,7 @@ async function runGenerationQueue(queue, runShot, { onUpdate = null } = {}) {
     shot.status = "processing";
     await notify();
     try {
+      verifyQueuedShot(shot);
       const shotContext = shot.generationContext || {
         planId: queue.planId,
         character: queue.character,
@@ -246,4 +269,5 @@ module.exports = {
   prepareGenerationPlan,
   requestQueueStop,
   runGenerationQueue,
+  verifyQueuedShot,
 };

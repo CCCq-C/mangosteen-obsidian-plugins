@@ -1,6 +1,6 @@
 const { normalizeGenerationRequest } = require("./replica-core.cjs");
-const { videoDurationRange } = require("./generation-policy.cjs");
-const { compileTimelinePrompt, legacyTimeline } = require("./shot-timeline.cjs");
+const { normalizeVideoDuration, resolveVideoPrompt, videoDurationRange } = require("./generation-policy.cjs");
+const { legacyTimeline } = require("./shot-timeline.cjs");
 const {
   addTimelineSegment,
   isDraftLocked,
@@ -34,8 +34,36 @@ function clone(value) {
 function editableRequest(request) {
   const next = clone(request || {});
   const version = Number(next.version || 1);
-  if (version >= 2 && version < 4 && Array.isArray(next.scenes)) {
+  if (version === 1 && Array.isArray(next.shots)) {
+    const videoModel = text(next.settings?.videoModel, "MiniMax-H3");
+    const sourceShots = list(next.shots).slice(0, 12);
     next.version = 4;
+    next.confirmed = false;
+    next.character = {
+      id: text(next.character?.id, "main-character"),
+      prompt: text(next.character?.prompt),
+      voiceProfile: text(next.character?.voiceProfile),
+    };
+    next.products = [];
+    next.scenes = sourceShots.map((shot, index) => ({
+      id: `legacy-scene-${String(index + 1).padStart(3, "0")}`,
+      prompt: text(shot?.environment, text(shot?.imagePrompt, text(shot?.prompt, "延续原视频对应场景的空间、光线和固定陈设。"))),
+    }));
+    next.settings = { ...(next.settings || {}), videoModel };
+    next.shots = sourceShots.map((shot, index) => {
+      const duration = normalizeVideoDuration(shot?.duration, videoModel);
+      return {
+        ...shot,
+        id: String(index + 1).padStart(3, "0"),
+        sceneId: next.scenes[index].id,
+        productIds: [],
+        duration,
+        timeline: legacyTimeline({ ...shot, duration }),
+      };
+    });
+  } else if (version >= 2 && version < 4 && Array.isArray(next.scenes)) {
+    next.version = 4;
+    next.confirmed = false;
     if (!Array.isArray(next.products)) next.products = [];
     next.shots = list(next.shots).map((shot) => ({
       ...shot,
@@ -552,7 +580,15 @@ function createVideoReplicaWorkbenchView(ItemView) {
       previewLabel.createEl("span", { text: "最终视频提示词预览" });
       const preview = previewLabel.createEl("textarea", { attr: { readonly: "true", "aria-label": "最终视频提示词预览" } });
       try {
-        preview.value = compileTimelinePrompt(timeline, { duration: shot.duration, voiceProfile: this.draft?.character?.voiceProfile });
+        preview.value = resolveVideoPrompt({
+          timeline,
+          duration: shot.duration,
+          videoPrompt: shot.videoPrompt,
+          videoPromptOverride: shot.videoPromptOverride,
+          dialogue: shot.dialogue,
+          voiceProfile: this.draft?.character?.voiceProfile,
+          voiceDirection: shot.voiceDirection,
+        });
       } catch (error) {
         preview.value = `时间轴待修正：${String(error?.message || error)}`;
       }
