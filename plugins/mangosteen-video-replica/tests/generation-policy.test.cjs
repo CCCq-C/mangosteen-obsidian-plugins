@@ -95,6 +95,14 @@ assert.strictEqual(normalizeVideoDuration(29.2, "seedance-2.5"), 30);
 const firstImageFile = { name: "first.png" };
 const lastImageFile = { name: "last.png" };
 const directReferenceFiles = [{ name: "character.png" }, { name: "scene.png" }, { name: "product.png" }];
+const outputTarget = {
+  owner: "video-replica",
+  projectId: "project-1",
+  shotId: "008",
+  assetType: "shot-video",
+  destinationPath: "山竹视频复刻/project-1/03-分镜/008/视频.mp4",
+  overwrite: "replace-current",
+};
 const common = {
   prompt: "人物向前走，镜头缓慢推进",
   duration: 4,
@@ -107,6 +115,7 @@ assert.deepStrictEqual(buildVideoOptions({
   resolution: "768p",
   firstImageFile,
   lastImageFile,
+  outputTarget,
 }), {
   model: "MiniMax-H3",
   prompt: common.prompt,
@@ -115,6 +124,7 @@ assert.deepStrictEqual(buildVideoOptions({
   resolution: "768p",
   firstImageFile,
   lastImageFile,
+  outputTarget,
 });
 
 assert.deepStrictEqual(buildVideoOptions({
@@ -185,6 +195,11 @@ const fingerprintInput = {
 };
 const baselineFingerprint = createGenerationFingerprint(fingerprintInput);
 assert.match(baselineFingerprint, /^sha256:[a-f0-9]{64}$/);
+assert.strictEqual(
+  createGenerationFingerprint({ ...fingerprintInput, outputTarget }),
+  baselineFingerprint,
+  "local output targets must not affect paid generation reuse fingerprints",
+);
 for (const changed of [
   { character: { ...fingerprintInput.character, id: "hero-v2" } },
   { character: { ...fingerprintInput.character, prompt: "长发女性，白色外套" } },

@@ -637,6 +637,90 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   await plugin.saveImageCandidate({}, { kind: "base64", value: Buffer.from("valid-new-output").toString("base64") }, validOutputPath);
   assert.strictEqual(fs.readFileSync(path.join(vault, ...validOutputPath.split("/")), "utf8"), "valid-new-output", "checked paths must still permit legitimate missing output directories");
 
+  const targetAwarePath = "山竹视频复刻/project-1/03-分镜/008/首帧.png";
+  const targetAwareOutputTarget = {
+    owner: "video-replica",
+    projectId: "project-1",
+    shotId: "008",
+    assetType: "first-frame",
+    destinationPath: targetAwarePath,
+    overwrite: "replace-current",
+  };
+  let targetAwareGenerateOptions = null;
+  let targetAwareSaveInput = null;
+  const targetAwareImageTask = { id: "image-task-008", saved: false };
+  const targetAwareImage = {
+    generateText: async (_prompt, _count, _slot, options) => {
+      targetAwareGenerateOptions = options;
+      return {
+        candidate: { kind: "base64", value: Buffer.from("target-aware-image").toString("base64") },
+        __mangosteenTaskId: targetAwareImageTask.id,
+        __mangosteenSubmissionFingerprint: "image-fingerprint-008",
+        __mangosteenOutputTarget: targetAwareOutputTarget,
+      };
+    },
+    extractResults: (response) => [response.candidate],
+    saveImageResult: async (input) => {
+      targetAwareSaveInput = input;
+      const destination = input.outputTarget.destinationPath;
+      fs.mkdirSync(path.dirname(path.join(vault, ...destination.split("/"))), { recursive: true });
+      fs.writeFileSync(path.join(vault, ...destination.split("/")), Buffer.from(input.candidates[0].value, "base64"));
+      Object.assign(targetAwareImageTask, { saved: true, imagePaths: [destination] });
+      return targetAwareImageTask;
+    },
+  };
+  const targetAwareCandidate = await plugin.generateImage(
+    targetAwareImage,
+    "版本六首帧",
+    "",
+    "gpt-image-2-w",
+    targetAwareOutputTarget,
+  );
+  assert.deepStrictEqual(targetAwareGenerateOptions.outputTarget, targetAwareOutputTarget);
+  assert.strictEqual(targetAwareCandidate.__mangosteenTaskId, targetAwareImageTask.id);
+  const targetAwareSavedPath = await plugin.saveImageCandidate(
+    targetAwareImage,
+    targetAwareCandidate,
+    targetAwarePath,
+    targetAwareOutputTarget,
+  );
+  assert.strictEqual(targetAwareSavedPath, targetAwarePath);
+  assert.strictEqual(targetAwareImageTask.saved, true, "the image plugin task must finish with saved=true");
+  assert.deepStrictEqual(targetAwareImageTask.imagePaths, [targetAwarePath]);
+  assert.deepStrictEqual(targetAwareSaveInput.outputTarget, targetAwareOutputTarget);
+  assert.strictEqual(fs.readFileSync(path.join(vault, ...targetAwarePath.split("/")), "utf8"), "target-aware-image");
+
+  const compatibilityPath = "山竹视频复刻/project-compat/03-分镜/008/首帧.png";
+  const compatibilityTarget = { ...targetAwareOutputTarget, projectId: "project-compat", destinationPath: compatibilityPath };
+  fs.mkdirSync(path.join(vault, "山竹视频复刻", "project-compat"), { recursive: true });
+  await plugin.saveImageCandidate(
+    {},
+    { kind: "base64", value: Buffer.from("compatibility-image").toString("base64") },
+    compatibilityPath,
+    compatibilityTarget,
+  );
+  assert.strictEqual(fs.readFileSync(path.join(vault, ...compatibilityPath.split("/")), "utf8"), "compatibility-image");
+  assert.strictEqual(plugin.imageTargetUpgradeNoticeShown, true, "older image plugins must trigger one clear upgrade notice while retaining the atomic fallback");
+
+  const rollbackFolder = "山竹视频复刻/project-rollback";
+  const rollbackPath = `${rollbackFolder}/03-分镜/008/首帧.png`;
+  fs.mkdirSync(path.dirname(path.join(vault, ...rollbackPath.split("/"))), { recursive: true });
+  fs.writeFileSync(path.join(vault, ...rollbackPath.split("/")), "visible-before-failure");
+  await assert.rejects(
+    () => plugin.withArchivedProjectArtifact({
+      projectFolder: rollbackFolder,
+      shotId: "008",
+      kind: "first-frame",
+      enabled: true,
+    }, async () => { throw new Error("injected generation failure"); }),
+    /injected generation failure/,
+  );
+  assert.strictEqual(fs.readFileSync(path.join(vault, ...rollbackPath.split("/")), "utf8"), "visible-before-failure", "a failed replacement must restore the previously visible current artifact");
+  const rollbackHistoryRoot = path.join(vault, ...rollbackFolder.split("/"), ".mangosteen", "history");
+  const rollbackHistoryFiles = fs.readdirSync(rollbackHistoryRoot, { recursive: true })
+    .filter((entry) => fs.statSync(path.join(rollbackHistoryRoot, entry)).isFile());
+  assert.deepStrictEqual(rollbackHistoryFiles, [], "a successful rollback must not leave a duplicate history link");
+
   let releaseCatalog;
   let catalogStarted;
   const waitForCatalog = new Promise((resolve) => { catalogStarted = resolve; });

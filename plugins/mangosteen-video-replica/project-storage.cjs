@@ -187,11 +187,46 @@ function archiveCurrentArtifact({ resolveSafe, projectFolder, shotId, kind, now 
   return archivedRelativePath;
 }
 
+function restoreArchivedArtifact({ resolveSafe, projectFolder, shotId, kind, archivedPath } = {}) {
+  const artifactKey = ARTIFACT_KINDS[kind];
+  if (!artifactKey) throw new Error(`不支持恢复的镜头文件类型：${String(kind)}`);
+  const artifacts = shotArtifactPaths(projectFolder, shotId);
+  const currentRelativePath = artifacts[artifactKey];
+  const paths = projectRelativePaths(projectFolder);
+  const normalizedArchivedPath = String(archivedPath ?? "").trim();
+  const expectedPrefix = `${paths.history}/`;
+  const historySegments = normalizedArchivedPath.startsWith(expectedPrefix)
+    ? normalizedArchivedPath.slice(expectedPrefix.length).split("/")
+    : [];
+  const normalizedShotId = path.posix.basename(artifacts.folder);
+  if (historySegments.length !== 3
+      || !/^\d{8}-\d{6}-\d{3}$/.test(historySegments[0])
+      || historySegments[1] !== normalizedShotId
+      || historySegments[2] !== path.posix.basename(currentRelativePath)) {
+    throw new Error("镜头历史路径不安全，已拒绝恢复。");
+  }
+
+  const archivedAbsolutePath = absoluteFrom(resolveSafe, normalizedArchivedPath);
+  const archivedStat = fs.lstatSync(archivedAbsolutePath, { throwIfNoEntry: false });
+  if (!archivedStat || archivedStat.isSymbolicLink() || !archivedStat.isFile()) {
+    throw new Error("镜头历史文件不存在或不安全，无法恢复。");
+  }
+  ensureDirectory(resolveSafe, path.posix.dirname(currentRelativePath));
+  const currentAbsolutePath = absoluteFrom(resolveSafe, currentRelativePath, { createParents: true });
+  if (fs.lstatSync(currentAbsolutePath, { throwIfNoEntry: false })) {
+    throw new Error("当前镜头文件已存在，已拒绝用历史文件覆盖。");
+  }
+  fs.linkSync(archivedAbsolutePath, currentAbsolutePath);
+  fs.unlinkSync(archivedAbsolutePath);
+  return currentRelativePath;
+}
+
 module.exports = {
   archiveCurrentArtifact,
   atomicWriteJson,
   createProjectLayout,
   projectRelativePaths,
   readProjectDocument,
+  restoreArchivedArtifact,
   shotArtifactPaths,
 };

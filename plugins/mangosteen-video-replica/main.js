@@ -477,6 +477,66 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     return (relativePath, options = {}) => this.checkedProjectPath(folder, relativePath, options);
   }
 
+  replicaOutputTarget(projectFolder, shotId, assetType, destinationPath) {
+    const artifacts = projectStorage.shotArtifactPaths(projectFolder, shotId);
+    return {
+      owner: "video-replica",
+      projectId: path.posix.basename(projectFolder),
+      shotId: path.posix.basename(artifacts.folder),
+      assetType,
+      destinationPath,
+      overwrite: "replace-current",
+    };
+  }
+
+  assertDurableProjectArtifact(projectFolder, vaultPath) {
+    const absolutePath = this.checkedProjectPath(projectFolder, vaultPath);
+    const stat = fs.lstatSync(absolutePath, { throwIfNoEntry: false });
+    if (!stat || stat.isSymbolicLink() || !stat.isFile()) {
+      throw new Error(`目标文件尚未安全保存：${vaultPath}`);
+    }
+    return vaultPath;
+  }
+
+  shotArtifactProjectFolder(vaultPath) {
+    const marker = "/03-分镜/";
+    const markerIndex = String(vaultPath || "").indexOf(marker);
+    const projectFolder = markerIndex > 0 ? String(vaultPath).slice(0, markerIndex) : "";
+    if (!projectFolder.startsWith(`${ROOT}/`)) throw new Error("镜头目标路径不属于视频复刻项目。");
+    return projectFolder;
+  }
+
+  async withArchivedProjectArtifact({ projectFolder, shotId, kind, enabled }, operation) {
+    if (typeof operation !== "function") throw new Error("缺少镜头文件替换操作。");
+    if (!enabled) return operation();
+    const archivedPath = projectStorage.archiveCurrentArtifact({
+      resolveSafe: this.projectStorageResolver(projectFolder),
+      projectFolder,
+      shotId,
+      kind,
+    });
+    try {
+      return await operation();
+    } catch (error) {
+      const currentPath = projectStorage.shotArtifactPaths(projectFolder, shotId)[kind === "first-frame" ? "firstFrame" : kind === "last-frame" ? "lastFrame" : "video"];
+      if (archivedPath && !fs.lstatSync(this.checkedProjectPath(projectFolder, currentPath), { throwIfNoEntry: false })) {
+        try {
+          projectStorage.restoreArchivedArtifact({
+            resolveSafe: this.projectStorageResolver(projectFolder),
+            projectFolder,
+            shotId,
+            kind,
+            archivedPath,
+          });
+        } catch (restoreError) {
+          error.restoreError = restoreError;
+          error.message = `${String(error.message || error)}；旧产物恢复失败：${String(restoreError?.message || restoreError)}`;
+        }
+      }
+      throw error;
+    }
+  }
+
   readOptionalJson(filePath, readErrors = null, key = "") {
     if (!filePath || !fs.existsSync(filePath)) return null;
     try { return this.readJson(filePath); }
@@ -1939,7 +1999,30 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     return { image, video };
   }
 
-  async saveImageCandidate(imagePlugin, candidate, vaultPath) {
+  async saveImageCandidate(imagePlugin, candidate, vaultPath, outputTarget = null) {
+    const target = outputTarget || candidate?.__mangosteenOutputTarget || null;
+    if (target && target.destinationPath !== vaultPath) throw new Error("生图目标路径与镜头文件路径不一致。");
+    if (target && typeof imagePlugin?.saveImageResult === "function") {
+      const task = await imagePlugin.saveImageResult({
+        taskId: candidate?.__mangosteenTaskId,
+        submissionFingerprint: candidate?.__mangosteenSubmissionFingerprint,
+        candidates: [candidate],
+        prompt: candidate?.__mangosteenPrompt,
+        mode: candidate?.__mangosteenMode,
+        model: candidate?.__mangosteenModel,
+        requestedCount: 1,
+        outputTarget: target,
+      });
+      if (task?.saved !== true || !Array.isArray(task.imagePaths) || task.imagePaths[0] !== vaultPath) {
+        throw new Error("山竹生图未确认目标文件已保存，请升级插件后重试。");
+      }
+      this.assertDurableProjectArtifact(this.shotArtifactProjectFolder(vaultPath), vaultPath);
+      return vaultPath;
+    }
+    if (target && !this.imageTargetUpgradeNoticeShown) {
+      this.imageTargetUpgradeNoticeShown = true;
+      new Notice("山竹生图版本较旧，已使用安全兼容保存。请升级山竹生图以启用项目目标直存。", 10000);
+    }
     const absolutePath = this.absolute(vaultPath, { createParents: true });
     let bytes;
     if (candidate?.kind === "base64") bytes = Buffer.from(candidate.value, "base64");
@@ -1965,32 +2048,42 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     };
   }
 
-  async generateImage(imagePlugin, prompt, referencePath = "", imageModel = "") {
+  async generateImage(imagePlugin, prompt, referencePath = "", imageModel = "", outputTarget = null) {
     try {
       const response = referencePath
-        ? await imagePlugin.generateEdit(prompt, this.localImage(referencePath), "video-replica", { model: imageModel })
-        : await imagePlugin.generateText(prompt, 1, "video-replica", { model: imageModel });
+        ? await imagePlugin.generateEdit(prompt, this.localImage(referencePath), "video-replica", { model: imageModel, ...(outputTarget ? { outputTarget } : {}) })
+        : await imagePlugin.generateText(prompt, 1, "video-replica", { model: imageModel, ...(outputTarget ? { outputTarget } : {}) });
       const candidate = imagePlugin.extractResults(response)?.[0];
       if (!candidate) throw new Error("生图任务完成，但没有返回图片。");
       candidate.__mangosteenSubmissionFingerprint = response?.__mangosteenSubmissionFingerprint;
+      candidate.__mangosteenTaskId = response?.__mangosteenTaskId;
+      candidate.__mangosteenOutputTarget = response?.__mangosteenOutputTarget || outputTarget || null;
+      candidate.__mangosteenPrompt = prompt;
+      candidate.__mangosteenMode = referencePath ? "图生图" : "文生图";
+      candidate.__mangosteenModel = imageModel;
       return candidate;
     } catch (error) {
       throw this.generationModelError("image", imageModel, error);
     }
   }
 
-  async generateImageMulti(imagePlugin, prompt, referencePaths, imageModel = "") {
+  async generateImageMulti(imagePlugin, prompt, referencePaths, imageModel = "", outputTarget = null) {
     if (typeof imagePlugin.generateEditMulti !== "function") throw new Error("山竹生图插件版本过低，缺少多图参考能力。请先更新插件。");
     try {
       const response = await imagePlugin.generateEditMulti(
         prompt,
         referencePaths.map((vaultPath) => this.localImage(vaultPath)),
         "video-replica",
-        { model: imageModel },
+        { model: imageModel, ...(outputTarget ? { outputTarget } : {}) },
       );
       const candidate = imagePlugin.extractResults(response)?.[0];
       if (!candidate) throw new Error("多图参考生图完成，但没有返回图片。");
       candidate.__mangosteenSubmissionFingerprint = response?.__mangosteenSubmissionFingerprint;
+      candidate.__mangosteenTaskId = response?.__mangosteenTaskId;
+      candidate.__mangosteenOutputTarget = response?.__mangosteenOutputTarget || outputTarget || null;
+      candidate.__mangosteenPrompt = prompt;
+      candidate.__mangosteenMode = "图生图";
+      candidate.__mangosteenModel = imageModel;
       return candidate;
     } catch (error) {
       throw this.generationModelError("image", imageModel, error);
@@ -2028,7 +2121,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     }
   }
 
-  async waitForVideo(videoPlugin, taskId, timeoutMs = 45 * 60 * 1000, onProgress = null) {
+  async waitForVideo(videoPlugin, taskId, timeoutMs = 45 * 60 * 1000, onProgress = null, expectedLocalPath = "") {
     const startedAtMs = Date.now();
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
@@ -2045,7 +2138,12 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
           elapsedMs: Math.max(0, Date.now() - startedAtMs),
         });
       }
-      if (task?.status === "completed" && task.localPath) return task;
+      if (task?.status === "completed" && task.localPath) {
+        if (expectedLocalPath && task.localPath !== expectedLocalPath) {
+          throw new Error(`视频保存路径与项目目标不一致：${task.localPath}`);
+        }
+        return task;
+      }
       if (task?.status === "failed") {
         const failure = new Error(task.lastError || "视频生成失败。");
         failure.code = "VIDEO_TASK_FAILED";
@@ -2162,9 +2260,12 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     };
     await report({ status: "preparing", stage: "preflight", error: null });
     this.assertWorkbenchQueueRunnerLock(paths.folder, context.queueId);
-    for (const directory of ["01-人物参考", "02-分镜脚本", "03-视频片段", "04-最终成片", ".work"]) {
-      this.checkedProjectPath(paths.folder, directory, { createParents: true, directory: true });
+    if (!paths.isV6) {
+      for (const directory of ["01-人物参考", "02-分镜脚本", "03-视频片段", "04-最终成片", ".work"]) {
+        this.checkedProjectPath(paths.folder, directory, { createParents: true, directory: true });
+      }
     }
+    const versionSixArtifacts = paths.isV6 ? projectStorage.shotArtifactPaths(paths.folder, shot.id) : null;
     const initialProject = this.readJson(paths.projectPath);
     const submittedShot = (initialProject.shots || []).find((item) => String(item.id) === String(shot.id));
     const activeRunTaskId = String(context?.recoveryTaskId || "").trim();
@@ -2174,7 +2275,8 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     const recoveryTaskId = activeRunTaskId || legacyTaskId;
     if (recoveryTaskId) {
       const { video } = this.getGenerationPlugins();
-      const videoPath = paths.folder + "/03-视频片段/镜头-" + shot.id + "-" + core.safeSegment(shot.title) + ".mp4";
+      const videoPath = versionSixArtifacts?.video
+        || paths.folder + "/03-视频片段/镜头-" + shot.id + "-" + core.safeSegment(shot.title) + ".mp4";
       this.updateProjectShot(paths.folder, shot.id, {
         status: "正在恢复并查询已有视频任务",
         videoTaskId: recoveryTaskId,
@@ -2201,7 +2303,14 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
           taskId: recoveryTaskId,
           paidTaskSubmitted: true,
         });
-        const savedVideoPath = this.copyVaultFile(completed.localPath, videoPath);
+        const savedVideoPath = paths.isV6 && completed.localPath === videoPath
+          ? this.assertDurableProjectArtifact(paths.folder, videoPath)
+          : await this.withArchivedProjectArtifact({
+            projectFolder: paths.folder,
+            shotId: shot.id,
+            kind: "shot-video",
+            enabled: paths.isV6,
+          }, () => this.copyVaultFile(completed.localPath, videoPath));
         this.updateProjectShot(paths.folder, shot.id, {
           videoPath: savedVideoPath,
           status: "已完成",
@@ -2337,12 +2446,22 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     const needsFirstFrame = !directReferenceMode;
     const needsLastFrame = !structuredTimeline && Boolean(shot.lastImagePrompt);
     const firstImagePath = needsFirstFrame
-      ? paths.folder + "/02-分镜脚本/镜头-" + shot.id + "-" + core.safeSegment(shot.title) + "-首帧.png"
+      ? versionSixArtifacts?.firstFrame || paths.folder + "/02-分镜脚本/镜头-" + shot.id + "-" + core.safeSegment(shot.title) + "-首帧.png"
       : "";
     const lastImagePath = needsLastFrame
-      ? paths.folder + "/02-分镜脚本/镜头-" + shot.id + "-" + core.safeSegment(shot.title) + "-尾帧.png"
+      ? versionSixArtifacts?.lastFrame || paths.folder + "/02-分镜脚本/镜头-" + shot.id + "-" + core.safeSegment(shot.title) + "-尾帧.png"
       : "";
-    const videoPath = paths.folder + "/03-视频片段/镜头-" + shot.id + "-" + core.safeSegment(shot.title) + ".mp4";
+    const videoPath = versionSixArtifacts?.video
+      || paths.folder + "/03-视频片段/镜头-" + shot.id + "-" + core.safeSegment(shot.title) + ".mp4";
+    const firstImageOutputTarget = paths.isV6 && firstImagePath
+      ? this.replicaOutputTarget(paths.folder, shot.id, "first-frame", firstImagePath)
+      : null;
+    const lastImageOutputTarget = paths.isV6 && lastImagePath
+      ? this.replicaOutputTarget(paths.folder, shot.id, "last-frame", lastImagePath)
+      : null;
+    const videoOutputTarget = paths.isV6
+      ? this.replicaOutputTarget(paths.folder, shot.id, "shot-video", videoPath)
+      : null;
     const sameGeneration = existing.generationFingerprint === fingerprint;
     const reusableFirst = !needsFirstFrame || (sameGeneration && existing.firstImagePath === firstImagePath && this.projectFileExists(paths.folder, firstImagePath));
     const reusableLast = !needsLastFrame || (sameGeneration && existing.lastImagePath === lastImagePath && this.projectFileExists(paths.folder, lastImagePath));
@@ -2354,13 +2473,22 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       : "";
     let currentFirstImagePath = resumableVideoTaskId ? String(existing.firstImagePath || existing.imagePath || "") : reusableFirst ? firstImagePath : "";
     let currentLastImagePath = resumableVideoTaskId ? String(existing.lastImagePath || "") : reusableLast ? lastImagePath : "";
+    const visibleFirstImagePath = paths.isV6 && existing.firstImagePath === firstImagePath && this.projectFileExists(paths.folder, firstImagePath)
+      ? firstImagePath
+      : currentFirstImagePath;
+    const visibleLastImagePath = paths.isV6 && existing.lastImagePath === lastImagePath && this.projectFileExists(paths.folder, lastImagePath)
+      ? lastImagePath
+      : currentLastImagePath;
+    const visibleVideoPath = paths.isV6 && existing.videoPath === videoPath && this.projectFileExists(paths.folder, videoPath)
+      ? videoPath
+      : reusableVideo ? videoPath : "";
     this.updateProjectShot(paths.folder, shot.id, {
       ...shot,
-      generationFingerprint: fingerprint,
-      firstImagePath: currentFirstImagePath,
-      imagePath: currentFirstImagePath,
-      lastImagePath: currentLastImagePath,
-      videoPath: reusableVideo ? videoPath : "",
+      generationFingerprint: paths.isV6 ? String(existing.generationFingerprint || "") : fingerprint,
+      firstImagePath: visibleFirstImagePath,
+      imagePath: visibleFirstImagePath,
+      lastImagePath: visibleLastImagePath,
+      videoPath: visibleVideoPath,
       status: reusableVideo ? "已完成" : "正在准备参考图",
       error: "",
       ...(resumableVideoTaskId ? {} : {
@@ -2389,10 +2517,15 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         await report({ status: "image-processing", stage: "first-frame" });
         this.updateProjectShot(paths.folder, shot.id, { status: "正在生成首帧" });
         const framePrompt = structuredTimeline ? shotTimeline.firstFramePrompt(shot.timeline) : String(shot.imagePrompt || "");
-        currentFirstImagePath = await withPaidSubmissionGate({ kind: "first-frame" }, async ({ accept, resolve } = {}) => {
-          const accepted = await this.generateImageMulti(image, visualStyle.applyVisualStyle(framePrompt + "\n" + continuity, context.visualStyle), referencePaths, imageModel);
+        currentFirstImagePath = await withPaidSubmissionGate({ kind: "first-frame" }, async ({ accept, resolve } = {}) => this.withArchivedProjectArtifact({
+          projectFolder: paths.folder,
+          shotId: shot.id,
+          kind: "first-frame",
+          enabled: paths.isV6,
+        }, async () => {
+          const accepted = await this.generateImageMulti(image, visualStyle.applyVisualStyle(framePrompt + "\n" + continuity, context.visualStyle), referencePaths, imageModel, firstImageOutputTarget);
           await (accept || report)({ status: "submission-reserved", stage: "first-frame", paidTaskSubmitted: true });
-          const savedPath = await this.saveImageCandidate(image, accepted, firstImagePath);
+          const savedPath = await this.saveImageCandidate(image, accepted, firstImagePath, firstImageOutputTarget);
           this.updateProjectShot(paths.folder, shot.id, {
             firstImagePath: savedPath,
             imagePath: savedPath,
@@ -2405,16 +2538,21 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
             recoveryContext: { boundary: "first-frame", imagePath: savedPath },
           });
           return savedPath;
-        });
+        }));
       }
       if (!videoTaskId && needsLastFrame && !currentLastImagePath) {
         this.assertWorkbenchQueueRunnerLock(paths.folder, context.queueId);
         await report({ status: "image-processing", stage: "last-frame" });
         this.updateProjectShot(paths.folder, shot.id, { status: "正在生成尾帧" });
-        currentLastImagePath = await withPaidSubmissionGate({ kind: "last-frame" }, async ({ accept, resolve } = {}) => {
-          const accepted = await this.generateImageMulti(image, visualStyle.applyVisualStyle(shot.lastImagePrompt + "\n" + continuity, context.visualStyle), referencePaths, imageModel);
+        currentLastImagePath = await withPaidSubmissionGate({ kind: "last-frame" }, async ({ accept, resolve } = {}) => this.withArchivedProjectArtifact({
+          projectFolder: paths.folder,
+          shotId: shot.id,
+          kind: "last-frame",
+          enabled: paths.isV6,
+        }, async () => {
+          const accepted = await this.generateImageMulti(image, visualStyle.applyVisualStyle(shot.lastImagePrompt + "\n" + continuity, context.visualStyle), referencePaths, imageModel, lastImageOutputTarget);
           await (accept || report)({ status: "submission-reserved", stage: "last-frame", paidTaskSubmitted: true });
-          const savedPath = await this.saveImageCandidate(image, accepted, lastImagePath);
+          const savedPath = await this.saveImageCandidate(image, accepted, lastImagePath, lastImageOutputTarget);
           this.updateProjectShot(paths.folder, shot.id, { lastImagePath: savedPath, status: "尾帧已完成" });
           await (resolve || report)({
             status: "image-processing",
@@ -2423,16 +2561,64 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
             recoveryContext: { boundary: "last-frame", imagePath: savedPath },
           });
           return savedPath;
-        });
+        }));
       }
 
+      const finishVideoTask = async (taskId, { resolveReservation = null, archiveBeforeWait = false } = {}) => this.withArchivedProjectArtifact({
+        projectFolder: paths.folder,
+        shotId: shot.id,
+        kind: "shot-video",
+        enabled: paths.isV6 && archiveBeforeWait,
+      }, async () => {
+        const completed = await this.waitForVideo(video, taskId, 45 * 60 * 1000, (progress) => report({
+          status: "video-processing",
+          stage: "provider-generation",
+          taskId,
+          paidTaskSubmitted: true,
+          ...progress,
+        }), paths.isV6 ? videoPath : "");
+        await report({
+          status: "saving",
+          stage: "saving",
+          taskId,
+          paidTaskSubmitted: true,
+        });
+        const savedPath = paths.isV6
+          ? this.assertDurableProjectArtifact(paths.folder, videoPath)
+          : this.copyVaultFile(completed.localPath, videoPath);
+        this.updateProjectShot(paths.folder, shot.id, {
+          generationFingerprint: fingerprint,
+          videoPath: savedPath,
+          status: "已完成",
+          error: "",
+          videoTaskStatus: "completed",
+          videoTaskCompletedAt: new Date().toISOString(),
+        });
+        if (typeof resolveReservation === "function") {
+          await resolveReservation({
+            status: "saving",
+            stage: "saving",
+            taskId,
+            paidTaskSubmitted: true,
+            recoveryContext: { boundary: "video-submission", taskId, destinationPath: savedPath },
+          });
+        }
+        return { completed, savedPath };
+      });
+
+      let completedVideo;
       if (!videoTaskId) {
         this.assertWorkbenchQueueRunnerLock(paths.folder, context.queueId);
         await report({ status: "video-submitting", stage: "provider-submission", paidTaskSubmitted: false });
         this.updateProjectShot(paths.folder, shot.id, { status: "正在提交视频任务" });
         let task;
         try {
-          task = await withPaidSubmissionGate({ kind: "video-submission" }, async ({ accept, resolve } = {}) => {
+          const submitted = await withPaidSubmissionGate({ kind: "video-submission" }, async ({ accept, resolve } = {}) => this.withArchivedProjectArtifact({
+            projectFolder: paths.folder,
+            shotId: shot.id,
+            kind: "shot-video",
+            enabled: paths.isV6,
+          }, async () => {
             const accepted = await video.submitVideo(generationPolicy.buildVideoOptions({
               model,
               prompt: visualStyle.applyVisualStyle(String(shot.effectiveVideoPrompt || ""), context.visualStyle),
@@ -2442,6 +2628,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
               firstImageFile: currentFirstImagePath ? this.localImage(currentFirstImagePath) : null,
               lastImageFile: currentLastImagePath ? this.localImage(currentLastImagePath) : null,
               referenceImageFiles: directReferenceMode ? referencePaths.map((referencePath) => this.localImage(referencePath)) : undefined,
+              outputTarget: videoOutputTarget,
             }));
             const acceptedTaskId = String(accepted?.id || "").trim();
             if (!acceptedTaskId) {
@@ -2477,26 +2664,19 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
             } catch (error) {
               projectTaskWriteError = error;
             }
-            try {
-              await (resolve || report)({
-                status: "video-processing",
-                stage: "provider-generation",
-                taskId: acceptedTaskId,
-                paidTaskSubmitted: true,
-                recoveryContext: { boundary: "video-submission", taskId: acceptedTaskId },
-              });
-            } catch (error) {
-              error.taskId ||= acceptedTaskId;
-              error.paidTaskSubmitted = true;
-              throw error;
-            }
             if (projectTaskWriteError) {
               projectTaskWriteError.taskId ||= acceptedTaskId;
               projectTaskWriteError.paidTaskSubmitted = true;
               throw projectTaskWriteError;
             }
-            return accepted;
-          });
+            const completion = await finishVideoTask(acceptedTaskId, {
+              resolveReservation: resolve || report,
+              archiveBeforeWait: false,
+            });
+            return { accepted, ...completion };
+          }));
+          task = submitted.accepted;
+          completedVideo = submitted;
         } catch (error) {
           throw this.generationModelError("video", model, error);
         }
@@ -2510,33 +2690,21 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
           paidTaskSubmitted: true,
         });
       }
-
-      let completed;
-      try {
-        completed = await this.waitForVideo(video, videoTaskId, 45 * 60 * 1000, (progress) => report({
-          status: "video-processing",
-          stage: "provider-generation",
-          taskId: videoTaskId,
-          paidTaskSubmitted: true,
-          ...progress,
-        }));
-      } catch (error) {
-        throw this.generationModelError("video", model, error);
+      if (!completedVideo) {
+        try {
+          const persistedVideoTask = (video.settings?.videoTasks || []).find((item) => String(item.id) === String(videoTaskId));
+          const targetAlreadySaved = paths.isV6
+            && persistedVideoTask?.status === "completed"
+            && persistedVideoTask?.localPath === videoPath
+            && this.projectFileExists(paths.folder, videoPath);
+          completedVideo = await finishVideoTask(videoTaskId, {
+            archiveBeforeWait: paths.isV6 && !targetAlreadySaved,
+          });
+        } catch (error) {
+          throw this.generationModelError("video", model, error);
+        }
       }
-      await report({
-        status: "saving",
-        stage: "saving",
-        taskId: videoTaskId,
-        paidTaskSubmitted: true,
-      });
-      const savedVideoPath = this.copyVaultFile(completed.localPath, videoPath);
-      this.updateProjectShot(paths.folder, shot.id, {
-        videoPath: savedVideoPath,
-        status: "已完成",
-        error: "",
-        videoTaskStatus: "completed",
-        videoTaskCompletedAt: new Date().toISOString(),
-      });
+      const savedVideoPath = completedVideo.savedPath;
       return {
         videoPath: savedVideoPath,
         firstImagePath: currentFirstImagePath,

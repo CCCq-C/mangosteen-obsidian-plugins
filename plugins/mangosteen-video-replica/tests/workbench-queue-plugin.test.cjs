@@ -703,6 +703,185 @@ function request() {
     videoModels: ["MiniMax-H3"],
   });
 
+  const directStorageFolder = "山竹视频复刻/project-1";
+  const directStorageRoot = path.join(vault, ...directStorageFolder.split("/"));
+  const directStorageMetadata = path.join(directStorageRoot, ".mangosteen");
+  const directStorageArtifacts = projectStorage.shotArtifactPaths(directStorageFolder, "008");
+  fs.mkdirSync(path.join(directStorageMetadata, "history"), { recursive: true });
+  fs.mkdirSync(path.join(directStorageMetadata, "runs"), { recursive: true });
+  fs.mkdirSync(path.join(vault, ...directStorageArtifacts.folder.split("/")), { recursive: true });
+  fs.writeFileSync(path.join(vault, ...directStorageArtifacts.firstFrame.split("/")), "old-first-frame");
+  fs.writeFileSync(path.join(vault, ...directStorageArtifacts.video.split("/")), "old-video");
+  fs.writeFileSync(path.join(directStorageMetadata, "project.json"), JSON.stringify({
+    schemaVersion: 6,
+    folder: directStorageFolder,
+    title: "project-1",
+    status: "analysis_ready",
+    shots: [{
+      ...request().shots[0],
+      id: "008",
+      title: "改名前的标题",
+      generationFingerprint: "outdated-fingerprint",
+      firstImagePath: directStorageArtifacts.firstFrame,
+      imagePath: directStorageArtifacts.firstFrame,
+      lastImagePath: "",
+      videoPath: directStorageArtifacts.video,
+      status: "已完成",
+    }],
+  }));
+  fs.writeFileSync(path.join(directStorageMetadata, "draft.json"), JSON.stringify({ ...request(), schemaVersion: 6 }));
+  for (const referencePath of [
+    "山竹视频资产库/character/hero.png",
+    "山竹视频资产库/scene/room.png",
+    "山竹视频资产库/product/phone.png",
+  ]) {
+    fs.mkdirSync(path.dirname(path.join(vault, ...referencePath.split("/"))), { recursive: true });
+    fs.writeFileSync(path.join(vault, ...referencePath.split("/")), `reference:${referencePath}`);
+  }
+
+  const previousDirectStorageMethods = {
+    ensureReferenceAsset: plugin.ensureReferenceAsset,
+    generateImageMulti: plugin.generateImageMulti,
+    saveImageCandidate: plugin.saveImageCandidate,
+    waitForVideo: plugin.waitForVideo,
+    copyVaultFile: plugin.copyVaultFile,
+    resolveQueueGenerationRuntime: plugin.resolveQueueGenerationRuntime,
+  };
+  const directStorageImageOptions = [];
+  const directStorageVideoOptions = [];
+  const directStorageImageTasks = [];
+  let directStorageCopyCalls = 0;
+  let directStorageVideoSaved = false;
+  let directStorageVideoMaterialized = false;
+  const directStorageImage = {
+    generateEditMulti: async (_prompt, _images, _slot, options) => {
+      directStorageImageOptions.push(JSON.parse(JSON.stringify(options)));
+      return {
+        candidate: { kind: "base64", value: Buffer.from("new-first-frame").toString("base64") },
+        __mangosteenTaskId: "image-task-008",
+        __mangosteenSubmissionFingerprint: "image-fingerprint-008",
+        __mangosteenOutputTarget: options.outputTarget,
+      };
+    },
+    extractResults: (response) => [response.candidate],
+    saveImageResult: async (input) => {
+      const destinationPath = input.outputTarget.destinationPath;
+      fs.mkdirSync(path.dirname(path.join(vault, ...destinationPath.split("/"))), { recursive: true });
+      fs.writeFileSync(path.join(vault, ...destinationPath.split("/")), Buffer.from(input.candidates[0].value, "base64"));
+      const task = { id: input.taskId, saved: true, imagePaths: [destinationPath], outputTarget: input.outputTarget };
+      directStorageImageTasks.push(task);
+      return task;
+    },
+  };
+  const directStorageVideo = {
+    settings: { videoTasks: [] },
+    submitVideo: async (options) => {
+      directStorageVideoOptions.push(options);
+      directStorageVideo.settings.videoTasks = [{ id: "video-task-008", status: "processing", saved: false }];
+      return { id: "video-task-008" };
+    },
+    refreshVideoTasks: async () => {
+      if (directStorageVideoMaterialized) return;
+      directStorageVideoMaterialized = true;
+      const destinationPath = directStorageVideoOptions[0].outputTarget.destinationPath;
+      fs.mkdirSync(path.dirname(path.join(vault, ...destinationPath.split("/"))), { recursive: true });
+      fs.writeFileSync(path.join(vault, ...destinationPath.split("/")), "new-video");
+      directStorageVideoSaved = true;
+      directStorageVideo.settings.videoTasks[0] = {
+        id: "video-task-008",
+        status: "completed",
+        saved: true,
+        localPath: destinationPath,
+      };
+    },
+  };
+  plugin.ensureReferenceAsset = async (_image, asset) => ({
+    ...asset,
+    imagePath: `山竹视频资产库/${asset.kind}/${asset.id}.png`,
+    metadataPath: `山竹视频资产库/${asset.kind}/${asset.id}.json`,
+    contentHash: `${asset.kind}-${asset.id}-hash`,
+    reused: true,
+  });
+  plugin.generateImageMulti = ReplicaPlugin.prototype.generateImageMulti.bind(plugin);
+  plugin.saveImageCandidate = ReplicaPlugin.prototype.saveImageCandidate.bind(plugin);
+  plugin.waitForVideo = ReplicaPlugin.prototype.waitForVideo.bind(plugin);
+  plugin.copyVaultFile = () => { directStorageCopyCalls += 1; throw new Error("version 6 must not copy completed media"); };
+  plugin.resolveQueueGenerationRuntime = async () => ({
+    image: directStorageImage,
+    video: directStorageVideo,
+    imageModel: "gpt-image-2-w",
+    model: "MiniMax-H3",
+    resolution: "768p",
+  });
+  const resolvedStorageBoundaries = [];
+  const directStorageShot = {
+    ...request().shots[0],
+    id: "008",
+    title: "改名后的标题",
+    effectiveVideoPrompt: "改名后仍使用固定路径",
+  };
+  const directStorageResult = await plugin.runWorkbenchQueueShot(directStorageFolder, directStorageShot, {
+    queueId: "direct-storage-queue",
+    planId: "direct-storage-plan",
+    requestVersion: 3,
+    character: request().character,
+    products: request().products,
+    scenes: request().scenes,
+    settings: request().settings,
+    visualStyle: { style: "cinematic" },
+    withPaidSubmissionGate: async (boundary, operation) => operation({
+      accept: async () => {},
+      resolve: async () => {
+        if (boundary.kind === "first-frame") {
+          assert.strictEqual(fs.existsSync(path.join(vault, ...directStorageArtifacts.firstFrame.split("/"))), true);
+          assert.strictEqual(directStorageImageTasks[0]?.saved, true);
+        }
+        if (boundary.kind === "video-submission") {
+          const savedProject = JSON.parse(fs.readFileSync(path.join(directStorageMetadata, "project.json"), "utf8"));
+          assert.strictEqual(fs.existsSync(path.join(vault, ...directStorageArtifacts.video.split("/"))), true);
+          assert.strictEqual(directStorageVideoSaved, true);
+          assert.strictEqual(savedProject.shots[0].videoPath, directStorageArtifacts.video);
+        }
+        resolvedStorageBoundaries.push(boundary.kind);
+      },
+    }),
+  });
+  assert.deepStrictEqual(directStorageImageOptions[0].outputTarget, {
+    owner: "video-replica",
+    projectId: "project-1",
+    shotId: "008",
+    assetType: "first-frame",
+    destinationPath: "山竹视频复刻/project-1/03-分镜/008/首帧.png",
+    overwrite: "replace-current",
+  });
+  assert.strictEqual(directStorageVideoOptions[0].outputTarget.destinationPath, "山竹视频复刻/project-1/03-分镜/008/视频.mp4");
+  assert.deepStrictEqual(directStorageVideoOptions[0].outputTarget, {
+    owner: "video-replica",
+    projectId: "project-1",
+    shotId: "008",
+    assetType: "shot-video",
+    destinationPath: "山竹视频复刻/project-1/03-分镜/008/视频.mp4",
+    overwrite: "replace-current",
+  });
+  assert.strictEqual(directStorageCopyCalls, 0);
+  assert.deepStrictEqual(directStorageResult, {
+    videoPath: directStorageArtifacts.video,
+    firstImagePath: directStorageArtifacts.firstFrame,
+  });
+  assert.deepStrictEqual(resolvedStorageBoundaries, ["reference-asset", "reference-asset", "reference-asset", "first-frame", "video-submission"]);
+  assert.strictEqual(fs.readFileSync(path.join(vault, ...directStorageArtifacts.firstFrame.split("/")), "utf8"), "new-first-frame");
+  assert.strictEqual(fs.readFileSync(path.join(vault, ...directStorageArtifacts.video.split("/")), "utf8"), "new-video");
+  const directStorageHistoryFiles = fs.readdirSync(path.join(directStorageMetadata, "history"), { recursive: true })
+    .filter((entry) => /(?:首帧\.png|视频\.mp4)$/.test(String(entry)));
+  assert.strictEqual(directStorageHistoryFiles.length, 2, "each replaced current artifact must be archived exactly once");
+  assert.deepStrictEqual(
+    directStorageHistoryFiles.map((entry) => fs.readFileSync(path.join(directStorageMetadata, "history", entry), "utf8")).sort(),
+    ["old-first-frame", "old-video"],
+  );
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(directStorageMetadata, "project.json"), "utf8")).shots[0].title, "改名后的标题");
+
+  Object.assign(plugin, previousDirectStorageMethods);
+
   const gateFolder = "山竹视频复刻/版本六提交闸门";
   const gateRoot = path.join(vault, ...gateFolder.split("/"));
   const gateMetadataRoot = path.join(gateRoot, ".mangosteen");
@@ -955,6 +1134,7 @@ function request() {
   };
   const configureBoundaryProviders = ({ targetBoundary, pauseTarget = false }) => {
     const calls = { references: 0, images: 0, videos: 0 };
+    let submittedVideoTarget = null;
     let releaseTarget;
     let targetReached;
     let targetSeen = false;
@@ -985,13 +1165,21 @@ function request() {
     plugin.saveImageCandidate = async (_image, _candidate, targetPath) => targetPath;
     plugin.localImage = (vaultPath) => ({ vaultPath });
     plugin.copyVaultFile = (_source, targetPath) => targetPath;
-    plugin.waitForVideo = async () => ({ localPath: "/tmp/completed-boundary.mp4" });
+    plugin.waitForVideo = async () => {
+      const destinationPath = submittedVideoTarget?.destinationPath;
+      if (!destinationPath) throw new Error("boundary test did not retain the submitted outputTarget");
+      const absolutePath = path.join(vault, ...destinationPath.split("/"));
+      fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
+      fs.writeFileSync(absolutePath, "completed-boundary-video");
+      return { localPath: destinationPath, saved: true };
+    };
     plugin.resolveQueueGenerationRuntime = async () => ({
       image: {},
       video: {
-        submitVideo: async () => {
+        submitVideo: async (options) => {
           calls.videos += 1;
           await pause("video-submission");
+          submittedVideoTarget = options.outputTarget;
           return { id: `task-${targetBoundary}` };
         },
       },
@@ -999,7 +1187,12 @@ function request() {
       model: "MiniMax-H3",
       resolution: "768p",
     });
-    return { calls, targetReady, releaseTarget };
+    return {
+      calls,
+      targetReady,
+      releaseTarget,
+      rememberVideoTarget: (options) => { submittedVideoTarget = options.outputTarget; },
+    };
   };
   const stopFirstExpectations = {
     "reference-asset": { references: 0, images: 0, videos: 0 },
@@ -1074,8 +1267,9 @@ function request() {
   plugin.resolveQueueGenerationRuntime = async () => ({
     image: {},
     video: {
-      submitVideo: async () => {
+      submitVideo: async (options) => {
         crashChain.calls.videos += 1;
+        crashChain.rememberVideoTarget(options);
         crashChainProviderReturned = true;
         return { id: "task-crash-after-accept" };
       },

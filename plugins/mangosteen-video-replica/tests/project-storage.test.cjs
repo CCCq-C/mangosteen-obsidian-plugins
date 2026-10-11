@@ -208,6 +208,48 @@ try {
   assert.strictEqual(fs.existsSync(layoutVault.resolveSafe(artifact.firstFrame)), false);
   assert.strictEqual(fs.readFileSync(layoutVault.resolveSafe(archived), "utf8"), "current-frame");
 
+  assert.strictEqual(storage.restoreArchivedArtifact({
+    resolveSafe: layoutVault.resolveSafe,
+    projectFolder,
+    shotId: "008",
+    kind: "firstFrame",
+    archivedPath: archived,
+  }), artifact.firstFrame);
+  assert.strictEqual(fs.readFileSync(layoutVault.resolveSafe(artifact.firstFrame), "utf8"), "current-frame");
+  assert.strictEqual(fs.existsSync(layoutVault.resolveSafe(archived)), false, "a successful rollback must consume only its own history link");
+
+  fs.writeFileSync(layoutVault.resolveSafe(archived), "history-must-not-overwrite-current");
+  assert.throws(
+    () => storage.restoreArchivedArtifact({
+      resolveSafe: layoutVault.resolveSafe,
+      projectFolder,
+      shotId: "008",
+      kind: "firstFrame",
+      archivedPath: archived,
+    }),
+    /当前镜头文件已存在/,
+  );
+  assert.strictEqual(fs.readFileSync(layoutVault.resolveSafe(artifact.firstFrame), "utf8"), "current-frame");
+  assert.strictEqual(fs.readFileSync(layoutVault.resolveSafe(archived), "utf8"), "history-must-not-overwrite-current");
+
+  const restoreScopeVault = createVault();
+  const wrongShotArchive = `${projectFolder}/.mangosteen/history/20261011-070051-000/009/首帧.png`;
+  fs.mkdirSync(path.dirname(restoreScopeVault.resolveSafe(wrongShotArchive)), { recursive: true });
+  fs.writeFileSync(restoreScopeVault.resolveSafe(wrongShotArchive), "another-shot-history");
+  assert.throws(
+    () => storage.restoreArchivedArtifact({
+      resolveSafe: restoreScopeVault.resolveSafe,
+      projectFolder,
+      shotId: "008",
+      kind: "firstFrame",
+      archivedPath: wrongShotArchive,
+    }),
+    /历史路径不安全/,
+    "rollback must never restore a different shot's history file",
+  );
+  assert.strictEqual(fs.existsSync(restoreScopeVault.resolveSafe(artifact.firstFrame)), false);
+  assert.strictEqual(fs.readFileSync(restoreScopeVault.resolveSafe(wrongShotArchive), "utf8"), "another-shot-history");
+
   const archiveRaceVault = createVault();
   const archiveRaceArtifact = storage.shotArtifactPaths(projectFolder, "008");
   fs.mkdirSync(path.dirname(archiveRaceVault.resolveSafe(archiveRaceArtifact.video)), { recursive: true });
