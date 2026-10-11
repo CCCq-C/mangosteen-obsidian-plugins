@@ -20,6 +20,10 @@ fi
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "$script_dir/.." && pwd)"
 
+# Shared migration primitives live beside plugin folders so every migration uses
+# the same descriptor-based, no-follow implementation.
+cp -- "$repo_root/plugins/migration-safe-fs.cjs" "$plugin_root/migration-safe-fs.cjs"
+
 copy_plugin_files() {
   local plugin="$1"
   shift

@@ -3,7 +3,7 @@ const path = require("path");
 const { standaloneImagePath } = require("./output-storage.cjs");
 
 const MIGRATION_TYPE = "image-history-migration";
-const MIGRATION_VERSION = 2;
+const MIGRATION_VERSION = 3;
 const MIGRATION_SCHEMA_VERSION = 1;
 const JOURNAL_ROOT = ".mangosteen-image/migration-journal";
 
@@ -51,6 +51,9 @@ function taskIsUncertain(task, submissionMarkers) {
 function taskIsEligible(task, submissionMarkers) {
   return task?.status === "completed" && task?.saved === true && !taskIsUncertain(task, submissionMarkers) && !task?.outputTarget;
 }
+function imageHistorySafetySnapshot(tasks, submissionMarkers) {
+  return { tasks: clone(Array.isArray(tasks) ? tasks : []), submissionMarkers: clone(Array.isArray(submissionMarkers) ? submissionMarkers : []) };
+}
 function imageHistoryPlanId(plan) {
   return sha256(JSON.stringify({
     type: plan.type,
@@ -59,8 +62,12 @@ function imageHistoryPlanId(plan) {
     journalPath: plan.journalPath,
     destination: plan.destination,
     backupPath: plan.backupPath,
+    sourceDisposition: plan.sourceDisposition,
+    cleanupPending: plan.cleanupPending,
     operations: plan.operations,
     moves: plan.moves,
+    originalSafetySnapshot: plan.originalSafetySnapshot,
+    nextSafetySnapshot: plan.nextSafetySnapshot,
     originalTasks: plan.originalTasks,
     nextTasks: plan.nextTasks,
   }));
@@ -86,6 +93,13 @@ function planImageHistoryMigration({ tasks = [], submissionMarkers = [], files =
   const reasons = [];
   const skipped = [];
   const fileMap = descriptorIndex(files, reasons);
+  const ids = new Set();
+  for (const task of Array.isArray(tasks) ? tasks : []) {
+    const id = String(task?.id || "");
+    if (!id) reasons.push("历史任务存在空 ID，已拒绝整理。");
+    else if (ids.has(id)) reasons.push(`历史任务存在重复 ID：${id}`);
+    ids.add(id);
+  }
   const nextTasks = clone(Array.isArray(tasks) ? tasks : []);
   const operations = [];
   const targetPaths = new Set();
@@ -153,7 +167,7 @@ function planImageHistoryMigration({ tasks = [], submissionMarkers = [], files =
     }
   }
   const moves = [...folders].sort().map((from) => ({
-    type: "move-directory",
+    type: "copy-directory-backup-retain-source",
     from,
     to: `${backupPath}/${from}`,
     manifest: manifestForFolder(from, fileMap),
@@ -166,8 +180,12 @@ function planImageHistoryMigration({ tasks = [], submissionMarkers = [], files =
   const backupFiles = blocked ? [] : [...fileMap.values()].filter((file) => [...folders].some((folder) => file.path.startsWith(`${folder}/`)));
   const plan = {
     version: MIGRATION_VERSION, schemaVersion: MIGRATION_SCHEMA_VERSION, type: MIGRATION_TYPE, planId: "", plannedAt, destination, backupPath, journalPath,
+    sourceDisposition: "retained",
+    cleanupPending: safeMoves.map((operation) => ({ type: "legacy-source-directory", path: operation.from, reason: "portable no-follow directory move is unavailable; source retained for separate cleanup" })),
     blocked, reasons: uniqueReasons, skipped, operations: safeOperations, moves: safeMoves,
     originalTasks: clone(tasks), nextTasks: blocked ? clone(tasks) : nextTasks, deletes: [], journal: journal ? clone(journal) : null,
+    originalSafetySnapshot: imageHistorySafetySnapshot(tasks, submissionMarkers),
+    nextSafetySnapshot: imageHistorySafetySnapshot(blocked ? tasks : nextTasks, submissionMarkers),
     counts: {
       files: safeOperations.length,
       bytes: safeOperations.reduce((sum, item) => sum + item.size, 0),
@@ -189,8 +207,9 @@ function createImageHistoryJournal(plan) {
     planId: plan.planId,
     journalPath: plan.journalPath,
     state: "planned",
-    completed: { copies: [], settings: false, moves: [] },
-    rollback: { moves: [], settings: false, copies: [] },
+    completed: { copies: [], settings: false, backups: [] },
+    rollback: { settings: false, cleanupRecorded: false },
+    cleanupPending: [],
     inFlight: null,
     error: "",
     rollbackError: "",
@@ -199,7 +218,6 @@ function createImageHistoryJournal(plan) {
 }
 async function saveJournal(writeJournal, plan, journal) { await writeJournal(plan.journalPath, clone(journal)); }
 function sameManifest(left, right) { return Array.isArray(left) && Array.isArray(right) && JSON.stringify(left) === JSON.stringify(right); }
-function missingManifest(value) { return value === null; }
 function affectedTaskIds(plan) { return new Set(plan.operations.map((operation) => String(plan.originalTasks?.[operation.taskIndex]?.id || ""))); }
 function taskView(task) {
   return {
@@ -219,22 +237,48 @@ function completedIndexes(journal, key, length, label) {
       || new Set(values).size !== values.length) throw new Error(`历史整理 journal 的${label}记录无效。`);
   return values;
 }
+function backupEntries(plan) {
+  return plan.moves.flatMap((operation, moveIndex) => operation.manifest.map((descriptor, fileIndex) => ({
+    key: `${moveIndex}:${fileIndex}`,
+    moveIndex,
+    fileIndex,
+    from: `${operation.from}/${descriptor.relativePath}`,
+    to: `${operation.to}/${descriptor.relativePath}`,
+    size: descriptor.size,
+    sha256: descriptor.sha256,
+  })));
+}
+function completedBackupKeys(journal, plan) {
+  const allowed = new Set(backupEntries(plan).map((item) => item.key));
+  const values = journal?.completed?.backups;
+  if (!Array.isArray(values) || values.some((key) => !allowed.has(String(key))) || new Set(values.map(String)).size !== values.length) {
+    throw new Error("历史整理 journal 的备份复制完成记录无效。");
+  }
+  return values.map(String);
+}
+function addCleanupPending(journal, item) {
+  if (!journal.cleanupPending.some((current) => current.path === item.path && current.type === item.type)) journal.cleanupPending.push(item);
+}
 function validatePlan(plan) {
   if (!plan || plan.blocked) throw new Error(`历史整理计划已阻止：${plan?.reasons?.join("；") || "计划不可用"}`);
   if (plan.type !== MIGRATION_TYPE || plan.version !== MIGRATION_VERSION || plan.schemaVersion !== MIGRATION_SCHEMA_VERSION) throw new Error("历史整理计划类型或版本无效。");
+  if (plan.sourceDisposition !== "retained" || plan.moves.some((item) => item.type !== "copy-directory-backup-retain-source")) throw new Error("历史整理计划包含不安全的源目录清理方式。");
   if (plan.journalPath !== derivedImageJournalPath(plan.plannedAt)) throw new Error("历史整理 journal 路径不属于固定迁移目录。");
   if (imageHistoryPlanId(plan) !== plan.planId) throw new Error("历史整理计划内容已变更，与 planId 不一致，已拒绝执行。");
 }
-async function verifyMove(readManifest, operation, direction = "forward") {
-  const source = await readManifest(operation.from);
-  const backup = await readManifest(operation.to);
-  if (direction === "forward") return missingManifest(source) && sameManifest(backup, operation.manifest);
-  return sameManifest(source, operation.manifest) && missingManifest(backup);
+async function assertSafetySnapshot(readSafetySnapshot, expected, label) {
+  const actual = await readSafetySnapshot();
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error(`历史任务安全快照在${label}前已变化。`);
 }
-async function verifyCompleted({ plan, journal, hash, readManifest, readSettings }) {
+async function verifyBackup(readManifest, operation) {
+  return sameManifest(await readManifest(operation.from), operation.manifest)
+    && sameManifest(await readManifest(operation.to), operation.manifest);
+}
+async function verifyCompleted({ plan, journal, hash, readManifest, readSettings, readSafetySnapshot }) {
   for (const operation of plan.operations) if (await missingAsNull(hash, operation.to) !== operation.sha256) throw new Error(`已完成整理的目标哈希不一致：${operation.to}`);
   if (!settingsMatch(await readSettings(), plan.nextTasks, plan)) throw new Error("已完成整理的 settings 与计划不一致。");
-  for (const operation of plan.moves) if (!await verifyMove(readManifest, operation, "forward")) throw new Error(`已完成整理的备份清单不一致：${operation.from}`);
+  await assertSafetySnapshot(readSafetySnapshot, plan.nextSafetySnapshot, "完成校验");
+  for (const operation of plan.moves) if (!await verifyBackup(readManifest, operation)) throw new Error(`已完成整理的源或备份清单不一致：${operation.from}`);
 }
 async function verifyForwardProgress({ plan, journal, hash, readManifest, readSettings }) {
   for (const index of completedIndexes(journal, "copies", plan.operations.length, "复制完成")) {
@@ -243,57 +287,58 @@ async function verifyForwardProgress({ plan, journal, hash, readManifest, readSe
   }
   if (typeof journal?.completed?.settings !== "boolean") throw new Error("历史整理 journal 的 settings 完成记录无效。");
   if (journal.completed.settings && !settingsMatch(await readSettings(), plan.nextTasks, plan)) throw new Error("已记录的 settings 写入状态不一致。");
-  for (const index of completedIndexes(journal, "moves", plan.moves.length, "备份移动完成")) {
-    const operation = plan.moves[index];
-    if (!await verifyMove(readManifest, operation, "forward")) throw new Error(`已记录的备份移动状态不一致：${operation.from}`);
+  const entries = new Map(backupEntries(plan).map((item) => [item.key, item]));
+  for (const key of completedBackupKeys(journal, plan)) {
+    const entry = entries.get(key);
+    if (await missingAsNull(hash, entry.from) !== entry.sha256 || await missingAsNull(hash, entry.to) !== entry.sha256) {
+      throw new Error(`已记录的备份复制状态不一致：${entry.from}`);
+    }
   }
+  for (const operation of plan.moves) if (!sameManifest(await readManifest(operation.from), operation.manifest)) throw new Error(`源目录清单已变化：${operation.from}`);
 }
 async function resumeImageHistoryRollback(context, journal) {
-  const { plan, move, hash, atomicWriteSettings, writeJournal, removeNew, readManifest, readSettings } = context;
+  const { plan, hash, atomicWriteSettings, writeJournal, readManifest, readSettings, assertMaintenanceOwned } = context;
   journal.state = "rolling-back";
   await saveJournal(writeJournal, plan, journal);
   try {
-    const moved = new Set(journal.completed.moves);
-    if (journal.inFlight?.type === "move") moved.add(journal.inFlight.index);
-    for (const index of [...moved].sort((a, b) => b - a)) {
-      const operation = plan.moves[index];
-      if (journal.rollback.moves.includes(index)) {
-        if (!await verifyMove(readManifest, operation, "rollback")) throw new Error(`已记录的目录回滚状态不一致：${operation.from}`);
-        continue;
-      }
-      const source = await readManifest(operation.from);
-      const backup = await readManifest(operation.to);
-      if (missingManifest(source) && sameManifest(backup, operation.manifest)) await move(operation.to, operation.from, { exclusive: true, rollback: true });
-      else if (!sameManifest(source, operation.manifest) || !missingManifest(backup)) throw new Error(`目录回滚清单不一致：${operation.from}`);
-      if (!await verifyMove(readManifest, operation, "rollback")) throw new Error(`目录回滚后校验失败：${operation.from}`);
-      journal.rollback.moves.push(index);
-      await saveJournal(writeJournal, plan, journal);
-    }
+    const own = typeof assertMaintenanceOwned === "function" ? assertMaintenanceOwned : async () => true;
     const settingsMayHaveChanged = journal.completed.settings || journal.inFlight?.type === "settings";
     if (settingsMayHaveChanged && !journal.rollback.settings) {
+      await own("rollback-settings");
       const current = await readSettings();
       if (settingsMatch(current, plan.nextTasks, plan)) await atomicWriteSettings(clone(plan.originalTasks));
       else if (!settingsMatch(current, plan.originalTasks, plan)) throw new Error("settings 回滚状态不一致。");
       if (!settingsMatch(await readSettings(), plan.originalTasks, plan)) throw new Error("settings 回滚后校验失败。");
       journal.rollback.settings = true;
       await saveJournal(writeJournal, plan, journal);
-    } else if (journal.rollback.settings && !settingsMatch(await readSettings(), plan.originalTasks, plan)) throw new Error("已记录的 settings 回滚状态不一致。");
+    }
+    await own("rollback-source-verify");
+    for (const operation of plan.moves) {
+      if (!Array.isArray(await readManifest(operation.from))) throw new Error(`回滚时旧源目录不可读：${operation.from}`);
+    }
     const copied = new Set(journal.completed.copies);
     if (journal.inFlight?.type === "copy") copied.add(journal.inFlight.index);
-    for (const index of [...copied].sort((a, b) => b - a)) {
+    for (const index of copied) {
+      await own("rollback-copy-record");
       const operation = plan.operations[index];
-      if (journal.rollback.copies.includes(index)) {
-        if (await missingAsNull(hash, operation.to) !== null) throw new Error(`已记录的复制回滚状态不一致：${operation.to}`);
-        continue;
-      }
-      const targetHash = await missingAsNull(hash, operation.to);
-      const ownedMismatch = journal.inFlight?.type === "copy" && journal.inFlight.index === index && journal.inFlight.created === true;
-      if (targetHash === operation.sha256 || (targetHash !== null && ownedMismatch)) await removeNew(operation, { rollback: true, owned: ownedMismatch });
-      else if (targetHash !== null) throw new Error(`复制回滚目标内容不一致：${operation.to}`);
-      if (await missingAsNull(hash, operation.to) !== null) throw new Error(`复制回滚后目标仍存在：${operation.to}`);
-      journal.rollback.copies.push(index);
+      const actual = await missingAsNull(hash, operation.to);
+      if (actual !== null && actual !== operation.sha256) throw new Error(`回滚保留目标内容不一致：${operation.to}`);
+      if (actual === operation.sha256) addCleanupPending(journal, { type: "orphan-target-copy", path: operation.to, sha256: operation.sha256, reason: "safe path unlink is unavailable; retained for separate cleanup" });
       await saveJournal(writeJournal, plan, journal);
     }
+    const entries = new Map(backupEntries(plan).map((item) => [item.key, item]));
+    const backedUp = new Set(journal.completed.backups.map(String));
+    if (journal.inFlight?.type === "backup") backedUp.add(String(journal.inFlight.key));
+    for (const key of backedUp) {
+      await own("rollback-backup-record");
+      const entry = entries.get(key);
+      if (!entry) throw new Error("回滚备份记录无效。");
+      const actual = await missingAsNull(hash, entry.to);
+      if (actual !== null && actual !== entry.sha256) throw new Error(`回滚保留备份内容不一致：${entry.to}`);
+      if (actual === entry.sha256) addCleanupPending(journal, { type: "orphan-backup-copy", path: entry.to, sha256: entry.sha256, reason: "safe path unlink is unavailable; retained for separate cleanup" });
+      await saveJournal(writeJournal, plan, journal);
+    }
+    journal.rollback.cleanupRecorded = true;
     journal.inFlight = null;
     journal.state = "rolled-back";
     await saveJournal(writeJournal, plan, journal);
@@ -307,8 +352,10 @@ async function resumeImageHistoryRollback(context, journal) {
 }
 
 async function executeImageHistoryMigration(context) {
-  const { plan, copy, move, hash, atomicWriteSettings, writeJournal, removeNew, readManifest, readSettings } = context;
-  for (const [name, callback] of Object.entries({ copy, move, hash, atomicWriteSettings, writeJournal, removeNew, readManifest, readSettings })) if (typeof callback !== "function") throw new Error(`历史整理缺少 ${name}。`);
+  const { plan, copy, backupCopy, hash, atomicWriteSettings, writeJournal, readManifest, readSettings, readSafetySnapshot } = context;
+  for (const [name, callback] of Object.entries({ copy, backupCopy, hash, atomicWriteSettings, writeJournal, readManifest, readSettings, readSafetySnapshot })) {
+    if (typeof callback !== "function") throw new Error(`历史整理缺少 ${name}。`);
+  }
   validatePlan(plan);
   const journal = plan.journal ? clone(plan.journal) : createImageHistoryJournal(plan);
   if (journal.planId !== plan.planId || journal.journalPath !== plan.journalPath || journal.type !== `${MIGRATION_TYPE}-journal`) throw new Error("历史整理 journal 与计划不一致，已拒绝继续。");
@@ -316,29 +363,22 @@ async function executeImageHistoryMigration(context) {
     await resumeImageHistoryRollback(context, journal);
     throw new Error("历史整理回滚完成；未恢复正向迁移。");
   }
-  if (journal.state === "rolled-back") throw new Error("历史整理已回滚，需重新生成计划。");
-  if (journal.state === "completed") { await verifyCompleted({ plan, journal, hash, readManifest, readSettings }); return journal; }
+  if (journal.state === "rolled-back") throw new Error("历史整理已回滚，需人工处理 cleanupPending 后重新生成计划。");
+  if (journal.state === "completed") { await verifyCompleted({ plan, journal, hash, readManifest, readSettings, readSafetySnapshot }); return journal; }
   if (!["planned", "forward"].includes(journal.state)) throw new Error(`历史整理 journal 状态无效：${journal.state}`);
   journal.state = "forward";
   await saveJournal(writeJournal, plan, journal);
   try {
     await verifyForwardProgress({ plan, journal, hash, readManifest, readSettings });
-    for (const [index, operation] of plan.moves.entries()) {
-      if (journal.completed.moves.includes(index)) continue;
-      if (!sameManifest(await readManifest(operation.from), operation.manifest) || !missingManifest(await readManifest(operation.to))) throw new Error(`备份清单已变化，已拒绝整理：${operation.from}`);
-    }
     for (const [index, operation] of plan.operations.entries()) {
-      if (journal.completed.copies.includes(index)) {
-        if (await missingAsNull(hash, operation.to) !== operation.sha256) throw new Error(`已记录的复制目标哈希不一致：${operation.to}`);
-        continue;
-      }
+      if (journal.completed.copies.includes(index)) continue;
       const existing = await missingAsNull(hash, operation.to);
       if (existing !== null) {
         if (journal.inFlight?.type !== "copy" || journal.inFlight.index !== index || existing !== operation.sha256) throw new Error(`整理目标已存在或哈希不一致：${operation.to}`);
       } else {
-        journal.inFlight = { type: "copy", index };
+        journal.inFlight = { type: "copy", index, created: false };
         await saveJournal(writeJournal, plan, journal);
-        await copy(operation.from, operation.to, { exclusive: true });
+        await copy(operation.from, operation.to, { exclusive: true, size: operation.size, sha256: operation.sha256 });
         journal.inFlight.created = true;
         await saveJournal(writeJournal, plan, journal);
       }
@@ -347,30 +387,29 @@ async function executeImageHistoryMigration(context) {
       journal.inFlight = null;
       await saveJournal(writeJournal, plan, journal);
     }
-    if (journal.completed.settings && !settingsMatch(await readSettings(), plan.nextTasks, plan)) throw new Error("已记录的 settings 写入状态不一致。");
-    for (const [index, operation] of plan.moves.entries()) {
-      if (journal.completed.moves.includes(index)) {
-        if (!await verifyMove(readManifest, operation, "forward")) throw new Error(`已记录的备份移动状态不一致：${operation.from}`);
-        continue;
-      }
-      const source = await readManifest(operation.from);
-      const backup = await readManifest(operation.to);
-      if (journal.inFlight?.type === "move" && journal.inFlight.index === index && missingManifest(source) && sameManifest(backup, operation.manifest)) {
-        journal.completed.moves.push(index);
-        journal.inFlight = null;
+    const completedBackups = new Set(completedBackupKeys(journal, plan));
+    for (const entry of backupEntries(plan)) {
+      await assertSafetySnapshot(readSafetySnapshot, plan.originalSafetySnapshot, "备份复制");
+      const directory = plan.moves[entry.moveIndex];
+      if (!sameManifest(await readManifest(directory.from), directory.manifest)) throw new Error(`备份前源目录清单已变化：${directory.from}`);
+      if (completedBackups.has(entry.key)) continue;
+      const existing = await missingAsNull(hash, entry.to);
+      if (existing !== null) {
+        if (journal.inFlight?.type !== "backup" || String(journal.inFlight.key) !== entry.key || existing !== entry.sha256) throw new Error(`备份目标已存在或不一致：${entry.to}`);
+      } else {
+        journal.inFlight = { type: "backup", key: entry.key, created: false };
         await saveJournal(writeJournal, plan, journal);
-        continue;
+        await backupCopy(entry.from, entry.to, { exclusive: true, size: entry.size, sha256: entry.sha256 });
+        journal.inFlight.created = true;
+        await saveJournal(writeJournal, plan, journal);
       }
-      if (!sameManifest(source, operation.manifest) || !missingManifest(backup)) throw new Error(`移动前备份清单已变化：${operation.from}`);
-      journal.inFlight = { type: "move", index };
-      await saveJournal(writeJournal, plan, journal);
-      if (!sameManifest(await readManifest(operation.from), operation.manifest) || !missingManifest(await readManifest(operation.to))) throw new Error(`重命名前备份清单已变化：${operation.from}`);
-      await move(operation.from, operation.to, { exclusive: true });
-      if (!await verifyMove(readManifest, operation, "forward")) throw new Error(`目录移动后清单校验失败：${operation.from}`);
-      journal.completed.moves.push(index);
+      if (await hash(entry.from) !== entry.sha256 || await hash(entry.to) !== entry.sha256) throw new Error(`备份复制后 SHA-256 不一致：${entry.from}`);
+      journal.completed.backups.push(entry.key);
+      completedBackups.add(entry.key);
       journal.inFlight = null;
       await saveJournal(writeJournal, plan, journal);
     }
+    await assertSafetySnapshot(readSafetySnapshot, plan.originalSafetySnapshot, "settings 写入");
     if (!journal.completed.settings) {
       const current = await readSettings();
       if (journal.inFlight?.type === "settings" && settingsMatch(current, plan.nextTasks, plan)) {
@@ -388,9 +427,11 @@ async function executeImageHistoryMigration(context) {
         await saveJournal(writeJournal, plan, journal);
       }
     }
-    journal.inFlight = null;
-    await verifyCompleted({ plan, journal, hash, readManifest, readSettings });
+    await assertSafetySnapshot(readSafetySnapshot, plan.nextSafetySnapshot, "完成");
+    await verifyCompleted({ plan, journal, hash, readManifest, readSettings, readSafetySnapshot });
+    journal.cleanupPending = clone(plan.cleanupPending);
     journal.state = "completed";
+    journal.inFlight = null;
     await saveJournal(writeJournal, plan, journal);
     return journal;
   } catch (error) {
@@ -408,6 +449,7 @@ module.exports = {
   createImageHistoryJournal,
   derivedImageJournalPath,
   executeImageHistoryMigration,
+  imageHistorySafetySnapshot,
   imageHistoryPlanId,
   planImageHistoryMigration,
 };

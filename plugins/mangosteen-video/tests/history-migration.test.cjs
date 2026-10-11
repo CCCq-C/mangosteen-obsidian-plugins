@@ -24,9 +24,11 @@ function adapters(initial, options = {}) {
   const events = [];
   const journals = new Map();
   let savedTasks = JSON.parse(JSON.stringify(options.initialTasks || [task()]));
+  let savedMarkers = JSON.parse(JSON.stringify(options.initialMarkers || []));
   let removeFailures = Number(options.failRemoveAt || 0);
   let settingsFailures = Number(options.failSettingsAt || 0);
   let sourceManifestReads = 0;
+  let safetyReads = 0;
   return {
     files,
     events,
@@ -36,6 +38,12 @@ function adapters(initial, options = {}) {
     copy: async (from, to) => {
       events.push(`copy:${from}->${to}`);
       if (files.has(to)) throw Object.assign(new Error("destination exists"), { code: "EEXIST" });
+      files.set(to, Buffer.from(files.get(from)));
+    },
+    backupCopy: async (from, to) => {
+      events.push(`backup:${from}->${to}`);
+      if (options.failBackupFrom === from) throw new Error("injected backup failure");
+      if (files.has(to)) throw Object.assign(new Error("backup exists"), { code: "EEXIST" });
       files.set(to, Buffer.from(files.get(from)));
     },
     hash: async (filePath) => {
@@ -76,6 +84,15 @@ function adapters(initial, options = {}) {
       return entries.length ? entries : null;
     },
     readSettings: async () => JSON.parse(JSON.stringify(savedTasks)),
+    readSafetySnapshot: async () => {
+      safetyReads += 1;
+      if (safetyReads === options.mutateSafetyAt) {
+        if (options.mutatedTasks) savedTasks = JSON.parse(JSON.stringify(options.mutatedTasks));
+        if (options.mutatedMarkers) savedMarkers = JSON.parse(JSON.stringify(options.mutatedMarkers));
+      }
+      return { tasks: JSON.parse(JSON.stringify(savedTasks)), submissionMarkers: JSON.parse(JSON.stringify(savedMarkers)) };
+    },
+    setSafety({ tasks, submissionMarkers }) { if (tasks) savedTasks = JSON.parse(JSON.stringify(tasks)); if (submissionMarkers) savedMarkers = JSON.parse(JSON.stringify(submissionMarkers)); },
     clearFailures() { options.failMoveFrom = null; removeFailures = 0; settingsFailures = 0; },
   };
 }
@@ -99,6 +116,9 @@ function adapters(initial, options = {}) {
   assert.strictEqual(plan.counts.blocked, 0);
   assert.strictEqual(plan.counts.skipped, 0);
   assert.strictEqual(plan.deletes.length, 0);
+  assert.strictEqual(plan.sourceDisposition, "retained");
+  assert.ok(plan.cleanupPending.some((item) => item.path === "山竹视频/video-task-1"));
+  assert.strictEqual(plan.moves[0].type, "copy-directory-backup-retain-source");
   assert.match(plan.backupPath, /^\.mangosteen-video\/migration-backup\/migration-20261012-010203-004$/);
   assert.strictEqual(plan.nextTasks[0].localPath, plan.operations[0].to);
   assert.deepStrictEqual(plan.moves[0].manifest, [
@@ -132,6 +152,9 @@ function adapters(initial, options = {}) {
   });
   assert.strictEqual(sharedUncertain.operations.length, 0);
   assert.strictEqual(sharedUncertain.moves.length, 0);
+  const duplicateIds = migration.planVideoHistoryMigration({ tasks: [task(), task()], submissionMarkers: [], files, now: "2026-10-12T01:02:03.004Z" });
+  assert.strictEqual(duplicateIds.blocked, true);
+  assert.match(duplicateIds.reasons.join("\n"), /重复 ID/);
 
   const duplicate = migration.planVideoHistoryMigration({ tasks: [task()], submissionMarkers: [], files: [...files, { path: plan.operations[0].to, size: 3, sha256: sha256("old") }], now: "2026-10-12T01:02:03.004Z" });
   assert.strictEqual(duplicate.blocked, true);
@@ -158,14 +181,15 @@ function adapters(initial, options = {}) {
     assert.strictEqual(changed.events.some((item) => /^(copy|settings|move):?/.test(item)), false, `${mutation} manifest drift must abort before copy/settings/move`);
   }
   const lateManifestRace = adapters({ [source]: "video bytes", [providerPath]: "keep me" }, { mutateManifestReadAt: 3 });
-  await assert.rejects(migration.executeVideoHistoryMigration({ plan, ...lateManifestRace }), /重命名前.*清单.*变化/);
+  await assert.rejects(migration.executeVideoHistoryMigration({ plan, ...lateManifestRace }), /备份前.*清单.*变化/);
   assert.strictEqual(lateManifestRace.events.some((item) => item.startsWith("move:") || item === "settings"), false);
 
   const success = adapters({ [source]: "video bytes", [providerPath]: "keep me" });
   const completed = await migration.executeVideoHistoryMigration({ plan, ...success });
   assert.strictEqual(completed.state, "completed");
-  assert.deepStrictEqual(success.events.map((item) => item.split(":")[0]), ["copy", "move", "settings"]);
+  assert.deepStrictEqual(success.events.map((item) => item.split(":")[0]), ["copy", "backup", "backup", "settings"]);
   assert.ok(success.files.has(plan.operations[0].to));
+  assert.ok(success.files.has(source), "portable-safe migration must retain the legacy source");
   assert.ok(success.files.has(`${plan.backupPath}/山竹视频/video-task-1/这是一段很长的提示词.mp4`));
   assert.ok(success.files.has(`${plan.backupPath}/山竹视频/video-task-1/provider.json`));
   assert.deepStrictEqual(success.savedTasks, plan.nextTasks);
@@ -173,23 +197,44 @@ function adapters(initial, options = {}) {
   const mismatch = adapters({ [source]: "video bytes", [providerPath]: "keep me" }, { hashMismatchPath: plan.operations[0].to });
   await assert.rejects(migration.executeVideoHistoryMigration({ plan, ...mismatch }), /SHA-256|哈希/);
   assert.ok(mismatch.files.has(source));
-  assert.ok(!mismatch.files.has(plan.operations[0].to));
+  assert.ok(mismatch.files.has(plan.operations[0].to), "unknown path content is retained instead of unlinked");
+  assert.strictEqual(mismatch.journals.get(plan.journalPath).state, "rollback-failed");
 
-  const moveFailure = adapters({ [source]: "video bytes", [providerPath]: "keep me" }, { failMoveFrom: "山竹视频/video-task-1" });
-  await assert.rejects(migration.executeVideoHistoryMigration({ plan, ...moveFailure }), /injected move failure/);
-  assert.ok(moveFailure.files.has(source));
-  assert.ok(!moveFailure.files.has(plan.operations[0].to));
-  assert.deepStrictEqual(moveFailure.savedTasks, plan.originalTasks);
+  const firstBackupSource = `${plan.moves[0].from}/${plan.moves[0].manifest[0].relativePath}`;
+  const backupFailure = adapters({ [source]: "video bytes", [providerPath]: "keep me" }, { failBackupFrom: firstBackupSource });
+  await assert.rejects(migration.executeVideoHistoryMigration({ plan, ...backupFailure }), /injected backup failure/);
+  assert.ok(backupFailure.files.has(source));
+  assert.ok(backupFailure.files.has(plan.operations[0].to));
+  assert.deepStrictEqual(backupFailure.savedTasks, plan.originalTasks);
+  assert.ok(backupFailure.journals.get(plan.journalPath).cleanupPending.some((item) => item.path === plan.operations[0].to));
+
+  for (const [label, safetyOptions] of [
+    ["saving", { initialTasks: [task({ status: "saving", saved: false })] }],
+    ["uncertain", { initialTasks: [task({ submissionUncertain: true })] }],
+    ["marker", { initialMarkers: [{ fingerprint: task().submissionFingerprint, status: "uncertain" }] }],
+    ["duplicate", { initialTasks: [task(), task()] }],
+    ["new shared task", { initialTasks: [task(), task({ id: "video-task-2", localPath: source })] }],
+  ]) {
+    const changedSafety = adapters({ [source]: "video bytes", [providerPath]: "keep me" }, safetyOptions);
+    await assert.rejects(migration.executeVideoHistoryMigration({ plan, ...changedSafety }), /安全快照.*变化/, label);
+    assert.ok(changedSafety.files.has(source), `${label}: legacy source must remain`);
+    assert.strictEqual(changedSafety.events.some((item) => item.startsWith("backup:") || item === "settings"), false, `${label}: no backup/settings after safety drift`);
+  }
+
+  const markerBeforeCompleted = adapters({ [source]: "video bytes", [providerPath]: "keep me" }, {
+    mutateSafetyAt: 4,
+    mutatedMarkers: [{ fingerprint: task().submissionFingerprint, status: "uncertain" }],
+  });
+  await assert.rejects(migration.executeVideoHistoryMigration({ plan, ...markerBeforeCompleted }), /安全快照.*变化/);
+  assert.strictEqual(markerBeforeCompleted.journals.get(plan.journalPath).state, "rolled-back");
+  assert.ok(markerBeforeCompleted.files.has(source));
 
   const settingsFailure = adapters({ [source]: "video bytes", [providerPath]: "keep me" }, { failSettingsAt: 1 });
   await assert.rejects(migration.executeVideoHistoryMigration({ plan, ...settingsFailure }), /settings failure/);
   assert.deepStrictEqual(settingsFailure.savedTasks, plan.originalTasks);
   assert.strictEqual(settingsFailure.journals.get(plan.journalPath).state, "rolled-back");
 
-  const interruptedRollback = adapters({ [source]: "video bytes", [providerPath]: "keep me" }, {
-    failMoveFrom: "山竹视频/video-task-1",
-    failRemoveAt: 1,
-  });
+  const interruptedRollback = adapters({ [source]: "video bytes", [providerPath]: "keep me" }, { failSettingsAt: 2 });
   await assert.rejects(migration.executeVideoHistoryMigration({ plan, ...interruptedRollback }), /回滚|removal|injected/);
   const rollbackFailed = interruptedRollback.journals.get(plan.journalPath);
   assert.strictEqual(rollbackFailed.state, "rollback-failed");
@@ -218,10 +263,10 @@ function adapters(initial, options = {}) {
 
   const liedAboutMove = migration.createVideoHistoryJournal(plan);
   liedAboutMove.state = "forward";
-  liedAboutMove.completed.moves = [0];
+  liedAboutMove.completed.backups = ["0:0"];
   const falseMove = adapters({ [source]: "video bytes", [providerPath]: "keep me" });
   await assert.rejects(migration.executeVideoHistoryMigration({ plan: { ...plan, journal: liedAboutMove }, ...falseMove }), /已记录.*备份|移动状态|不一致/);
-  assert.strictEqual(falseMove.events.some((item) => item.startsWith("copy:") || item === "settings" || item.startsWith("move:")), false, "a false completed move must be rejected before any forward action");
+  assert.strictEqual(falseMove.events.some((item) => item.startsWith("copy:") || item === "settings" || item.startsWith("backup:")), false, "a false completed backup must be rejected before any forward action");
 
   const replanned = migration.planVideoHistoryMigration({ tasks: plan.nextTasks, submissionMarkers: [], files: [{ path: plan.operations[0].to, size: 11, sha256: sha256("video bytes") }], now: "2026-10-12T01:02:03.004Z" });
   assert.strictEqual(replanned.operations.length, 0);
@@ -260,6 +305,7 @@ function adapters(initial, options = {}) {
   await command.callback();
   assert.strictEqual(executions, 0);
   for (const value of [String(plan.counts.files), String(plan.counts.bytes), String(plan.counts.blocked), String(plan.counts.skipped), plan.destination, plan.backupPath]) assert.ok(previewText.includes(value));
+  assert.match(previewText, /保留原位.*不移动.*不删除/);
   plugin.previewVideoHistoryMigration = () => ({ ...plan, blocked: true, reasons: ["hash mismatch"], counts: { ...plan.counts, blocked: 1 } });
   plugin.confirmMigrationPlan = () => { throw new Error("blocked plan must not confirm"); };
   await command.callback();

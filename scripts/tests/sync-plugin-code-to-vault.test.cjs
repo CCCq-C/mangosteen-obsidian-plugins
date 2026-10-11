@@ -17,6 +17,7 @@ try {
     encoding: "utf8",
   });
   assert.strictEqual(sync.status, 0, sync.stderr || sync.stdout);
+  assert(fs.statSync(path.join(pluginRoot, "migration-safe-fs.cjs"), { throwIfNoEntry: false })?.isFile(), "missing shared migration-safe-fs.cjs");
   for (const file of [
     "main.js",
     "replica-core.cjs",

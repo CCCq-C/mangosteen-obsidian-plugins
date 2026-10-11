@@ -1,7 +1,6 @@
 const { Plugin, Modal, Notice, requestUrl } = require("obsidian");
-const crypto = require("crypto");
-const fs = require("fs");
 const path = require("path");
+const { createSafeMigrationFs } = require("../migration-safe-fs.cjs");
 const historyMigration = require("./history-migration.cjs");
 const { normalizeImageOutputTarget, standaloneImagePath } = require("./output-storage.cjs");
 
@@ -408,83 +407,27 @@ module.exports = class MangosteenImagePlugin extends Plugin {
   }
 
   async saveSettings() { await this.saveData(this.settings); }
-  migrationVaultPath(vaultPath, { createParents = false, directory = false } = {}) {
-    const relative = String(vaultPath || "").trim();
-    const segments = relative.split("/");
-    if (!relative || relative.includes("\\") || relative.includes("\0") || path.posix.isAbsolute(relative) || /^[A-Za-z]:\//.test(relative)
-        || segments.some((segment) => !segment || segment === "." || segment === "..")) throw new Error(`历史整理路径不安全：${relative}`);
-    const base = path.resolve(this.app?.vault?.adapter?.getBasePath?.() || this.app?.vault?.adapter?.basePath || "");
-    if (!fs.statSync(base, { throwIfNoEntry: false })?.isDirectory()) throw new Error("无法定位当前 Obsidian 知识库。");
-    const realBase = fs.realpathSync(base);
-    let current = realBase;
-    for (let index = 0; index < segments.length; index += 1) {
-      const last = index === segments.length - 1;
-      const candidate = path.join(current, segments[index]);
-      let stat = fs.lstatSync(candidate, { throwIfNoEntry: false });
-      if (!stat && createParents && (!last || directory)) {
-        fs.mkdirSync(candidate);
-        stat = fs.lstatSync(candidate);
-      }
-      if (!stat) {
-        const target = path.join(current, ...segments.slice(index));
-        const rel = path.relative(realBase, target);
-        if (rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) throw new Error("历史整理路径超出知识库范围。");
-        return target;
-      }
-      if (stat.isSymbolicLink()) throw new Error(`历史整理路径包含符号链接：${relative}`);
-      if ((!last || directory) && !stat.isDirectory()) throw new Error(`历史整理父路径不是目录：${relative}`);
-      current = fs.realpathSync(candidate);
-      const rel = path.relative(realBase, current);
-      if (rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) throw new Error("历史整理路径超出知识库范围。");
-    }
-    return current;
-  }
-  migrationFileHash(absolutePath) {
-    const stat = fs.lstatSync(absolutePath, { throwIfNoEntry: false });
-    if (!stat || stat.isSymbolicLink() || !stat.isFile()) throw Object.assign(new Error(`历史文件不存在或不安全：${absolutePath}`), { code: stat ? "UNSAFE_PATH" : "ENOENT" });
-    const digest = crypto.createHash("sha256");
-    const descriptor = fs.openSync(absolutePath, "r");
-    const buffer = Buffer.allocUnsafe(1024 * 1024);
-    try {
-      let bytesRead;
-      do {
-        bytesRead = fs.readSync(descriptor, buffer, 0, buffer.length, null);
-        if (bytesRead) digest.update(buffer.subarray(0, bytesRead));
-      } while (bytesRead);
-    } finally { fs.closeSync(descriptor); }
-    return digest.digest("hex");
+  migrationSafeFs() {
+    return createSafeMigrationFs({
+      vaultRoot: this.app?.vault?.adapter?.getBasePath?.() || this.app?.vault?.adapter?.basePath || "",
+      beforeFileOp: this.migrationBeforeFileOp,
+    });
   }
   imageHistoryMigrationFiles() {
     const output = [];
-    const walk = (relativeFolder) => {
-      const absoluteFolder = this.migrationVaultPath(relativeFolder);
-      const rootStat = fs.lstatSync(absoluteFolder, { throwIfNoEntry: false });
-      if (!rootStat) return;
-      if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) throw new Error(`历史目录不安全：${relativeFolder}`);
-      for (const entry of fs.readdirSync(absoluteFolder, { withFileTypes: true })) {
-        const relativePath = `${relativeFolder}/${entry.name}`;
-        const absolutePath = path.join(absoluteFolder, entry.name);
-        const stat = fs.lstatSync(absolutePath);
-        if (stat.isSymbolicLink()) output.push({ path: relativePath, size: stat.size, sha256: "0".repeat(64), symlink: true });
-        else if (stat.isDirectory()) walk(relativePath);
-        else if (stat.isFile()) output.push({ path: relativePath, size: stat.size, sha256: this.migrationFileHash(absolutePath) });
-      }
-    };
+    const safe = this.migrationSafeFs();
     for (const root of ["生图记录", "山竹创作记录/图片", ".mangosteen-image/migration-backup"]) {
-      const absolute = this.migrationVaultPath(root);
-      if (fs.lstatSync(absolute, { throwIfNoEntry: false })) walk(root);
+      for (const item of safe.manifest(root) || []) output.push({ path: `${root}/${item.relativePath}`, size: item.size, sha256: item.sha256 });
     }
     return output;
   }
   latestImageHistoryMigrationJournal() {
     const relativeRoot = ".mangosteen-image/migration-journal";
-    const absoluteRoot = this.migrationVaultPath(relativeRoot);
-    const stat = fs.lstatSync(absoluteRoot, { throwIfNoEntry: false });
-    if (!stat) return null;
-    if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error("生图历史迁移 journal 目录不安全。");
-    const name = fs.readdirSync(absoluteRoot).filter((item) => /^migration-\d{8}-\d{6}-\d{3}\.json$/.test(item)).sort().reverse()[0];
+    const safe = this.migrationSafeFs();
+    const name = (safe.manifest(relativeRoot) || []).map((item) => item.relativePath)
+      .filter((item) => /^migration-\d{8}-\d{6}-\d{3}\.json$/.test(item)).sort().reverse()[0];
     if (!name) return null;
-    const journal = JSON.parse(fs.readFileSync(path.join(absoluteRoot, name), "utf8"));
+    const journal = safe.readLastJournalRecord(`${relativeRoot}/${name}`);
     if (["completed", "rolled-back"].includes(String(journal?.state || ""))) return null;
     if (!journal?.planSnapshot || journal.planId !== journal.planSnapshot.planId
         || historyMigration.imageHistoryPlanId(journal.planSnapshot) !== journal.planId) throw new Error(`生图历史迁移 journal 与计划不一致：${name}`);
@@ -526,7 +469,7 @@ module.exports = class MangosteenImagePlugin extends Plugin {
     return typeof window !== "undefined" && typeof window.confirm === "function" ? window.confirm(message) : false;
   }
   migrationPlanText(plan, title) {
-    return [title, `目标复制：${plan.counts.files} 个文件，${plan.counts.bytes} 字节`, `备份移动：${plan.counts.backupFiles} 个文件，${plan.counts.backupBytes} 字节`, `阻止项：${plan.counts.blocked}`, `跳过项：${plan.counts.skipped}`, `目标：${plan.destination}`, `备份：${plan.backupPath}`, "确认后才会执行；不会永久删除旧文件。"].join("\n");
+    return [title, `目标复制：${plan.counts.files} 个文件，${plan.counts.bytes} 字节`, `备份复制：${plan.counts.backupFiles} 个文件，${plan.counts.backupBytes} 字节`, `阻止项：${plan.counts.blocked}`, `跳过项：${plan.counts.skipped}`, `目标：${plan.destination}`, `备份：${plan.backupPath}`, "源目录处理：保留原位，不移动、不删除；完成后会记录 cleanupPending，后续清理必须另行确认。"].join("\n");
   }
   writeMigrationJournal(vaultPath, value) {
     const snapshot = value?.planSnapshot;
@@ -534,45 +477,12 @@ module.exports = class MangosteenImagePlugin extends Plugin {
         || historyMigration.imageHistoryPlanId(snapshot) !== value.planId
         || historyMigration.derivedImageJournalPath(snapshot.plannedAt) !== vaultPath
         || snapshot.journalPath !== vaultPath) throw new Error("生图历史迁移 journal 路径或计划无效。");
-    const target = this.migrationVaultPath(vaultPath, { createParents: true });
-    const existingStat = fs.lstatSync(target, { throwIfNoEntry: false });
-    if (existingStat) {
-      if (existingStat.isSymbolicLink() || !existingStat.isFile()) throw new Error("生图历史迁移 journal 路径被无关文件占用。");
-      let existing;
-      try { existing = JSON.parse(fs.readFileSync(target, "utf8")); }
-      catch (_) { throw new Error("生图历史迁移 journal 路径被无关内容占用。"); }
-      if (existing?.type !== value.type || existing?.planId !== value.planId || existing?.journalPath !== vaultPath) {
-        throw new Error("生图历史迁移 journal 路径被无关文件占用。");
-      }
-    }
-    const temporary = `${target}.tmp-${process.pid}-${crypto.randomUUID()}`;
-    const descriptor = fs.openSync(temporary, "wx");
-    try { fs.writeFileSync(descriptor, `${JSON.stringify(value, null, 2)}\n`); fs.fsyncSync(descriptor); }
-    finally { fs.closeSync(descriptor); }
-    try {
-      if (existingStat) fs.renameSync(temporary, target);
-      else { fs.linkSync(temporary, target); fs.rmSync(temporary, { force: true }); }
-    }
-    finally { fs.rmSync(temporary, { force: true }); }
+    this.migrationSafeFs().appendJournalRecord(vaultPath, value, (existing) => existing?.type === value.type
+      && existing?.planId === value.planId && existing?.journalPath === vaultPath
+      && existing?.planSnapshot && historyMigration.imageHistoryPlanId(existing.planSnapshot) === existing.planId);
   }
   imageHistoryDirectoryManifest(vaultPath) {
-    const root = this.migrationVaultPath(vaultPath);
-    const rootStat = fs.lstatSync(root, { throwIfNoEntry: false });
-    if (!rootStat) return null;
-    if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) throw new Error(`历史备份目录不安全：${vaultPath}`);
-    const manifest = [];
-    const walk = (absoluteFolder, relativeFolder = "") => {
-      for (const entry of fs.readdirSync(absoluteFolder, { withFileTypes: true })) {
-        const absolutePath = path.join(absoluteFolder, entry.name);
-        const relativePath = relativeFolder ? `${relativeFolder}/${entry.name}` : entry.name;
-        const stat = fs.lstatSync(absolutePath);
-        if (stat.isSymbolicLink()) throw new Error(`历史备份清单包含符号链接：${vaultPath}/${relativePath}`);
-        if (stat.isDirectory()) walk(absolutePath, relativePath);
-        else if (stat.isFile()) manifest.push({ relativePath, size: stat.size, sha256: this.migrationFileHash(absolutePath), type: "file" });
-      }
-    };
-    walk(root);
-    return manifest.sort((left, right) => left.relativePath < right.relativePath ? -1 : left.relativePath > right.relativePath ? 1 : 0);
+    return this.migrationSafeFs().manifest(vaultPath);
   }
   async persistImageMigrationTasks(tasks, plan) {
     const desiredById = new Map(tasks.map((task) => [String(task?.id || ""), task]));
@@ -594,33 +504,17 @@ module.exports = class MangosteenImagePlugin extends Plugin {
     return merged;
   }
   async executeImageHistoryMigration(plan) {
+    const safe = this.migrationSafeFs();
     const result = await historyMigration.executeImageHistoryMigration({
       plan,
-      copy: async (from, to) => {
-        const source = this.migrationVaultPath(from);
-        const target = this.migrationVaultPath(to, { createParents: true });
-        if (fs.lstatSync(target, { throwIfNoEntry: false })) throw Object.assign(new Error(`整理目标已存在：${to}`), { code: "EEXIST" });
-        fs.copyFileSync(source, target, fs.constants.COPYFILE_EXCL);
-      },
-      move: async (from, to) => {
-        const source = this.migrationVaultPath(from);
-        const target = this.migrationVaultPath(to, { createParents: true });
-        if (!fs.lstatSync(source, { throwIfNoEntry: false })) throw Object.assign(new Error(`整理源目录不存在：${from}`), { code: "ENOENT" });
-        if (fs.lstatSync(target, { throwIfNoEntry: false })) throw Object.assign(new Error(`整理备份已存在：${to}`), { code: "EEXIST" });
-        fs.renameSync(source, target);
-      },
-      hash: async (vaultPath) => this.migrationFileHash(this.migrationVaultPath(vaultPath)),
+      copy: async (from, to, expected) => safe.copyVerified(from, to, expected),
+      backupCopy: async (from, to, expected) => safe.copyVerified(from, to, expected),
+      hash: async (vaultPath) => safe.hashVerified(vaultPath),
       atomicWriteSettings: async (tasks) => this.persistImageMigrationTasks(tasks, plan),
       writeJournal: async (vaultPath, value) => this.writeMigrationJournal(vaultPath, value),
-      readManifest: async (vaultPath) => this.imageHistoryDirectoryManifest(vaultPath),
+      readManifest: async (vaultPath) => safe.manifest(vaultPath),
       readSettings: async () => cloneMigrationValue(this.settings.imageTasks || []),
-      removeNew: async (operation, rollback = {}) => {
-        const target = this.migrationVaultPath(operation.to);
-        const stat = fs.lstatSync(target, { throwIfNoEntry: false });
-        if (!stat) return;
-        if (stat.isSymbolicLink() || !stat.isFile() || (!rollback.owned && this.migrationFileHash(target) !== operation.sha256)) throw new Error(`回滚目标内容已变化：${operation.to}`);
-        fs.unlinkSync(target);
-      },
+      readSafetySnapshot: async () => historyMigration.imageHistorySafetySnapshot(this.settings.imageTasks || [], this.settings.submissionMarkers || []),
     });
     this.refreshImageTaskViews();
     return result;
@@ -634,7 +528,7 @@ module.exports = class MangosteenImagePlugin extends Plugin {
       const current = await this.previewImageHistoryMigration(plan.plannedAt);
       if (current.blocked || historyMigration.imageHistoryPlanId(current) !== plan.planId) throw new Error(`确认后任务状态已变化：${current.reasons.join("；") || "整理清单不再一致"}`);
       await this.executeImageHistoryMigration(current);
-      new Notice(`生图历史整理完成；旧目录已移入 ${plan.backupPath}。`, 9000);
+      new Notice(`生图历史整理完成；已复制备份到 ${plan.backupPath}，旧目录保留原位并标记待单独清理。`, 9000);
       return true;
     } catch (error) {
       new Notice(`生图历史整理失败：${String(error?.message || error)}`, 10000);

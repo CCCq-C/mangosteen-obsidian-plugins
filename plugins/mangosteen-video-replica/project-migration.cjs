@@ -5,7 +5,7 @@ const ACTIVE_RUN_STATUSES = new Set(["queued", "processing", "stopping"]);
 const PROVIDER_SAVING_STATUSES = new Set(["saving", "provider-saving"]);
 const TERMINAL_RUN_STATUSES = new Set(["completed", "completed_with_errors", "partial-failure", "failed", "stopped"]);
 const MIGRATION_TYPE = "legacy-project-migration";
-const MIGRATION_VERSION = 2;
+const MIGRATION_VERSION = 3;
 const MIGRATION_SCHEMA_VERSION = 1;
 
 function clone(value) {
@@ -157,6 +157,8 @@ function projectMigrationPlanId(plan) {
     journalPath: plan.journalPath,
     destination: plan.destination,
     backupPath: plan.backupPath,
+    sourceDisposition: plan.sourceDisposition,
+    cleanupPending: plan.cleanupPending,
     stageRoot: plan.stageRoot,
     operations: plan.operations,
     writes: plan.writes,
@@ -265,8 +267,11 @@ function planLegacyProjectMigration(input = {}) {
   }
 
   const writes = [
-    { type: "write", path: `${destination}/project.json`, content: `${JSON.stringify(migratedProject, null, 2)}\n` },
-    { type: "write", path: `${destination}/draft.json`, content: `${JSON.stringify(migratedRequest, null, 2)}\n` },
+    // draft is exposed first; project.json is the activation member used by
+    // workbenchProjectPaths to recognize v6, so a crash cannot expose a
+    // project.json without its matching draft.json.
+    { type: "write", path: `${destination}/draft.json`, content: `${JSON.stringify(migratedRequest, null, 2)}\n`, activation: false },
+    { type: "write", path: `${destination}/project.json`, content: `${JSON.stringify(migratedProject, null, 2)}\n`, activation: true },
   ].map((item) => ({
     ...item,
     stagePath: `${stageRoot}/${path.posix.basename(item.path)}`,
@@ -286,7 +291,7 @@ function planLegacyProjectMigration(input = {}) {
   const moves = [...moveSources].sort().map((from) => {
     const source = files.get(from);
     return {
-      type: "move",
+      type: "copy-backup-retain-source",
       from,
       to: `${backupPath}/${from.slice(projectFolder.length + 1)}`,
       size: source?.size ?? 0,
@@ -318,6 +323,11 @@ function planLegacyProjectMigration(input = {}) {
     journalPath,
     stageRoot,
     maintenanceLockPath,
+    sourceDisposition: "retained",
+    cleanupPending: [
+      ...effectiveMoves.map((operation) => ({ type: "legacy-source-file", path: operation.from, reason: "portable no-follow move is unavailable; source retained for separate cleanup" })),
+      ...effectiveWrites.map((operation) => ({ type: "verified-stage-file", path: operation.stagePath, reason: "path unlink is intentionally deferred to separate cleanup" })),
+    ],
     blocked,
     reasons: uniqueReasons,
     operations: effectiveOperations,
@@ -353,8 +363,9 @@ function createProjectMigrationJournal(plan) {
     projectFolder: plan.projectFolder,
     state: "planned",
     inFlight: null,
-    completed: { copies: [], staged: [], exposed: [], moves: [], stageCleaned: [] },
-    rollback: { moves: [], exposed: [], copies: [], stages: [] },
+    completed: { copies: [], staged: [], exposed: [], backups: [] },
+    rollback: { backups: [], exposed: [], copies: [], stages: [] },
+    cleanupPending: [],
     error: "",
     rollbackError: "",
     planSnapshot: { ...clone(plan), journal: null },
@@ -390,24 +401,39 @@ async function persistJournal(atomicWrite, plan, journal) {
   await atomicWrite({ type: "journal", path: plan.journalPath, value: clone(journal) });
 }
 
-async function verifyProjectMove(hash, operation, direction = "forward") {
-  const sourceHash = await missingAsNull(hash, operation.from);
-  const backupHash = await missingAsNull(hash, operation.to);
-  return direction === "forward"
-    ? sourceHash === null && backupHash === operation.sha256
-    : sourceHash === operation.sha256 && backupHash === null;
+async function assertOwned(context, phase) {
+  await context.assertMaintenanceOwned(phase);
 }
 
-async function verifyProjectFinal({ plan, hash }) {
+async function checkedHash(context, filePath, phase) {
+  await assertOwned(context, phase);
+  return missingAsNull(context.hash, filePath);
+}
+
+function recordCleanupPending(journal, item) {
+  if (!Array.isArray(journal.cleanupPending)) journal.cleanupPending = [];
+  if (!journal.cleanupPending.some((entry) => entry.type === item.type && entry.path === item.path)) {
+    journal.cleanupPending.push(clone(item));
+  }
+}
+
+async function verifyProjectBackup(context, operation, phase) {
+  const sourceHash = await checkedHash(context, operation.from, `${phase}:source`);
+  const backupHash = await checkedHash(context, operation.to, `${phase}:backup`);
+  return sourceHash === operation.sha256 && backupHash === operation.sha256;
+}
+
+async function verifyProjectFinal(context) {
+  const { plan } = context;
   for (const operation of plan.operations) {
-    if (await missingAsNull(hash, operation.to) !== operation.sha256) throw failClosed(`迁移目标哈希不一致：${operation.to}`);
+    if (await checkedHash(context, operation.to, `completed:copy:${operation.to}`) !== operation.sha256) throw failClosed(`迁移目标哈希不一致：${operation.to}`);
   }
   for (const write of plan.writes) {
-    if (await missingAsNull(hash, write.path) !== write.sha256) throw failClosed(`版本 6 文档哈希不一致：${write.path}`);
-    if (await missingAsNull(hash, write.stagePath) !== null) throw failClosed(`版本 6 暂存文件尚未清理：${write.stagePath}`);
+    if (await checkedHash(context, write.path, `completed:bundle:${write.path}`) !== write.sha256) throw failClosed(`版本 6 文档哈希不一致：${write.path}`);
+    if (await checkedHash(context, write.stagePath, `completed:stage:${write.stagePath}`) !== write.sha256) throw failClosed(`版本 6 暂存文件哈希不一致：${write.stagePath}`);
   }
   for (const operation of plan.moves) {
-    if (!await verifyProjectMove(hash, operation, "forward")) throw failClosed(`迁移备份状态不一致：${operation.from}`);
+    if (!await verifyProjectBackup(context, operation, `completed:backup:${operation.from}`)) throw failClosed(`迁移备份状态不一致：${operation.from}`);
   }
 }
 
@@ -418,54 +444,45 @@ function projectCompletedIndexes(journal, key, length, label) {
   return values;
 }
 
-async function verifyProjectForwardProgress({ plan, journal, hash }) {
+async function verifyProjectForwardProgress(context) {
+  const { plan, journal } = context;
   for (const index of projectCompletedIndexes(journal, "copies", plan.operations.length, "复制完成")) {
     const operation = plan.operations[index];
-    if (await missingAsNull(hash, operation.to) !== operation.sha256) throw failClosed(`已记录的迁移目标哈希不一致：${operation.to}`);
+    if (await checkedHash(context, operation.to, `replay:copy:${index}`) !== operation.sha256) throw failClosed(`已记录的迁移目标哈希不一致：${operation.to}`);
   }
   const staged = projectCompletedIndexes(journal, "staged", plan.writes.length, "暂存完成");
   const exposed = projectCompletedIndexes(journal, "exposed", plan.writes.length, "bundle 暴露完成");
-  const cleaned = projectCompletedIndexes(journal, "stageCleaned", plan.writes.length, "暂存清理完成");
-  for (const index of cleaned) {
-    if (!staged.includes(index) || !exposed.includes(index)) throw failClosed(`已记录的暂存清理步骤缺少前置状态：${plan.writes[index].stagePath}`);
-  }
   for (const index of staged) {
     const write = plan.writes[index];
-    if (!cleaned.includes(index) && await missingAsNull(hash, write.stagePath) !== write.sha256) throw failClosed(`已记录的暂存文件哈希不一致：${write.stagePath}`);
+    if (await checkedHash(context, write.stagePath, `replay:stage:${index}`) !== write.sha256) throw failClosed(`已记录的暂存文件哈希不一致：${write.stagePath}`);
   }
   for (const index of exposed) {
     const write = plan.writes[index];
-    if (await missingAsNull(hash, write.path) !== write.sha256) throw failClosed(`已记录的版本 6 文档哈希不一致：${write.path}`);
+    if (await checkedHash(context, write.path, `replay:bundle:${index}`) !== write.sha256) throw failClosed(`已记录的版本 6 文档哈希不一致：${write.path}`);
   }
-  for (const index of cleaned) {
-    const write = plan.writes[index];
-    if (await missingAsNull(hash, write.stagePath) !== null) throw failClosed(`已记录清理的暂存文件仍存在：${write.stagePath}`);
-  }
-  for (const index of projectCompletedIndexes(journal, "moves", plan.moves.length, "备份移动完成")) {
+  for (const index of projectCompletedIndexes(journal, "backups", plan.moves.length, "备份复制完成")) {
     const operation = plan.moves[index];
-    if (!await verifyProjectMove(hash, operation, "forward")) throw failClosed(`已记录的备份移动状态不一致：${operation.from}`);
+    if (!await verifyProjectBackup(context, operation, `replay:backup:${index}`)) throw failClosed(`已记录的备份复制状态不一致：${operation.from}`);
   }
 }
 
 async function rollbackProjectMigration(context) {
-  const { journal, plan, move, removeNew, hash, atomicWrite } = context;
+  const { journal, plan, atomicWrite } = context;
   journal.state = "rolling-back";
   await persistJournal(atomicWrite, plan, journal);
   try {
-    const moved = new Set(journal.completed.moves);
-    if (journal.inFlight?.type === "move") moved.add(journal.inFlight.index);
-    for (const index of [...moved].sort((left, right) => right - left)) {
+    const backups = new Set(journal.completed.backups);
+    if (journal.inFlight?.type === "backup-copy") backups.add(journal.inFlight.index);
+    for (const index of [...backups].sort((left, right) => right - left)) {
       const operation = plan.moves[index];
-      if (journal.rollback.moves.includes(index)) {
-        if (!await verifyProjectMove(hash, operation, "rollback")) throw failClosed(`已记录的文件回滚状态不一致：${operation.from}`);
+      await assertOwned(context, `rollback:backup:${index}`);
+      if (journal.rollback.backups.includes(index)) {
+        if (!await verifyProjectBackup(context, operation, `rollback:verify-backup:${index}`)) throw failClosed(`已记录的备份保留状态不一致：${operation.from}`);
         continue;
       }
-      const sourceHash = await missingAsNull(hash, operation.from);
-      const backupHash = await missingAsNull(hash, operation.to);
-      if (sourceHash === null && backupHash === operation.sha256) await move(operation.to, operation.from, { exclusive: true, rollback: true });
-      else if (sourceHash !== operation.sha256 || backupHash !== null) throw failClosed(`回滚文件状态不一致：${operation.from}`);
-      if (!await verifyProjectMove(hash, operation, "rollback")) throw failClosed(`文件回滚后校验失败：${operation.from}`);
-      journal.rollback.moves.push(index);
+      if (!await verifyProjectBackup(context, operation, `rollback:backup-state:${index}`)) throw failClosed(`回滚备份状态不一致：${operation.from}`);
+      recordCleanupPending(journal, { type: "verified-backup-file", path: operation.to, reason: "safe migration never unlinks backup files during rollback" });
+      journal.rollback.backups.push(index);
       await persistJournal(atomicWrite, plan, journal);
     }
 
@@ -473,16 +490,19 @@ async function rollbackProjectMigration(context) {
     if (journal.inFlight?.type === "bundle-expose") exposed.add(journal.inFlight.index);
     for (const index of [...exposed].sort((left, right) => right - left)) {
       const write = plan.writes[index];
+      await assertOwned(context, `rollback:bundle:${index}`);
       if (journal.rollback.exposed.includes(index)) {
-        if (await missingAsNull(hash, write.path) !== null) throw failClosed(`已记录的版本 6 文档回滚状态不一致：${write.path}`);
+        if (await checkedHash(context, write.path, `rollback:verify-bundle:${index}`) !== write.sha256) throw failClosed(`已记录的版本 6 文档保留状态不一致：${write.path}`);
         continue;
       }
-      const targetHash = await missingAsNull(hash, write.path);
-      const ownedMismatch = journal.inFlight?.type === "bundle-expose" && journal.inFlight.index === index && journal.inFlight.created === true;
-      if (targetHash === write.sha256 || (targetHash !== null && ownedMismatch)) {
-        await removeNew(write, { rollback: true, owned: ownedMismatch, kind: "bundle-target" });
-      } else if (targetHash !== null) throw failClosed(`版本 6 文档回滚目标不一致：${write.path}`);
-      if (await missingAsNull(hash, write.path) !== null) throw failClosed(`版本 6 文档回滚后仍存在：${write.path}`);
+      const targetHash = await checkedHash(context, write.path, `rollback:bundle-state:${index}`);
+      if (targetHash !== null && targetHash !== write.sha256) throw failClosed(`版本 6 文档回滚目标不一致：${write.path}`);
+      if (targetHash === write.sha256) recordCleanupPending(journal, {
+        type: "verified-v6-file",
+        path: write.path,
+        visible: write.activation === true,
+        reason: "portable no-follow unlink is unavailable; manual recovery required",
+      });
       journal.rollback.exposed.push(index);
       await persistJournal(atomicWrite, plan, journal);
     }
@@ -491,16 +511,14 @@ async function rollbackProjectMigration(context) {
     if (journal.inFlight?.type === "copy") copied.add(journal.inFlight.index);
     for (const index of [...copied].sort((left, right) => right - left)) {
       const operation = plan.operations[index];
+      await assertOwned(context, `rollback:copy:${index}`);
       if (journal.rollback.copies.includes(index)) {
-        if (await missingAsNull(hash, operation.to) !== null) throw failClosed(`已记录的复制回滚状态不一致：${operation.to}`);
+        if (await checkedHash(context, operation.to, `rollback:verify-copy:${index}`) !== operation.sha256) throw failClosed(`已记录的复制保留状态不一致：${operation.to}`);
         continue;
       }
-      const targetHash = await missingAsNull(hash, operation.to);
-      const ownedMismatch = journal.inFlight?.type === "copy" && journal.inFlight.index === index && journal.inFlight.created === true;
-      if (targetHash === operation.sha256 || (targetHash !== null && ownedMismatch)) {
-        await removeNew(operation, { rollback: true, owned: ownedMismatch, kind: "copy" });
-      } else if (targetHash !== null) throw failClosed(`复制回滚目标不一致：${operation.to}`);
-      if (await missingAsNull(hash, operation.to) !== null) throw failClosed(`复制回滚后目标仍存在：${operation.to}`);
+      const targetHash = await checkedHash(context, operation.to, `rollback:copy-state:${index}`);
+      if (targetHash !== null && targetHash !== operation.sha256) throw failClosed(`复制回滚目标不一致：${operation.to}`);
+      if (targetHash === operation.sha256) recordCleanupPending(journal, { type: "verified-generated-copy", path: operation.to, reason: "portable no-follow unlink is unavailable; cleanup deferred" });
       journal.rollback.copies.push(index);
       await persistJournal(atomicWrite, plan, journal);
     }
@@ -509,21 +527,22 @@ async function rollbackProjectMigration(context) {
     if (journal.inFlight?.type === "bundle-stage") staged.add(journal.inFlight.index);
     for (const index of [...staged].sort((left, right) => right - left)) {
       const write = plan.writes[index];
+      await assertOwned(context, `rollback:stage:${index}`);
       if (journal.rollback.stages.includes(index)) {
-        if (await missingAsNull(hash, write.stagePath) !== null) throw failClosed(`已记录的暂存回滚状态不一致：${write.stagePath}`);
+        if (await checkedHash(context, write.stagePath, `rollback:verify-stage:${index}`) !== write.sha256) throw failClosed(`已记录的暂存保留状态不一致：${write.stagePath}`);
         continue;
       }
-      const stageHash = await missingAsNull(hash, write.stagePath);
-      const ownedMismatch = journal.inFlight?.type === "bundle-stage" && journal.inFlight.index === index && journal.inFlight.created === true;
-      if (stageHash === write.sha256 || (stageHash !== null && ownedMismatch)) {
-        await removeNew({ ...write, path: write.stagePath }, { rollback: true, owned: ownedMismatch, kind: "bundle-stage" });
-      } else if (stageHash !== null) throw failClosed(`暂存回滚目标不一致：${write.stagePath}`);
-      if (await missingAsNull(hash, write.stagePath) !== null) throw failClosed(`暂存回滚后仍存在：${write.stagePath}`);
+      const stageHash = await checkedHash(context, write.stagePath, `rollback:stage-state:${index}`);
+      if (stageHash !== null && stageHash !== write.sha256) throw failClosed(`暂存回滚目标不一致：${write.stagePath}`);
+      if (stageHash === write.sha256) recordCleanupPending(journal, { type: "verified-stage-file", path: write.stagePath, reason: "portable no-follow unlink is unavailable; cleanup deferred" });
       journal.rollback.stages.push(index);
       await persistJournal(atomicWrite, plan, journal);
     }
 
     journal.inFlight = null;
+    if (journal.cleanupPending.some((item) => item.type === "verified-v6-file" && item.visible === true)) {
+      throw failClosed("版本 6 激活成员已暴露；安全运行时不能无竞态删除，需保留维护锁并人工恢复。");
+    }
     journal.state = "rolled-back";
     await persistJournal(atomicWrite, plan, journal);
     return journal;
@@ -536,8 +555,8 @@ async function rollbackProjectMigration(context) {
 }
 
 async function executeProjectMigration(context) {
-  const { plan, copy, move, hash, atomicWrite, removeNew } = context;
-  for (const [name, callback] of Object.entries({ copy, move, hash, atomicWrite, removeNew })) {
+  const { plan, copy, backupCopy, hash, atomicWrite, assertMaintenanceOwned } = context;
+  for (const [name, callback] of Object.entries({ copy, backupCopy, hash, atomicWrite, assertMaintenanceOwned })) {
     if (typeof callback !== "function") throw new Error(`迁移执行器缺少 ${name}。`);
   }
   validateProjectPlan(plan);
@@ -550,19 +569,19 @@ async function executeProjectMigration(context) {
     throw new Error("项目迁移回滚完成；未恢复正向迁移。");
   }
   if (journal.state === "rolled-back") throw new Error("项目迁移已回滚，需重新生成计划。");
-  if (journal.state === "completed") { await verifyProjectFinal({ plan, hash }); return journal; }
+  if (journal.state === "completed") { await verifyProjectFinal({ ...context, journal }); await assertOwned(context, "completed:replay"); return journal; }
   if (!["planned", "forward"].includes(journal.state)) throw failClosed(`迁移 journal 状态无效：${journal.state}`);
 
   journal.state = "forward";
   await persistJournal(atomicWrite, plan, journal);
   try {
-    await verifyProjectForwardProgress({ plan, journal, hash });
+    await verifyProjectForwardProgress({ ...context, journal });
     for (const [index, operation] of plan.operations.entries()) {
       if (journal.completed.copies.includes(index)) {
-        if (await missingAsNull(hash, operation.to) !== operation.sha256) throw failClosed(`已记录的迁移目标哈希不一致：${operation.to}`);
+        if (await checkedHash(context, operation.to, `copy:verify-completed:${index}`) !== operation.sha256) throw failClosed(`已记录的迁移目标哈希不一致：${operation.to}`);
         continue;
       }
-      const existingHash = await missingAsNull(hash, operation.to);
+      const existingHash = await checkedHash(context, operation.to, `copy:destination:${index}`);
       if (existingHash !== null) {
         if (journal.inFlight?.type !== "copy" || journal.inFlight.index !== index || existingHash !== operation.sha256) {
           throw failClosed(`迁移目标存在且内容不一致：${operation.to}`);
@@ -570,28 +589,23 @@ async function executeProjectMigration(context) {
       } else {
         journal.inFlight = { type: "copy", index, created: false };
         await persistJournal(atomicWrite, plan, journal);
-        await copy(operation.from, operation.to, { exclusive: true });
+        await assertOwned(context, `copy:${index}`);
+        await copy(operation.from, operation.to, operation);
         journal.inFlight.created = true;
         await persistJournal(atomicWrite, plan, journal);
       }
-      if (await hash(operation.to) !== operation.sha256) throw new Error(`复制后 SHA-256 哈希不一致：${operation.to}`);
+      if (await checkedHash(context, operation.to, `copy:hash:${index}`) !== operation.sha256) throw new Error(`复制后 SHA-256 哈希不一致：${operation.to}`);
       journal.completed.copies.push(index);
       journal.inFlight = null;
       await persistJournal(atomicWrite, plan, journal);
     }
 
     for (const [index, write] of plan.writes.entries()) {
-      if (journal.completed.stageCleaned.includes(index)) {
-        if (await missingAsNull(hash, write.stagePath) !== null || await missingAsNull(hash, write.path) !== write.sha256) {
-          throw failClosed(`已记录清理的暂存或版本 6 文档状态不一致：${write.path}`);
-        }
-        continue;
-      }
       if (journal.completed.staged.includes(index)) {
-        if (await missingAsNull(hash, write.stagePath) !== write.sha256) throw new Error(`已记录的暂存文件哈希不一致：${write.stagePath}`);
+        if (await checkedHash(context, write.stagePath, `bundle-stage:verify-completed:${index}`) !== write.sha256) throw new Error(`已记录的暂存文件哈希不一致：${write.stagePath}`);
         continue;
       }
-      const stageHash = await missingAsNull(hash, write.stagePath);
+      const stageHash = await checkedHash(context, write.stagePath, `bundle-stage:destination:${index}`);
       if (stageHash !== null) {
         if (journal.inFlight?.type !== "bundle-stage" || journal.inFlight.index !== index || stageHash !== write.sha256) {
           throw failClosed(`迁移暂存文件存在且内容不一致：${write.stagePath}`);
@@ -599,11 +613,12 @@ async function executeProjectMigration(context) {
       } else {
         journal.inFlight = { type: "bundle-stage", index, created: false };
         await persistJournal(atomicWrite, plan, journal);
+        await assertOwned(context, `bundle-stage:${index}`);
         await atomicWrite({ type: "stage", write: clone(write), exclusive: true });
         journal.inFlight.created = true;
         await persistJournal(atomicWrite, plan, journal);
       }
-      if (await hash(write.stagePath) !== write.sha256) throw new Error(`版本 6 暂存文件 SHA-256 不一致：${write.stagePath}`);
+      if (await checkedHash(context, write.stagePath, `bundle-stage:hash:${index}`) !== write.sha256) throw new Error(`版本 6 暂存文件 SHA-256 不一致：${write.stagePath}`);
       journal.completed.staged.push(index);
       journal.inFlight = null;
       await persistJournal(atomicWrite, plan, journal);
@@ -611,11 +626,11 @@ async function executeProjectMigration(context) {
 
     for (const [index, write] of plan.writes.entries()) {
       if (journal.completed.exposed.includes(index)) {
-        if (await missingAsNull(hash, write.path) !== write.sha256) throw failClosed(`已记录的版本 6 文档哈希不一致：${write.path}`);
+        if (await checkedHash(context, write.path, `bundle-expose:verify-completed:${index}`) !== write.sha256) throw failClosed(`已记录的版本 6 文档哈希不一致：${write.path}`);
         continue;
       }
-      if (await missingAsNull(hash, write.stagePath) !== write.sha256) throw new Error(`暴露前暂存文件缺失或不一致：${write.stagePath}`);
-      const targetHash = await missingAsNull(hash, write.path);
+      if (await checkedHash(context, write.stagePath, `bundle-expose:stage:${index}`) !== write.sha256) throw new Error(`暴露前暂存文件缺失或不一致：${write.stagePath}`);
+      const targetHash = await checkedHash(context, write.path, `bundle-expose:destination:${index}`);
       if (targetHash !== null) {
         if (journal.inFlight?.type !== "bundle-expose" || journal.inFlight.index !== index || targetHash !== write.sha256) {
           throw failClosed(`版本 6 文档存在且内容不一致：${write.path}`);
@@ -623,56 +638,46 @@ async function executeProjectMigration(context) {
       } else {
         journal.inFlight = { type: "bundle-expose", index, created: false };
         await persistJournal(atomicWrite, plan, journal);
+        await assertOwned(context, `bundle-expose:${index}`);
         await atomicWrite({ type: "expose", write: clone(write), exclusive: true });
         journal.inFlight.created = true;
         await persistJournal(atomicWrite, plan, journal);
       }
-      if (await hash(write.path) !== write.sha256) throw new Error(`版本 6 文档暴露后 SHA-256 不一致：${write.path}`);
+      if (await checkedHash(context, write.path, `bundle-expose:hash:${index}`) !== write.sha256) throw new Error(`版本 6 文档暴露后 SHA-256 不一致：${write.path}`);
       journal.completed.exposed.push(index);
       journal.inFlight = null;
       await persistJournal(atomicWrite, plan, journal);
     }
 
     for (const [index, operation] of plan.moves.entries()) {
-      if (journal.completed.moves.includes(index)) {
-        if (!await verifyProjectMove(hash, operation, "forward")) throw failClosed(`已记录的备份移动状态不一致：${operation.from}`);
+      if (journal.completed.backups.includes(index)) {
+        if (!await verifyProjectBackup(context, operation, `backup:verify-completed:${index}`)) throw failClosed(`已记录的备份复制状态不一致：${operation.from}`);
         continue;
       }
-      const sourceHash = await missingAsNull(hash, operation.from);
-      const backupHash = await missingAsNull(hash, operation.to);
-      if (journal.inFlight?.type === "move" && journal.inFlight.index === index && sourceHash === null && backupHash === operation.sha256) {
-        journal.completed.moves.push(index);
+      const sourceHash = await checkedHash(context, operation.from, `backup:source:${index}`);
+      const backupHash = await checkedHash(context, operation.to, `backup:destination:${index}`);
+      if (journal.inFlight?.type === "backup-copy" && journal.inFlight.index === index && sourceHash === operation.sha256 && backupHash === operation.sha256) {
+        journal.completed.backups.push(index);
         journal.inFlight = null;
         await persistJournal(atomicWrite, plan, journal);
         continue;
       }
       if (sourceHash !== operation.sha256 || backupHash !== null) throw failClosed(`旧文件或备份状态已变化：${operation.from}`);
-      journal.inFlight = { type: "move", index };
+      journal.inFlight = { type: "backup-copy", index, created: false };
       await persistJournal(atomicWrite, plan, journal);
-      await move(operation.from, operation.to, { exclusive: true });
-      if (!await verifyProjectMove(hash, operation, "forward")) throw new Error(`旧文件移动到备份后校验失败：${operation.from}`);
-      journal.completed.moves.push(index);
+      await assertOwned(context, `backup-copy:${index}`);
+      await backupCopy(operation.from, operation.to, operation);
+      journal.inFlight.created = true;
+      await persistJournal(atomicWrite, plan, journal);
+      if (!await verifyProjectBackup(context, operation, `backup-copy:hash:${index}`)) throw new Error(`旧文件复制到备份后校验失败：${operation.from}`);
+      journal.completed.backups.push(index);
       journal.inFlight = null;
       await persistJournal(atomicWrite, plan, journal);
     }
 
-    for (const [index, write] of plan.writes.entries()) {
-      if (journal.completed.stageCleaned.includes(index)) {
-        if (await missingAsNull(hash, write.stagePath) !== null) throw failClosed(`已记录清理的暂存文件仍存在：${write.stagePath}`);
-        continue;
-      }
-      const stageHash = await missingAsNull(hash, write.stagePath);
-      if (stageHash !== write.sha256) throw failClosed(`清理前暂存文件哈希不一致：${write.stagePath}`);
-      journal.inFlight = { type: "stage-cleanup", index };
-      await persistJournal(atomicWrite, plan, journal);
-      await removeNew({ ...write, path: write.stagePath }, { kind: "bundle-stage", completed: true });
-      if (await missingAsNull(hash, write.stagePath) !== null) throw new Error(`暂存文件清理失败：${write.stagePath}`);
-      journal.completed.stageCleaned.push(index);
-      journal.inFlight = null;
-      await persistJournal(atomicWrite, plan, journal);
-    }
-
-    await verifyProjectFinal({ plan, hash });
+    await verifyProjectFinal({ ...context, journal });
+    await assertOwned(context, "completed");
+    journal.cleanupPending = clone(plan.cleanupPending);
     journal.state = "completed";
     journal.inFlight = null;
     await persistJournal(atomicWrite, plan, journal);

@@ -5,6 +5,7 @@ const crypto = require("crypto");
 
 let core;
 let generationPolicy;
+let migrationSafeFs;
 let projectMigration;
 let projectStorage;
 let referenceAssets;
@@ -355,6 +356,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     const pluginRoot = path.join(this.vaultPath(), ...String(this.manifest.dir || "").split(/[\\/]/).filter(Boolean));
     core = require(path.join(pluginRoot, "replica-core.cjs"));
     generationPolicy = require(path.join(pluginRoot, "generation-policy.cjs"));
+    migrationSafeFs = require(path.join(path.dirname(pluginRoot), "migration-safe-fs.cjs"));
     projectMigration = require(path.join(pluginRoot, "project-migration.cjs"));
     projectStorage = require(path.join(pluginRoot, "project-storage.cjs"));
     shotTimeline = require(path.join(pluginRoot, "shot-timeline.cjs"));
@@ -367,6 +369,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     const workbench = require(path.join(pluginRoot, "replica-workbench.cjs"));
     const VideoReplicaWorkbenchView = workbench.createVideoReplicaWorkbenchView(ItemView);
     this.pluginRoot = pluginRoot;
+    this.migrationSafeFs = migrationSafeFs.createSafeMigrationFs({ vaultRoot: this.vaultPath() });
     this.workbenchViewType = workbench.VIEW_TYPE;
     this.instanceId = crypto.randomUUID();
     this.processing = new Set();
@@ -1618,12 +1621,21 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
 
   async confirmWorkbenchDraft(folder) {
     const paths = this.workbenchProjectPaths(folder);
+    this.assertNoProjectMaintenanceLock(paths.folder);
     this.confirmingProjects ||= new Set();
     if (this.confirmingProjects.has(paths.folder)) throw new Error("项目正在确认，请勿重复操作。");
     this.confirmingProjects.add(paths.folder);
+    let confirmationGate = null;
+    let confirmedRequest = null;
+    let confirmedSelection = null;
     try {
+      confirmationGate = this.acquireWorkbenchQueueLock(paths.folder);
+      this.assertWorkbenchQueueLockOwned(confirmationGate);
+      this.assertNoProjectMaintenanceLock(paths.folder);
       this.currentWorkbenchLock(paths);
       const catalog = await this.refreshGenerationModelCatalog();
+      this.assertWorkbenchQueueLockOwned(confirmationGate);
+      this.assertNoProjectMaintenanceLock(paths.folder);
       const { request } = this.currentWorkbenchLock(paths);
       const requestedImageModel = String(request.settings?.imageModel || "").trim();
       const requestedVideoModel = String(request.settings?.videoModel || "").trim();
@@ -1636,14 +1648,19 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       const selection = { imageModel, videoModel };
       request.settings = Object.assign({}, request.settings, selection);
       request.confirmed = true;
+      this.assertWorkbenchQueueLockOwned(confirmationGate);
+      this.assertNoProjectMaintenanceLock(paths.folder);
       writeJson(paths.requestPath, request);
       this.requestWorkbenchRefresh();
-      new Notice(`已确认：${selection.imageModel} + ${selection.videoModel}，开始调用生成算力。`, 7000);
-      await this.processRequest(paths.requestPath, true);
-      return request;
+      confirmedRequest = request;
+      confirmedSelection = selection;
     } finally {
+      if (confirmationGate) this.releaseWorkbenchQueueLock(confirmationGate);
       this.confirmingProjects.delete(paths.folder);
     }
+    new Notice(`已确认：${confirmedSelection.imageModel} + ${confirmedSelection.videoModel}，开始调用生成算力。`, 7000);
+    await this.processRequest(paths.requestPath, true);
+    return confirmedRequest;
   }
 
   projectRecords() {
@@ -1677,16 +1694,20 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     return selected || this.latestProject()?.project?.folder || "";
   }
 
-  projectMaintenanceLockAbsolutePath(folder, { createParents = false } = {}) {
-    return this.checkedProjectPath(folder, projectMigration.projectMaintenanceLockPath(folder), { createParents });
+  migrationFs() {
+    this.migrationSafeFs ||= migrationSafeFs.createSafeMigrationFs({ vaultRoot: this.vaultPath() });
+    return this.migrationSafeFs;
   }
 
   hasProjectMaintenanceLock(folder) {
-    const lockPath = this.projectMaintenanceLockAbsolutePath(folder);
-    const stat = fs.lstatSync(lockPath, { throwIfNoEntry: false });
-    if (!stat) return false;
-    if (stat.isSymbolicLink() || !stat.isFile()) throw new Error("项目维护锁路径不安全，已停止生成和迁移。");
-    return true;
+    const relativePath = projectMigration.projectMaintenanceLockPath(folder);
+    try {
+      const payload = this.migrationFs().readLastJournalRecord(relativePath);
+      return payload?.state !== "released";
+    } catch (error) {
+      if (error?.code === "ENOENT") return false;
+      throw new Error(`项目维护锁不可读或路径不安全，已停止生成和迁移：${String(error?.message || error)}`);
+    }
   }
 
   assertNoProjectMaintenanceLock(folder) {
@@ -1697,7 +1718,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
   }
 
   acquireProjectMaintenanceLock(folder) {
-    const lockPath = this.projectMaintenanceLockAbsolutePath(folder, { createParents: true });
+    const relativePath = projectMigration.projectMaintenanceLockPath(folder);
     const token = `${this.instanceId || "instance"}:${crypto.randomUUID()}`;
     const payload = {
       type: "mangosteen-project-maintenance-lock",
@@ -1707,8 +1728,8 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       createdAt: new Date().toISOString(),
       heartbeatAt: new Date().toISOString(),
     };
-    let descriptor;
-    try { descriptor = fs.openSync(lockPath, "wx"); }
+    let owned;
+    try { owned = this.migrationFs().createOwnedExclusive(relativePath, payload); }
     catch (error) {
       if (error?.code === "EEXIST") {
         const locked = new Error("当前项目已有迁移维护锁；不会自动清理可能对应未完成迁移的旧锁。");
@@ -1717,9 +1738,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       }
       throw error;
     }
-    try { fs.writeFileSync(descriptor, `${JSON.stringify(payload)}\n`); fs.fsyncSync(descriptor); }
-    finally { fs.closeSync(descriptor); }
-    const lock = { folder: this.workbenchProjectPaths(folder).folder, lockPath, token, payload, heartbeat: null, lostError: null };
+    const lock = { folder: this.workbenchProjectPaths(folder).folder, lockPath: owned.absolutePath, relativePath, token, payload, owned, heartbeat: null, lostError: null };
     lock.heartbeat = setInterval(() => {
       try { this.assertProjectMaintenanceLockOwned(lock); }
       catch (error) { lock.lostError = error instanceof Error ? error : new Error(String(error)); }
@@ -1729,25 +1748,33 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
   }
 
   assertProjectMaintenanceLockOwned(lock) {
-    if (!lock?.lockPath || !lock?.token) throw new Error("项目维护锁无效，已停止迁移。");
+    if (!lock?.lockPath || !lock?.token || !lock?.owned) throw new Error("项目维护锁无效，已停止迁移。");
     if (lock.lostError) throw lock.lostError;
     let current;
-    try { current = this.readJson(lock.lockPath); }
-    catch (_) { throw new Error("项目维护锁已丢失，已停止迁移。"); }
+    try { current = this.migrationFs().readOwnedJson(lock.owned); }
+    catch (_) { throw new Error("项目维护锁已丢失或损坏，已停止迁移。"); }
     if (current?.type !== "mangosteen-project-maintenance-lock" || current?.token !== lock.token) throw new Error("项目维护锁已被其他实例接管，已停止迁移。");
     const refreshed = { ...current, heartbeatAt: new Date().toISOString() };
-    fs.writeFileSync(lock.lockPath, `${JSON.stringify(refreshed)}\n`);
+    this.migrationFs().writeOwnedJson(lock.owned, refreshed);
     lock.payload = refreshed;
     return true;
   }
 
   releaseProjectMaintenanceLock(lock, { retain = false } = {}) {
     if (lock?.heartbeat) clearInterval(lock.heartbeat);
-    if (retain || !lock?.lockPath || !lock?.token) return;
+    if (!lock?.owned) return;
     try {
-      const current = this.readJson(lock.lockPath);
-      if (current?.type === "mangosteen-project-maintenance-lock" && current.token === lock.token) fs.rmSync(lock.lockPath, { force: true });
-    } catch (_) {}
+      if (!retain) {
+        this.assertProjectMaintenanceLockOwned(lock);
+        const released = { ...lock.payload, state: "released", releasedAt: new Date().toISOString(), heartbeatAt: new Date().toISOString() };
+        this.migrationFs().writeOwnedJson(lock.owned, released);
+      }
+    } catch (_) {
+      // Never remove or replace a lock path after ownership becomes uncertain.
+    } finally {
+      try { this.migrationFs().closeOwned(lock.owned); } catch (_) {}
+      lock.owned = null;
+    }
   }
 
   assertProjectGenerationIdle(folder) {
@@ -1780,7 +1807,8 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       .sort().reverse();
     const name = names[0];
     if (!name) return null;
-    const journal = this.readJson(path.join(historyPath, name));
+    const journalPath = `${this.workbenchProjectPaths(folder).folder}/.mangosteen/history/${name}`;
+    const journal = this.migrationFs().readLastJournalRecord(journalPath);
     if (["completed", "rolled-back"].includes(String(journal?.state || ""))) return null;
     if (!journal?.planSnapshot || journal.planId !== journal.planSnapshot.planId
         || projectMigration.projectMigrationPlanId(journal.planSnapshot) !== journal.planId) {
@@ -1817,41 +1845,10 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     };
   }
 
-  migrationFileHash(absolutePath) {
-    const stat = fs.lstatSync(absolutePath, { throwIfNoEntry: false });
-    if (!stat || stat.isSymbolicLink() || !stat.isFile()) throw Object.assign(new Error(`迁移文件不存在或不安全：${absolutePath}`), { code: stat ? "UNSAFE_PATH" : "ENOENT" });
-    const digest = crypto.createHash("sha256");
-    const descriptor = fs.openSync(absolutePath, "r");
-    const buffer = Buffer.allocUnsafe(1024 * 1024);
-    try {
-      let bytesRead;
-      do {
-        bytesRead = fs.readSync(descriptor, buffer, 0, buffer.length, null);
-        if (bytesRead) digest.update(buffer.subarray(0, bytesRead));
-      } while (bytesRead);
-    } finally { fs.closeSync(descriptor); }
-    return digest.digest("hex");
-  }
-
   projectMigrationFiles(folder) {
     const checked = this.checkedWorkbenchProjectFolder(folder);
-    const output = [];
-    const walk = (absoluteFolder, relativeFolder) => {
-      for (const entry of fs.readdirSync(absoluteFolder, { withFileTypes: true })) {
-        const relativePath = `${relativeFolder}/${entry.name}`;
-        const absolutePath = path.join(absoluteFolder, entry.name);
-        const stat = fs.lstatSync(absolutePath);
-        if (stat.isSymbolicLink()) {
-          output.push({ path: relativePath, size: stat.size, sha256: "0".repeat(64), symlink: true });
-        } else if (stat.isDirectory()) {
-          walk(absolutePath, relativePath);
-        } else if (stat.isFile()) {
-          output.push({ path: relativePath, size: stat.size, sha256: this.migrationFileHash(absolutePath) });
-        }
-      }
-    };
-    walk(checked.realFolder, checked.folder);
-    return output;
+    const manifest = this.migrationFs().manifest(checked.folder) || [];
+    return manifest.map((item) => ({ ...item, path: `${checked.folder}/${item.relativePath}` }));
   }
 
   previewCurrentProjectMigration(now) {
@@ -1862,9 +1859,15 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     const snapshot = this.loadWorkbenchProject(folder);
     const paths = this.workbenchProjectPaths(folder);
     const pendingStop = this.readOptionalJson(paths.pendingStopPath || paths.stopPath, snapshot.readErrors, "pendingStop");
+    let files;
+    try { files = this.projectMigrationFiles(folder); }
+    catch (error) {
+      snapshot.readErrors.projectFiles = String(error?.message || error);
+      files = [];
+    }
     return projectMigration.planLegacyProjectMigration({
       projectFolder: folder,
-      files: this.projectMigrationFiles(folder),
+      files,
       project: snapshot.project,
       request: snapshot.request,
       activeRun: snapshot.currentRun,
@@ -1882,12 +1885,13 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     return [
       title,
       `目标复制：${plan.counts.files} 个文件，${plan.counts.bytes} 字节`,
-      `备份移动：${plan.counts.backupFiles} 个文件，${plan.counts.backupBytes} 字节`,
+      `隐藏备份复制：${plan.counts.backupFiles} 个文件，${plan.counts.backupBytes} 字节`,
       `新版记录：${plan.counts.writeFiles} 个文件，${plan.counts.writeBytes} 字节`,
       `阻止项：${plan.counts.blocked}`,
       `跳过项：${plan.counts.skipped}`,
       `目标：${plan.destination}`,
       `备份：${plan.backupPath}`,
+      "源处理：保留原目录；仅记录 cleanupPending，不移动、不删除。",
       "确认后才会执行；不会永久删除旧文件。",
     ].join("\n");
   }
@@ -1898,77 +1902,37 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         || projectMigration.projectMigrationPlanId(snapshot) !== value.planId
         || projectMigration.derivedProjectJournalPath(folder, snapshot.plannedAt) !== vaultPath
         || snapshot.journalPath !== vaultPath) throw new Error("项目迁移 journal 路径或计划无效。");
-    const target = this.checkedProjectPath(folder, vaultPath, { createParents: true });
-    const existingStat = fs.lstatSync(target, { throwIfNoEntry: false });
-    if (existingStat) {
-      if (existingStat.isSymbolicLink() || !existingStat.isFile()) throw new Error("项目迁移 journal 路径被无关文件占用。");
-      let existing;
-      try { existing = this.readJson(target); }
-      catch (_) { throw new Error("项目迁移 journal 路径被无关内容占用。"); }
-      if (existing?.type !== value.type || existing?.planId !== value.planId || existing?.journalPath !== vaultPath) {
-        throw new Error("项目迁移 journal 路径被无关文件占用。");
-      }
-    }
-    const temporary = `${target}.tmp-${process.pid}-${crypto.randomUUID()}`;
-    const descriptor = fs.openSync(temporary, "wx");
-    try { fs.writeFileSync(descriptor, `${JSON.stringify(value, null, 2)}\n`); fs.fsyncSync(descriptor); }
-    finally { fs.closeSync(descriptor); }
-    try {
-      if (existingStat) fs.renameSync(temporary, target);
-      else { fs.linkSync(temporary, target); fs.rmSync(temporary, { force: true }); }
-    } finally { fs.rmSync(temporary, { force: true }); }
+    this.migrationFs().appendJournalRecord(vaultPath, value, (existing) => (
+      existing?.type === value.type && existing?.planId === value.planId && existing?.journalPath === vaultPath
+    ));
   }
 
   writeProjectMigrationStage(folder, write) {
-    const target = this.checkedProjectPath(folder, write.stagePath, { createParents: true });
-    if (fs.lstatSync(target, { throwIfNoEntry: false })) throw Object.assign(new Error(`迁移暂存目标已存在：${write.stagePath}`), { code: "EEXIST" });
-    const descriptor = fs.openSync(target, "wx");
-    try { fs.writeFileSync(descriptor, write.content); fs.fsyncSync(descriptor); }
-    finally { fs.closeSync(descriptor); }
+    this.checkedProjectPath(folder, write.stagePath);
+    this.migrationFs().writeExclusive(write.stagePath, write.content, write);
   }
 
   exposeProjectMigrationStage(folder, write) {
-    const stage = this.checkedProjectPath(folder, write.stagePath);
-    const target = this.checkedProjectPath(folder, write.path, { createParents: true });
-    if (fs.lstatSync(target, { throwIfNoEntry: false })) throw Object.assign(new Error(`迁移目标已存在：${write.path}`), { code: "EEXIST" });
-    fs.linkSync(stage, target);
+    this.checkedProjectPath(folder, write.stagePath);
+    this.checkedProjectPath(folder, write.path);
+    if (this.migrationFs().hashVerified(write.stagePath, write) !== write.sha256) throw new Error(`迁移暂存哈希不一致：${write.stagePath}`);
+    this.migrationFs().writeExclusive(write.path, write.content, write);
   }
 
-  async executeCurrentProjectMigration(plan) {
+  async executeCurrentProjectMigration(plan, maintenanceLock) {
     const folder = plan.projectFolder;
-    const resolve = (vaultPath, options = {}) => this.checkedProjectPath(folder, vaultPath, options);
     const journal = await projectMigration.executeProjectMigration({
       plan,
-      copy: async (from, to) => {
-        const source = resolve(from);
-        const target = resolve(to, { createParents: true });
-        if (fs.lstatSync(target, { throwIfNoEntry: false })) throw Object.assign(new Error(`迁移目标已存在：${to}`), { code: "EEXIST" });
-        fs.copyFileSync(source, target, fs.constants.COPYFILE_EXCL);
-      },
-      move: async (from, to) => {
-        const source = resolve(from);
-        const target = resolve(to, { createParents: true });
-        if (fs.lstatSync(target, { throwIfNoEntry: false })) throw Object.assign(new Error(`迁移备份已存在：${to}`), { code: "EEXIST" });
-        if (!fs.lstatSync(source, { throwIfNoEntry: false })) throw Object.assign(new Error(`迁移源文件不存在：${from}`), { code: "ENOENT" });
-        fs.renameSync(source, target);
-      },
-      hash: async (vaultPath) => this.migrationFileHash(resolve(vaultPath)),
+      copy: async (from, to, expected) => this.migrationFs().copyVerified(from, to, expected),
+      backupCopy: async (from, to, expected) => this.migrationFs().copyVerified(from, to, expected),
+      hash: async (vaultPath) => this.migrationFs().hashVerified(vaultPath),
       atomicWrite: async (operation) => {
         if (operation.type === "journal") return this.writeProjectMigrationJournal(folder, operation.path, operation.value);
         if (operation.type === "stage") return this.writeProjectMigrationStage(folder, operation.write);
         if (operation.type === "expose") return this.exposeProjectMigrationStage(folder, operation.write);
         throw new Error(`未知的项目迁移写入类型：${operation.type}`);
       },
-      removeNew: async (operation, rollback = {}) => {
-        const vaultPath = operation.to || operation.path;
-        const target = resolve(vaultPath);
-        const stat = fs.lstatSync(target, { throwIfNoEntry: false });
-        if (!stat) return;
-        if (stat.isSymbolicLink() || !stat.isFile() || (!rollback.owned && this.migrationFileHash(target) !== operation.sha256)) {
-          throw new Error(`回滚目标内容已变化，拒绝移除：${vaultPath}`);
-        }
-        fs.unlinkSync(target);
-      },
+      assertMaintenanceOwned: async () => this.assertProjectMaintenanceLockOwned(maintenanceLock),
     });
     this.requestWorkbenchRefresh();
     return journal;
@@ -1995,8 +1959,8 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       if (current.blocked || projectMigration.projectMigrationPlanId(current) !== plan.planId) throw new Error(`确认后项目状态已变化：${current.reasons.join("；") || "迁移清单不再一致"}`);
       this.assertProjectMaintenanceLockOwned(maintenanceLock);
       this.assertProjectGenerationIdle(plan.projectFolder);
-      await this.executeCurrentProjectMigration(current);
-      new Notice(`项目整理完成；旧文件已移入 ${plan.backupPath}。`, 9000);
+      await this.executeCurrentProjectMigration(current, maintenanceLock);
+      new Notice(`项目整理完成；隐藏备份已写入 ${plan.backupPath}，旧目录保留并标记待后续清理。`, 9000);
       return true;
     } catch (error) {
       if (maintenanceLock) retainMaintenanceLock = this.isProjectMigrationLocked(maintenanceLock.folder);

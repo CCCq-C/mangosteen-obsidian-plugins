@@ -47,7 +47,8 @@ function memoryAdapters(initial, options = {}) {
   let copyCount = 0;
   let stageCount = 0;
   let exposeCount = 0;
-  let removeFailures = Number(options.failRemoveAt || 0);
+  let ownershipChecks = 0;
+  let ownershipLost = false;
   const hash = async (filePath) => {
     const bytes = files.get(filePath);
     if (!bytes) throw Object.assign(new Error(`missing: ${filePath}`), { code: "ENOENT" });
@@ -61,13 +62,12 @@ function memoryAdapters(initial, options = {}) {
     if (files.has(to)) throw Object.assign(new Error("destination exists"), { code: "EEXIST" });
     files.set(to, Buffer.from(files.get(from)));
   };
-  const move = async (from, to) => {
-    events.push(`move:${from}->${to}`);
-    if (options.failMoveFrom === from) throw new Error("injected move failure");
+  const backupCopy = async (from, to) => {
+    events.push(`backup:${from}->${to}`);
+    if (options.failBackupFrom === from) throw new Error("injected backup failure");
     if (files.has(to)) throw Object.assign(new Error("backup exists"), { code: "EEXIST" });
     if (!files.has(from)) throw Object.assign(new Error("source missing"), { code: "ENOENT" });
-    files.set(to, files.get(from));
-    files.delete(from);
+    files.set(to, Buffer.from(files.get(from)));
   };
   const atomicWrite = async (operation) => {
     if (operation.type === "journal") {
@@ -91,14 +91,17 @@ function memoryAdapters(initial, options = {}) {
     files.set(operation.write.path, Buffer.from(files.get(operation.write.stagePath)));
     if (exposeCount === options.exposeThenFailAt) throw new Error("injected post-exposure crash");
   };
-  const removeNew = async (operation) => {
-    events.push(`remove:${operation.to || operation.path}`);
-    if (removeFailures > 0) { removeFailures -= 1; throw new Error("injected rollback removal failure"); }
-    files.delete(operation.to || operation.path);
+  const assertMaintenanceOwned = async (phase) => {
+    ownershipChecks += 1;
+    events.push(`owned:${phase}`);
+    if (ownershipLost || options.loseOwnershipAt === phase || ownershipChecks === options.loseOwnershipAtCheck) {
+      ownershipLost = true;
+      throw new Error(`maintenance lock lost at ${phase}`);
+    }
   };
   return {
-    files, events, journals, copy, move, hash, atomicWrite, removeNew,
-    clearFailures() { options.failMoveFrom = null; removeFailures = 0; },
+    files, events, journals, copy, backupCopy, hash, atomicWrite, assertMaintenanceOwned,
+    clearFailures() { options.failBackupFrom = null; ownershipLost = false; options.loseOwnershipAt = null; options.loseOwnershipAtCheck = null; },
   };
 }
 
@@ -117,11 +120,16 @@ function memoryAdapters(initial, options = {}) {
   assert.strictEqual(plan.counts.writeFiles, 2);
   assert.strictEqual(plan.counts.blocked, 0);
   assert.strictEqual(plan.counts.skipped, 0);
+  assert.strictEqual(plan.sourceDisposition, "retained");
+  assert.ok(plan.cleanupPending.some((item) => item.path === firstFrame));
+  assert.ok(plan.moves.every((item) => item.type === "copy-backup-retain-source"));
   assert.match(plan.backupPath, /\.mangosteen\/history\/migration-20261012-010203-004$/);
   assert.strictEqual(plan.destination, `${folder}/.mangosteen`);
   assert.deepStrictEqual(plan.deletes, []);
   assert.ok(plan.writes.some((item) => item.path === `${folder}/.mangosteen/project.json`));
   assert.ok(plan.writes.some((item) => item.path === `${folder}/.mangosteen/draft.json`));
+  assert.strictEqual(plan.writes[0].activation, false, "draft must be exposed before the v6 activation member");
+  assert.strictEqual(plan.writes[1].activation, true, "project.json must be the final v6 activation member");
   assert.ok(plan.writes.every((item) => item.stagePath.startsWith(`${folder}/.mangosteen/history/.migration-stage-`)));
   assert.strictEqual(plan.backupManifest.length, plan.moves.length);
   assert.match(plan.journalPath, /\.mangosteen\/history\/\.migration-journal-/);
@@ -200,40 +208,44 @@ function memoryAdapters(initial, options = {}) {
   const completed = await executeProjectMigration({ plan, ...successFs });
   assert.strictEqual(completed.state, "completed");
   assert.ok(successFs.events.findIndex((item) => item.startsWith("expose:")) > successFs.events.findIndex((item) => item.startsWith("copy:")));
-  assert.ok(successFs.events.findIndex((item) => item.startsWith("move:")) > successFs.events.findIndex((item) => item.startsWith("expose:")));
+  assert.ok(successFs.events.findIndex((item) => item.startsWith("backup:")) > successFs.events.findIndex((item) => item.startsWith("expose:")));
   assert.strictEqual(await successFs.hash(`${folder}/03-分镜/001/首帧.png`), sha256("first frame"));
   assert.ok(successFs.files.has(`${folder}/.mangosteen/project.json`));
-  assert.ok(!successFs.files.has(firstFrame));
+  assert.ok(successFs.files.has(firstFrame), "portable-safe migration must retain every legacy project source");
   assert.ok(successFs.files.has(`${plan.backupPath}/02-分镜脚本/镜头-001-开场-首帧.png`));
 
   const replayEvents = successFs.events.length;
   const replayed = await executeProjectMigration({ plan: { ...plan, journal: completed }, ...successFs });
   assert.strictEqual(replayed.state, "completed");
-  assert.strictEqual(successFs.events.slice(replayEvents).some((item) => /^(copy|move|stage|expose):/.test(item)), false, "completed replay must be idempotent");
-  const cleanedBeforeFinalJournal = JSON.parse(JSON.stringify(completed));
-  cleanedBeforeFinalJournal.state = "forward";
-  const cleanedReplayStart = successFs.events.length;
-  const cleanedReplay = await executeProjectMigration({ plan: { ...plan, journal: cleanedBeforeFinalJournal }, ...successFs });
-  assert.strictEqual(cleanedReplay.state, "completed", "a crash after verified stage cleanup must finish without recreating the stage");
-  assert.strictEqual(successFs.events.slice(cleanedReplayStart).some((item) => item.startsWith("stage:") || item.startsWith("expose:")), false);
+  assert.strictEqual(successFs.events.slice(replayEvents).some((item) => /^(copy|backup|stage|expose):/.test(item)), false, "completed replay must be idempotent");
+  assert.ok(plan.writes.every((write) => successFs.files.has(write.stagePath)), "verified hidden stage files are retained for separate cleanup");
+  assert.ok(completed.cleanupPending.some((item) => item.type === "verified-stage-file"));
 
   for (const failureOptions of [
     { failCopyAt: 2 },
     { hashMismatchPath: `${folder}/03-分镜/001/首帧.png` },
     { failStageAt: 1 },
-    ...plan.writes.map((_, index) => ({ failExposeAt: index + 1 })),
-    ...plan.writes.map((_, index) => ({ exposeThenFailAt: index + 1 })),
-    { failMoveFrom: firstFrame },
+    { failExposeAt: 1 },
+    { failExposeAt: 2 },
+    { exposeThenFailAt: 1 },
+    { exposeThenFailAt: 2 },
+    { failBackupFrom: firstFrame },
   ]) {
     const failingFs = memoryAdapters(base.contents, failureOptions);
     await assert.rejects(
       executeProjectMigration({ plan, ...failingFs }),
-      /injected|SHA-256|哈希|hash|move|迁移/,
+      /injected|SHA-256|哈希|hash|backup|迁移|回滚/,
     );
-    for (const source of Object.keys(base.contents)) assert.ok(failingFs.files.has(source), `rollback must restore ${source}`);
-    assert.ok(!failingFs.files.has(`${folder}/03-分镜/001/首帧.png`));
-    assert.ok(!failingFs.files.has(`${folder}/.mangosteen/project.json`));
-    assert.strictEqual(failingFs.journals.get(plan.journalPath)?.state, "rolled-back");
+    for (const source of Object.keys(base.contents)) assert.ok(failingFs.files.has(source), `safe failure must retain ${source}`);
+    const failedJournal = failingFs.journals.get(plan.journalPath);
+    const activatedV6 = plan.writes.some((write) => write.activation === true && failingFs.files.has(write.path));
+    assert.strictEqual(failedJournal?.state, activatedV6 || failureOptions.hashMismatchPath ? "rollback-failed" : "rolled-back", JSON.stringify(failureOptions));
+    for (const filePath of [...failingFs.files.keys()].filter((item) => !base.contents[item])) {
+      const expected = plan.operations.some((item) => item.to === filePath && item.sha256 === sha256(failingFs.files.get(filePath)))
+        || plan.writes.some((item) => [item.path, item.stagePath].includes(filePath) && item.sha256 === sha256(failingFs.files.get(filePath)))
+        || plan.moves.some((item) => item.to === filePath && item.sha256 === sha256(failingFs.files.get(filePath)));
+      assert.ok(expected, `rollback may retain only verified migration output: ${filePath}`);
+    }
   }
 
   const partialFs = memoryAdapters(base.contents);
@@ -265,7 +277,7 @@ function memoryAdapters(initial, options = {}) {
   const resumedBundle = await executeProjectMigration({ plan: { ...plan, journal: partialBundleJournal }, ...partialBundleFs });
   assert.strictEqual(resumedBundle.state, "completed", "a matching partial v6 bundle must expose the missing member and finish");
   assert.ok(partialBundleFs.files.has(plan.writes[1].path));
-  for (const write of plan.writes) assert.strictEqual(partialBundleFs.files.has(write.stagePath), false, "verified stage files are cleaned only after completion");
+  for (const write of plan.writes) assert.strictEqual(partialBundleFs.files.has(write.stagePath), true, "verified stage files remain hidden for separate cleanup");
 
   const missingStageFs = memoryAdapters(base.contents);
   for (const operation of plan.operations) missingStageFs.files.set(operation.to, Buffer.from(missingStageFs.files.get(operation.from)));
@@ -276,8 +288,8 @@ function memoryAdapters(initial, options = {}) {
   missingStageJournal.completed.staged = [0];
   missingStageJournal.inFlight = { type: "bundle-expose", index: 0, created: true };
   await assert.rejects(executeProjectMigration({ plan: { ...plan, journal: missingStageJournal }, ...missingStageFs }), /暂存|回滚/);
-  assert.strictEqual(missingStageFs.files.has(plan.writes[0].path), false, "matching partial v6 target must be rolled back when its verified stage is unavailable");
-  for (const operation of plan.operations) assert.strictEqual(missingStageFs.files.has(operation.to), false);
+  assert.strictEqual(missingStageFs.files.has(plan.writes[0].path), true, "unsafe path unlink is forbidden; hidden draft target is retained for cleanup");
+  assert.strictEqual(missingStageFs.files.has(plan.writes.find((write) => write.activation).path), false, "project activation member must never appear before draft is complete");
   assert.strictEqual(missingStageFs.journals.get(plan.journalPath).state, "rolled-back");
 
   const rollbackOnlyFs = memoryAdapters(base.contents);
@@ -288,7 +300,8 @@ function memoryAdapters(initial, options = {}) {
   const rollbackEventStart = rollbackOnlyFs.events.length;
   await assert.rejects(executeProjectMigration({ plan: { ...plan, journal: rollbackOnlyJournal }, ...rollbackOnlyFs }), /已回滚|回滚完成/);
   assert.strictEqual(rollbackOnlyFs.journals.get(plan.journalPath).state, "rolled-back");
-  assert.strictEqual(rollbackOnlyFs.events.slice(rollbackEventStart).some((item) => /^(copy|stage|expose|move):/.test(item)), false, "rolling-back replay must never resume forward work");
+  assert.ok(rollbackOnlyFs.files.has(firstCopy.to), "known generated copy is retained for safe later cleanup");
+  assert.strictEqual(rollbackOnlyFs.events.slice(rollbackEventStart).some((item) => /^(copy|stage|expose|backup):/.test(item)), false, "rolling-back replay must never resume forward work");
 
   const falseCompletedCopy = migration.createProjectMigrationJournal(plan);
   falseCompletedCopy.state = "forward";
@@ -299,20 +312,32 @@ function memoryAdapters(initial, options = {}) {
 
   const falseCompletedMove = migration.createProjectMigrationJournal(plan);
   falseCompletedMove.state = "forward";
-  falseCompletedMove.completed.moves = [0];
+  falseCompletedMove.completed.backups = [0];
   const falseMoveFs = memoryAdapters(base.contents);
-  await assert.rejects(executeProjectMigration({ plan: { ...plan, journal: falseCompletedMove }, ...falseMoveFs }), /已记录.*移动|备份.*不一致|状态不一致/);
-  assert.strictEqual(falseMoveFs.events.some((item) => /^(copy|stage|expose|move):/.test(item)), false, "a false completed move must be rejected before any forward action");
+  await assert.rejects(executeProjectMigration({ plan: { ...plan, journal: falseCompletedMove }, ...falseMoveFs }), /已记录.*复制|备份.*不一致|状态不一致/);
+  assert.strictEqual(falseMoveFs.events.some((item) => /^(copy|stage|expose|backup):/.test(item)), false, "a false completed backup must be rejected before any forward action");
 
-  const interruptedProjectRollback = memoryAdapters(base.contents, { failMoveFrom: firstFrame, failRemoveAt: 1 });
-  await assert.rejects(executeProjectMigration({ plan, ...interruptedProjectRollback }), /回滚|removal|injected/);
+  for (const phase of ["copy:0", "copy:hash:0", "bundle-stage:0", "bundle-expose:0", "backup-copy:0", "completed"]) {
+    const lockLossFs = memoryAdapters(base.contents, { loseOwnershipAt: phase });
+    await assert.rejects(executeProjectMigration({ plan, ...lockLossFs }), /maintenance lock lost|回滚/);
+    assert.strictEqual(lockLossFs.journals.get(plan.journalPath).state, "rollback-failed", `lock loss at ${phase} must be durable`);
+    const lossIndex = lockLossFs.events.indexOf(`owned:${phase}`);
+    assert.ok(lossIndex >= 0);
+    assert.strictEqual(lockLossFs.events.slice(lossIndex + 1).some((item) => /^(copy|backup|stage|expose):/.test(item)), false, `no forward filesystem operation after ${phase}`);
+    for (const source of Object.keys(base.contents)) assert.ok(lockLossFs.files.has(source));
+  }
+
+  const interruptedProjectRollback = memoryAdapters(base.contents, { loseOwnershipAt: "rollback:copy:0" });
+  interruptedProjectRollback.files.set(firstCopy.to, Buffer.from(interruptedProjectRollback.files.get(firstCopy.from)));
+  const interruptedJournal = migration.createProjectMigrationJournal(plan);
+  interruptedJournal.state = "rolling-back";
+  interruptedJournal.completed.copies = [0];
+  await assert.rejects(executeProjectMigration({ plan: { ...plan, journal: interruptedJournal }, ...interruptedProjectRollback }), /maintenance lock lost|回滚/);
   const projectRollbackFailed = interruptedProjectRollback.journals.get(plan.journalPath);
   assert.strictEqual(projectRollbackFailed.state, "rollback-failed");
-  const projectForwardEvents = interruptedProjectRollback.events.filter((item) => /^(copy|stage|expose):/.test(item)).length;
   interruptedProjectRollback.clearFailures();
   await assert.rejects(executeProjectMigration({ plan: { ...plan, journal: projectRollbackFailed }, ...interruptedProjectRollback }), /已回滚|回滚完成/);
   assert.strictEqual(interruptedProjectRollback.journals.get(plan.journalPath).state, "rolled-back");
-  assert.strictEqual(interruptedProjectRollback.events.filter((item) => /^(copy|stage|expose):/.test(item)).length, projectForwardEvents, "rollback-failed replay must resume inverse work only");
 
   const originalLoad = Module._load;
   const notices = [];
@@ -354,6 +379,7 @@ function memoryAdapters(initial, options = {}) {
   for (const value of [String(plan.counts.files), String(plan.counts.bytes), String(plan.counts.blocked), String(plan.counts.skipped), plan.destination, plan.backupPath]) {
     assert.ok(confirmationText.includes(value), `confirmation preview must include ${value}`);
   }
+  assert.match(confirmationText, /保留原目录.*不移动.*不删除/);
   plugin.previewCurrentProjectMigration = () => ({ ...plan, blocked: true, reasons: ["active paid task"], counts: { ...plan.counts, blocked: 1 } });
   plugin.confirmMigrationPlan = () => { throw new Error("blocked plan must not ask for confirmation"); };
   await command.callback();
@@ -407,11 +433,33 @@ function memoryAdapters(initial, options = {}) {
   assert.strictEqual(legacyRuns, 0, "legacy confirmed flow must not start while the maintenance lock exists");
   assert.throws(() => pluginB.acquireWorkbenchQueueLock(folder), /维护|迁移/);
   pluginA.releaseProjectMaintenanceLock(maintenanceFirst);
+  assert.strictEqual(pluginA.hasProjectMaintenanceLock(folder), false, "released lock remains as a non-active ownership record");
+  fs.rmSync(maintenanceFirst.lockPath, { force: true }); // explicit test-only/manual cleanup; migration code never unlinks it
   const queueFirst = pluginB.acquireWorkbenchQueueLock(folder);
   const maintenanceSecond = pluginA.acquireProjectMaintenanceLock(folder);
   assert.throws(() => pluginA.assertProjectGenerationIdle(folder), /生成|队列|运行/);
   pluginA.releaseProjectMaintenanceLock(maintenanceSecond);
   pluginB.releaseWorkbenchQueueLock(queueFirst);
+  fs.rmSync(maintenanceSecond.lockPath, { force: true }); // explicit test-only/manual cleanup
+
+  fs.writeFileSync(path.join(lockRoot, "generation-request.json"), JSON.stringify({
+    ...base.input.request,
+    confirmed: false,
+    settings: { imageModel: "image-model", videoModel: "video-model" },
+  }));
+  let migrationDuringRefresh = null;
+  let confirmedRunCount = 0;
+  pluginB.refreshGenerationModelCatalog = async () => {
+    migrationDuringRefresh = pluginA.acquireProjectMaintenanceLock(folder);
+    return { imageModels: ["image-model"], videoModels: ["video-model"] };
+  };
+  pluginB.requestWorkbenchRefresh = () => {};
+  pluginB.processRequest = async () => { confirmedRunCount += 1; };
+  await assert.rejects(() => pluginB.confirmWorkbenchDraft(folder), /维护|迁移/);
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(lockRoot, "generation-request.json"), "utf8")).confirmed, false, "maintenance acquisition during model refresh must prevent confirmed=true write");
+  assert.strictEqual(confirmedRunCount, 0);
+  pluginA.releaseProjectMaintenanceLock(migrationDuringRefresh);
+  fs.rmSync(migrationDuringRefresh.lockPath, { force: true }); // explicit test-only/manual cleanup
 
   const staleMaintenance = pluginA.acquireProjectMaintenanceLock(folder);
   const uncertainJournal = migration.createProjectMigrationJournal(plan);
