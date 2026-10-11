@@ -33,6 +33,7 @@ Module._load = function patchedLoad(request, parent, isMain) {
 };
 
 const ReplicaPlugin = require("../main.js");
+const ImagePlugin = require("../../mangosteen-image/main.js");
 const replicaCore = require("../replica-core.cjs");
 const replicaEditor = require("../replica-editor.cjs");
 const plugin = new ReplicaPlugin();
@@ -699,26 +700,85 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   const compatibilityTarget = { ...targetAwareOutputTarget, projectId: "project-compat", destinationPath: compatibilityPath };
   fs.mkdirSync(path.join(vault, "山竹视频复刻", "project-compat"), { recursive: true });
   let legacySaveCalls = 0;
+  let legacyFetchCalls = 0;
+  const legacyPersistedSettings = [];
   const legacyGlobalDuplicate = "山竹图片生成/legacy-duplicate.png";
+  const legacyTask = {
+    id: "legacy-image-task-008",
+    status: "completed",
+    saved: false,
+    submissionFingerprint: "legacy-image-fingerprint-008",
+    prompt: "legacy prompt",
+    mode: "文生图",
+    model: "gpt-image-2-w",
+  };
   const realisticLegacyImage = {
-    saveImageResult: async () => {
+    settings: {
+      imageTasks: [legacyTask],
+      submissionMarkers: [{ fingerprint: legacyTask.submissionFingerprint, status: "accepted" }],
+    },
+    saveSettings: async function saveSettings() {
+      legacyPersistedSettings.push(JSON.parse(JSON.stringify(this.settings)));
+    },
+    reconcileImageSubmission: ImagePlugin.prototype.reconcileImageSubmission,
+    refreshImageTasks: ImagePlugin.prototype.refreshImageTasks,
+    refreshImageTasksNow: ImagePlugin.prototype.refreshImageTasksNow,
+    fetchImageTask: async () => {
+      legacyFetchCalls += 1;
+      return { data: [{ kind: "base64", value: Buffer.from("background-duplicate").toString("base64") }] };
+    },
+    extractResults: (response) => response.data,
+    api: {
+      readImageTaskProgress: () => 100,
+      readImageTaskState: () => "completed",
+    },
+    refreshImageTaskViews: () => {},
+    refreshTaskUsageRecords: async () => {},
+    saveImageResult: async function legacySaveImageResult() {
       legacySaveCalls += 1;
       fs.mkdirSync(path.dirname(path.join(vault, ...legacyGlobalDuplicate.split("/"))), { recursive: true });
       fs.writeFileSync(path.join(vault, ...legacyGlobalDuplicate.split("/")), "misleading-global-copy");
-      return { saved: true, imagePaths: [legacyGlobalDuplicate] };
+      Object.assign(legacyTask, { saved: true, imagePaths: [legacyGlobalDuplicate] });
+      return legacyTask;
     },
+  };
+  const compatibilityCandidate = {
+    kind: "base64",
+    value: Buffer.from("compatibility-image").toString("base64"),
+    __mangosteenTaskId: legacyTask.id,
+    __mangosteenSubmissionFingerprint: legacyTask.submissionFingerprint,
   };
   await plugin.saveImageCandidate(
     realisticLegacyImage,
-    { kind: "base64", value: Buffer.from("compatibility-image").toString("base64") },
+    compatibilityCandidate,
     compatibilityPath,
     compatibilityTarget,
   );
+  await realisticLegacyImage.refreshImageTasks();
   assert.strictEqual(fs.readFileSync(path.join(vault, ...compatibilityPath.split("/")), "utf8"), "compatibility-image");
   assert.strictEqual(legacySaveCalls, 0, "legacy saveImageResult must not be mistaken for target-aware capability");
+  assert.strictEqual(legacyFetchCalls, 0, "a durably terminalized legacy task must be skipped by the real refresh lifecycle");
+  assert.strictEqual(legacyTask.saved, true);
+  assert.deepStrictEqual(legacyTask.imagePaths, [compatibilityPath]);
+  assert.strictEqual(legacyTask.localPath, compatibilityPath);
+  assert(legacyPersistedSettings.some((settings) => settings.imageTasks[0]?.saved === true), "legacy terminal state must be persisted before reconciliation");
+  assert.deepStrictEqual(realisticLegacyImage.settings.submissionMarkers, []);
   assert.strictEqual(fs.existsSync(path.join(vault, ...legacyGlobalDuplicate.split("/"))), false, "compatibility save must not create a second global image");
   assert.strictEqual(plugin.imageTargetUpgradeNoticeShown, true, "older image plugins must trigger one clear upgrade notice while retaining the atomic fallback");
   assert(noticeMessages.some((message) => /安全兼容保存.*升级山竹生图/.test(message)), "compatibility fallback must show a clear image-plugin upgrade notice");
+
+  const unterminatedPath = "山竹视频复刻/project-no-terminal/03-分镜/008/首帧.png";
+  fs.mkdirSync(path.join(vault, "山竹视频复刻", "project-no-terminal"), { recursive: true });
+  await assert.rejects(
+    () => plugin.saveImageCandidate(
+      { saveImageResult: async () => ({ saved: true }) },
+      { ...compatibilityCandidate, __mangosteenTaskId: "missing-legacy-task" },
+      unterminatedPath,
+      { ...compatibilityTarget, projectId: "project-no-terminal", destinationPath: unterminatedPath },
+    ),
+    /无法可靠终结.*升级山竹生图/,
+  );
+  assert.strictEqual(fs.existsSync(path.join(vault, ...unterminatedPath.split("/"))), false, "fallback must fail before writing when the legacy task cannot be durably terminalized");
 
   const rollbackFolder = "山竹视频复刻/project-rollback";
   const rollbackPath = `${rollbackFolder}/03-分镜/008/首帧.png`;

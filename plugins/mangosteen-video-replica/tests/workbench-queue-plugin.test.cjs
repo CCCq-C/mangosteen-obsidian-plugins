@@ -20,6 +20,7 @@ Module._load = function patchedLoad(request, parent, isMain) {
 
 const ReplicaPlugin = require("../main.js");
 const { confirmGenerationPlan, createGenerationQueue } = require("../generation-queue.cjs");
+const generationPolicy = require("../generation-policy.cjs");
 const projectStorage = require("../project-storage.cjs");
 const runState = require("../run-state.cjs");
 
@@ -1491,7 +1492,7 @@ function request() {
   );
   assert.strictEqual(fs.existsSync(activeRunPath), false, "an archive retry must clear a pointer left behind after a successful archive write");
 
-  const writeV6RecoveryRun = async (runId, taskId, now) => {
+  const writeV6RecoveryRun = async (runId, taskId, now, options = {}) => {
     const preview = await plugin.previewWorkbenchGeneration(v6Folder, ["001"]);
     const plan = confirmGenerationPlan(
       preview,
@@ -1509,13 +1510,21 @@ function request() {
     const project = JSON.parse(fs.readFileSync(path.join(v6MetadataRoot, "project.json"), "utf8"));
     const projectShot = project.shots.find((shot) => shot.id === "001");
     projectShot.videoPath = "";
-    projectShot.videoTaskId = "";
-    projectShot.videoTaskPlanId = "";
+    projectShot.videoTaskId = options.retainProjectTask ? taskId : "";
+    projectShot.videoTaskPlanId = options.retainProjectTask ? plan.planId : "";
+    projectShot.videoTaskFingerprint = options.retainProjectTask
+      ? String(options.fingerprintForPlan?.(plan) || "")
+      : "";
+    if (options.firstImagePath) {
+      projectShot.firstImagePath = options.firstImagePath;
+      projectShot.imagePath = options.firstImagePath;
+    }
     fs.writeFileSync(path.join(v6MetadataRoot, "project.json"), JSON.stringify(project));
     fs.writeFileSync(activeRunPath, JSON.stringify(run));
     plugin.queueApis.delete(v6Folder);
     plugin.activeQueueObjects.delete(v6Folder);
     plugin.queueRuns.delete(v6Folder);
+    return { plan, run };
   };
   const readV6RecoveryArchive = (runId) => fs.readdirSync(path.join(v6MetadataRoot, "runs"))
     .filter((name) => name.endsWith(".json"))
@@ -1574,6 +1583,108 @@ function request() {
   const directRecoveryArchive = readV6RecoveryArchive("v6-active-run-direct");
   assert.strictEqual(directRecoveryArchive.shots["001"].status, "completed");
   assert.strictEqual(submittedVideoOptions.length, paidSubmissionsBeforeActiveRunRecovery, "active-run task recovery must not resubmit paid work");
+
+  const v6RecoveryArtifacts = projectStorage.shotArtifactPaths(v6Folder, "001");
+  const recoveredFingerprintForPlan = (plan) => generationPolicy.createGenerationFingerprint({
+    requestVersion: plan.requestVersion,
+    visualStyle: plan.visualStyle,
+    character: { ...plan.character, contentHash: "character-hero-hash" },
+    scene: { ...plan.scenes.find((scene) => scene.id === "room"), contentHash: "scene-room-hash" },
+    products: plan.products.map((product) => ({ ...product, contentHash: `product-${product.id}-hash` })),
+    shot: plan.shots[0],
+    model: plan.settings.videoModel,
+    ratio: plan.settings.ratio,
+    resolution: plan.settings.resolution,
+  });
+  const landedRecovery = await writeV6RecoveryRun(
+    "v6-active-run-landed",
+    "active-run-landed-task",
+    "2026-10-12T00:00:04.000Z",
+    {
+      retainProjectTask: true,
+      firstImagePath: v6RecoveryArtifacts.firstFrame,
+      fingerprintForPlan: recoveredFingerprintForPlan,
+    },
+  );
+  const landedFingerprint = recoveredFingerprintForPlan(landedRecovery.plan);
+  fs.mkdirSync(path.join(vault, ...v6RecoveryArtifacts.folder.split("/")), { recursive: true });
+  fs.writeFileSync(path.join(vault, ...v6RecoveryArtifacts.firstFrame.split("/")), "landed-first-frame");
+  fs.writeFileSync(path.join(vault, ...v6RecoveryArtifacts.video.split("/")), "landed-video-before-project-status");
+  const recoveryHistoryRoot = path.join(v6MetadataRoot, "history");
+  const recoveryHistoryFilesBefore = fs.existsSync(recoveryHistoryRoot)
+    ? fs.readdirSync(recoveryHistoryRoot, { recursive: true }).filter((entry) => fs.statSync(path.join(recoveryHistoryRoot, entry)).isFile()).length
+    : 0;
+  let landedWaitCalls = 0;
+  let landedPaidSubmissions = 0;
+  let landedImageSubmissions = 0;
+  const landedVideoPlugin = {
+    settings: {
+      resolution: "768p",
+      videoTasks: [{
+        id: "active-run-landed-task",
+        status: "completed",
+        saved: true,
+        localPath: v6RecoveryArtifacts.video,
+      }],
+    },
+    submitVideo: async () => {
+      landedPaidSubmissions += 1;
+      return { id: "must-not-submit-after-recovery" };
+    },
+  };
+  const getGenerationPluginsBeforeLandedRecovery = plugin.getGenerationPlugins;
+  const runtimeBeforeLandedRecovery = plugin.resolveQueueGenerationRuntime;
+  const waitBeforeLandedRecovery = plugin.waitForVideo;
+  const generateImageBeforeLandedRecovery = plugin.generateImageMulti;
+  plugin.getGenerationPlugins = () => ({ image: {}, video: landedVideoPlugin });
+  plugin.resolveQueueGenerationRuntime = async () => ({
+    image: {},
+    video: landedVideoPlugin,
+    imageModel: landedRecovery.plan.settings.imageModel,
+    model: landedRecovery.plan.settings.videoModel,
+    resolution: landedRecovery.plan.settings.resolution,
+  });
+  plugin.waitForVideo = async () => {
+    landedWaitCalls += 1;
+    throw new Error("already-landed recovery must not poll or move the completed target");
+  };
+  plugin.generateImageMulti = async () => {
+    landedImageSubmissions += 1;
+    throw new Error("identical generation must reuse its recovered first frame");
+  };
+  assert.strictEqual(await plugin.recoverWorkbenchQueue(v6Folder), true);
+  await plugin.queueRuns.get(v6Folder);
+  assert.strictEqual(landedWaitCalls, 0);
+  assert.strictEqual(v6RecoveryCopyCalls, 0);
+  assert.strictEqual(fs.readFileSync(path.join(vault, ...v6RecoveryArtifacts.video.split("/")), "utf8"), "landed-video-before-project-status");
+  const recoveryHistoryFilesAfter = fs.existsSync(recoveryHistoryRoot)
+    ? fs.readdirSync(recoveryHistoryRoot, { recursive: true }).filter((entry) => fs.statSync(path.join(recoveryHistoryRoot, entry)).isFile()).length
+    : 0;
+  assert.strictEqual(recoveryHistoryFilesAfter, recoveryHistoryFilesBefore, "already-landed recovery must not archive the completed target");
+  const landedProjectShot = JSON.parse(fs.readFileSync(path.join(v6MetadataRoot, "project.json"), "utf8")).shots.find((shot) => shot.id === "001");
+  assert.strictEqual(landedProjectShot.videoPath, v6RecoveryArtifacts.video);
+  assert.strictEqual(landedProjectShot.generationFingerprint, landedFingerprint, "recovery must promote only the validated task fingerprint");
+  const landedArchive = readV6RecoveryArchive("v6-active-run-landed");
+  assert.strictEqual(landedArchive.shots["001"].status, "completed");
+
+  const rerunResult = await plugin.runWorkbenchQueueShot(v6Folder, landedRecovery.plan.shots[0], {
+    queueId: "v6-identical-rerun",
+    planId: landedRecovery.plan.planId,
+    requestVersion: landedRecovery.plan.requestVersion,
+    visualStyle: landedRecovery.plan.visualStyle,
+    character: landedRecovery.plan.character,
+    products: landedRecovery.plan.products,
+    scenes: landedRecovery.plan.scenes,
+    settings: landedRecovery.plan.settings,
+  });
+  assert.strictEqual(rerunResult.videoPath, v6RecoveryArtifacts.video);
+  assert.strictEqual(landedPaidSubmissions, 0, "an identical run after recovery must reuse the validated generation and submit no paid task");
+  assert.strictEqual(landedImageSubmissions, 0);
+  assert.strictEqual(landedWaitCalls, 0);
+  plugin.getGenerationPlugins = getGenerationPluginsBeforeLandedRecovery;
+  plugin.resolveQueueGenerationRuntime = runtimeBeforeLandedRecovery;
+  plugin.waitForVideo = waitBeforeLandedRecovery;
+  plugin.generateImageMulti = generateImageBeforeLandedRecovery;
   plugin.copyVaultFile = originalRecoveryCopyVaultFile;
 
   plugin.queueApis.delete(v6Folder);

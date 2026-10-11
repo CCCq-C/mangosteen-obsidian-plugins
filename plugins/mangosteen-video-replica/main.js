@@ -2070,6 +2070,9 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       this.imageTargetUpgradeNoticeShown = true;
       new Notice("山竹生图版本较旧，已使用安全兼容保存。请升级山竹生图以启用项目目标直存。", 10000);
     }
+    const terminalizeLegacyTask = target
+      ? this.prepareLegacyImageTaskTerminalization(imagePlugin, candidate, vaultPath)
+      : null;
     const absolutePath = this.absolute(vaultPath, { createParents: true });
     let bytes;
     if (candidate?.kind === "base64") bytes = Buffer.from(candidate.value, "base64");
@@ -2080,8 +2083,60 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       bytes = Buffer.from(response.arrayBuffer);
     } else throw new Error("生图接口没有返回可保存的图片。");
     atomicWrite(absolutePath, bytes);
-    await imagePlugin.reconcileImageSubmission?.(candidate?.__mangosteenSubmissionFingerprint);
+    if (terminalizeLegacyTask) await terminalizeLegacyTask();
+    else await imagePlugin.reconcileImageSubmission?.(candidate?.__mangosteenSubmissionFingerprint);
     return vaultPath;
+  }
+
+  prepareLegacyImageTaskTerminalization(imagePlugin, candidate, vaultPath) {
+    const taskId = String(candidate?.__mangosteenTaskId || "").trim();
+    const fingerprint = String(candidate?.__mangosteenSubmissionFingerprint || "").trim();
+    const settings = imagePlugin?.settings;
+    const taskCollections = [
+      Array.isArray(settings?.imageTasks) ? settings.imageTasks : null,
+      Array.isArray(imagePlugin?.imageTasks) ? imagePlugin.imageTasks : null,
+    ].filter(Boolean);
+    const task = taskCollections.flat().find((item) => String(item?.id || "") === taskId);
+    const persist = typeof imagePlugin?.saveSettings === "function"
+      ? () => imagePlugin.saveSettings()
+      : null;
+    const upgradeError = (detail, cause = null) => {
+      const error = new Error(`山竹生图版本过旧，兼容保存无法可靠终结原任务（${detail}）。请升级山竹生图后重试。`);
+      error.code = "IMAGE_PLUGIN_UPGRADE_REQUIRED";
+      if (cause) error.cause = cause;
+      return error;
+    };
+    if (!taskId || !task || !persist) {
+      throw upgradeError(!taskId ? "缺少任务编号" : !task ? "找不到对应任务记录" : "缺少持久化接口");
+    }
+    return async () => {
+      Object.assign(task, {
+        status: "completed",
+        progress: 100,
+        saved: true,
+        imagePaths: [vaultPath],
+        localPath: vaultPath,
+        destinationPath: vaultPath,
+      });
+      try {
+        await persist();
+      } catch (error) {
+        throw upgradeError("任务完成状态无法持久化", error);
+      }
+
+      if (!fingerprint) return task;
+      try {
+        if (typeof imagePlugin.reconcileImageSubmission === "function") {
+          await imagePlugin.reconcileImageSubmission(fingerprint);
+        } else if (Array.isArray(settings?.submissionMarkers)) {
+          settings.submissionMarkers = settings.submissionMarkers.filter((item) => item?.fingerprint !== fingerprint);
+          await persist();
+        }
+      } catch (error) {
+        throw upgradeError("提交标记无法核销", error);
+      }
+      return task;
+    };
   }
 
   localImage(vaultPath) {
@@ -2325,6 +2380,18 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       const videoPath = versionSixArtifacts?.video
         || paths.folder + "/03-视频片段/镜头-" + shot.id + "-" + core.safeSegment(shot.title) + ".mp4";
       const previousArtifactState = this.projectShotArtifactState(submittedShot);
+      const validatedRecoveryFingerprint = paths.isV6
+        && String(submittedShot?.videoTaskId || "") === recoveryTaskId
+        && String(submittedShot?.videoTaskPlanId || "") === String(context.planId || "")
+        && String(submittedShot?.videoTaskFingerprint || "").trim()
+        ? String(submittedShot.videoTaskFingerprint).trim()
+        : "";
+      const persistedVideoTask = (video.settings?.videoTasks || [])
+        .find((item) => String(item?.id || "") === recoveryTaskId);
+      const targetAlreadyLanded = paths.isV6
+        && persistedVideoTask?.status === "completed"
+        && persistedVideoTask.localPath === videoPath
+        && this.projectFileExists(paths.folder, videoPath);
       this.updateProjectShot(paths.folder, shot.id, {
         status: "正在恢复并查询已有视频任务",
         videoTaskId: recoveryTaskId,
@@ -2338,20 +2405,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         paidTaskSubmitted: true,
       });
       try {
-        const { savedVideoPath } = await this.withArchivedProjectArtifact({
-          projectFolder: paths.folder,
-          shotId: shot.id,
-          kind: "shot-video",
-          enabled: paths.isV6,
-          restoreState: () => this.updateProjectShot(paths.folder, shot.id, previousArtifactState),
-        }, async () => {
-          const completedTask = await this.waitForVideo(video, recoveryTaskId, 45 * 60 * 1000, (progress) => report({
-            status: "video-processing",
-            stage: "provider-generation",
-            taskId: recoveryTaskId,
-            paidTaskSubmitted: true,
-            ...progress,
-          }), paths.isV6 ? videoPath : "");
+        const finalizeRecoveredTask = async (completedTask) => {
           await report({
             status: "saving",
             stage: "saving",
@@ -2373,11 +2427,30 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
             error: "",
             videoTaskStatus: "completed",
             videoTaskCompletedAt: new Date().toISOString(),
+            ...(validatedRecoveryFingerprint ? { generationFingerprint: validatedRecoveryFingerprint } : {}),
           });
           return { completed: completedTask, savedVideoPath: savedPath };
-        });
+        };
+        const recovered = targetAlreadyLanded
+          ? await finalizeRecoveredTask(persistedVideoTask)
+          : await this.withArchivedProjectArtifact({
+            projectFolder: paths.folder,
+            shotId: shot.id,
+            kind: "shot-video",
+            enabled: paths.isV6,
+            restoreState: () => this.updateProjectShot(paths.folder, shot.id, previousArtifactState),
+          }, async () => {
+            const completedTask = await this.waitForVideo(video, recoveryTaskId, 45 * 60 * 1000, (progress) => report({
+              status: "video-processing",
+              stage: "provider-generation",
+              taskId: recoveryTaskId,
+              paidTaskSubmitted: true,
+              ...progress,
+            }), paths.isV6 ? videoPath : "");
+            return finalizeRecoveredTask(completedTask);
+          });
         return {
-          videoPath: savedVideoPath,
+          videoPath: recovered.savedVideoPath,
           ...(submittedShot?.firstImagePath ? { firstImagePath: submittedShot.firstImagePath } : {}),
           ...(submittedShot?.lastImagePath ? { lastImagePath: submittedShot.lastImagePath } : {}),
         };
