@@ -1,134 +1,95 @@
 const assert = require("assert");
-const crypto = require("crypto");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-const { createSafeMigrationFs } = require("../../migration-safe-fs.cjs");
-const sha256 = (value) => crypto.createHash("sha256").update(value).digest("hex");
+const {
+  MIGRATION_SAFE_FS_UNAVAILABLE,
+  createSafeMigrationFs,
+} = require("../../migration-safe-fs.cjs");
 
 function fixture() {
   const vault = fs.mkdtempSync(path.join(os.tmpdir(), "mangosteen-safe-fs-vault-"));
   const outside = fs.mkdtempSync(path.join(os.tmpdir(), "mangosteen-safe-fs-outside-"));
   fs.mkdirSync(path.join(vault, "source"));
+  fs.mkdirSync(path.join(vault, "preview"));
   fs.mkdirSync(path.join(vault, "target"));
   fs.mkdirSync(path.join(vault, "journal"));
-  fs.writeFileSync(path.join(vault, "source/input.bin"), "inside bytes");
-  fs.writeFileSync(path.join(outside, "input.bin"), "outside secret");
+  fs.writeFileSync(path.join(vault, "preview/item.bin"), "preview bytes");
+  fs.writeFileSync(path.join(outside, "sentinel.bin"), "outside sentinel");
+  // A hardlink defeats checks that trust an inode comparison after reopening by path.
+  fs.linkSync(path.join(outside, "sentinel.bin"), path.join(vault, "source/sentinel.bin"));
   return { vault, outside };
 }
 
-function replaceParentWithOutside(vault, outside, relativeParent) {
-  const parent = path.join(vault, relativeParent);
-  fs.renameSync(parent, `${parent}-original`);
-  fs.symlinkSync(outside, parent, "dir");
-}
-
-function assertOutsideUntouched(outside, expected = ["input.bin"]) {
-  assert.deepStrictEqual(fs.readdirSync(outside).sort(), expected.slice().sort());
-  assert.strictEqual(fs.readFileSync(path.join(outside, "input.bin"), "utf8"), "outside secret");
+function assertOutsideUntouched(outside) {
+  assert.deepStrictEqual(fs.readdirSync(outside), ["sentinel.bin"]);
+  assert.strictEqual(fs.readFileSync(path.join(outside, "sentinel.bin"), "utf8"), "outside sentinel");
 }
 
 (() => {
-  const normal = fixture();
-  const safe = createSafeMigrationFs({ vaultRoot: normal.vault });
-  const expected = { size: Buffer.byteLength("inside bytes"), sha256: sha256("inside bytes") };
-  assert.strictEqual(safe.hashVerified("source/input.bin", expected), expected.sha256);
-  safe.copyVerified("source/input.bin", "target/copied.bin", expected);
-  assert.strictEqual(fs.readFileSync(path.join(normal.vault, "target/copied.bin"), "utf8"), "inside bytes");
-  safe.writeExclusive("target/new.json", Buffer.from("{}\n"), { sha256: sha256("{}\n") });
-  safe.appendJournalRecord("journal/migration.jsonl", { type: "test-journal", planId: "p1", state: "forward" }, (value) => value.type === "test-journal" && value.planId === "p1");
-  safe.appendJournalRecord("journal/migration.jsonl", { type: "test-journal", planId: "p1", state: "completed" }, (value) => value.type === "test-journal" && value.planId === "p1");
-  assert.strictEqual(safe.readLastJournalRecord("journal/migration.jsonl").state, "completed");
-  const owned = safe.createOwnedExclusive("target/maintenance.lock", { token: "one", state: "active" });
-  assert.strictEqual(safe.readOwnedJson(owned).token, "one");
-  safe.writeOwnedJson(owned, { token: "one", state: "released" });
-  assert.strictEqual(safe.readOwnedJson(owned).state, "released");
-  safe.closeOwned(owned);
+  const raced = fixture();
+  const safe = createSafeMigrationFs({ vaultRoot: raced.vault });
+  assert.deepStrictEqual(safe.capability, {
+    available: false,
+    code: MIGRATION_SAFE_FS_UNAVAILABLE,
+    reason: "当前 Obsidian Node 运行时没有经过验证的 descriptor-relative openat/*at 文件系统能力；迁移仅可预览，不能执行。",
+  });
+  const preview = safe.previewManifest("preview");
+  assert.deepStrictEqual(preview, [{
+    relativePath: "item.bin",
+    sha256: preview[0].sha256,
+    size: Buffer.byteLength("preview bytes"),
+    type: "file",
+  }]);
 
-  for (const attack of [
-    {
-      name: "source read",
-      operation: "open-read",
-      path: "source/input.bin",
-      parent: "source",
-      run: (guarded) => guarded.hashVerified("source/input.bin", expected),
-    },
-    {
-      name: "destination write",
-      operation: "open-write",
-      path: "target/new.bin",
-      parent: "target",
-      run: (guarded) => guarded.writeExclusive("target/new.bin", Buffer.from("new"), { sha256: sha256("new") }),
-    },
-    {
-      name: "copy destination",
-      operation: "open-write",
-      path: "target/copied.bin",
-      parent: "target",
-      run: (guarded) => guarded.copyVerified("source/input.bin", "target/copied.bin", expected),
-    },
-    {
-      name: "copy source",
-      operation: "open-read",
-      path: "source/input.bin",
-      parent: "source",
-      run: (guarded) => guarded.copyVerified("source/input.bin", "target/copied.bin", expected),
-    },
-    {
-      name: "recursive manifest",
-      operation: "readdir",
-      path: "source",
-      parent: "source",
-      run: (guarded) => guarded.manifest("source"),
-    },
-    {
-      name: "parent creation",
-      operation: "mkdir",
-      path: "target/new-parent",
-      parent: "target",
-      run: (guarded) => guarded.writeExclusive("target/new-parent/new.bin", Buffer.from("new"), { sha256: sha256("new") }),
-    },
-    {
-      name: "journal append",
-      operation: "open-append",
-      path: "journal/migration.jsonl",
-      parent: "journal",
-      run: (guarded) => guarded.appendJournalRecord("journal/migration.jsonl", { type: "test-journal", planId: "p1", state: "forward" }, () => true),
-    },
+  // Simulate a parent swap after the last path validation. The production facade
+  // must reject before journal/copy/settings/bundle work instead of reopening paths.
+  fs.lstatSync(path.join(raced.vault, "source/sentinel.bin"));
+  fs.renameSync(path.join(raced.vault, "source"), path.join(raced.vault, "source-original"));
+  fs.symlinkSync(raced.outside, path.join(raced.vault, "source"), "dir");
+  const settings = { confirmed: false };
+  for (const run of [
+    () => safe.hashVerified("source/sentinel.bin", {}),
+    () => safe.copyVerified("source/sentinel.bin", "target/copy.bin", {}),
+    () => safe.writeExclusive("target/bundle.json", Buffer.from("{}"), {}),
+    () => safe.appendJournalRecord("journal/migration.jsonl", { state: "forward" }, () => true),
+    () => safe.createOwnedExclusive("target/maintenance.lock", { token: "one" }),
   ]) {
-    const attacked = fixture();
-    let injected = false;
-    const guarded = createSafeMigrationFs({
-      vaultRoot: attacked.vault,
-      beforeFileOp(event) {
-        if (!injected && event.type === attack.operation && event.path === attack.path) {
-          injected = true;
-          replaceParentWithOutside(attacked.vault, attacked.outside, attack.parent);
-        }
-      },
-    });
-    assert.throws(() => attack.run(guarded), /符号链接|超出|不安全|替换/, `${attack.name} must fail closed`);
-    assert.strictEqual(injected, true, `${attack.name} fault was not injected`);
-    assertOutsideUntouched(attacked.outside);
+    assert.throws(run, (error) => error?.code === MIGRATION_SAFE_FS_UNAVAILABLE);
   }
+  assert.deepStrictEqual(settings, { confirmed: false });
+  assert.deepStrictEqual(fs.readdirSync(path.join(raced.vault, "target")), []);
+  assert.deepStrictEqual(fs.readdirSync(path.join(raced.vault, "journal")), []);
+  assertOutsideUntouched(raced.outside);
 
-  const unrelated = fixture();
-  fs.writeFileSync(path.join(unrelated.vault, "journal/migration.jsonl"), "user note");
-  const protectedJournal = createSafeMigrationFs({ vaultRoot: unrelated.vault });
+  const calls = [];
+  const primitive = {
+    apiVersion: 1,
+    name: "test-openat",
+    vetted: true,
+    createSession({ vaultRoot }) {
+      calls.push(["session", vaultRoot]);
+      return Object.fromEntries([
+        "appendJournalRecord", "closeOwned", "copyVerified", "createOwnedExclusive",
+        "hashVerified", "manifest", "readLastJournalRecord", "readOwnedJson",
+        "writeOwnedJson", "writeExclusive",
+      ].map((name) => [name, (...args) => {
+        calls.push([name, ...args]);
+        return name === "hashVerified" ? "hash" : name === "manifest" ? [] : undefined;
+      }]));
+    },
+  };
+  const injected = createSafeMigrationFs({ vaultRoot: raced.vault, descriptorRelativeFs: primitive });
+  assert.strictEqual(injected.capability.available, true);
+  assert.strictEqual(injected.capability.name, "test-openat");
+  assert.strictEqual(injected.hashVerified("source-original/sentinel.bin", {}), "hash");
+  injected.writeExclusive("target/injected.bin", Buffer.from("x"), {});
+  assert.deepStrictEqual(calls.map((entry) => entry[0]), ["session", "hashVerified", "writeExclusive"]);
+
   assert.throws(
-    () => protectedJournal.appendJournalRecord("journal/migration.jsonl", { type: "test-journal", planId: "p1" }, () => true),
-    /不可读|无关|journal/,
+    () => createSafeMigrationFs({ vaultRoot: raced.vault, descriptorRelativeFs: { name: "broken", vetted: true, apiVersion: 1, createSession: () => ({}) } }),
+    /不完整/,
   );
-  assert.strictEqual(fs.readFileSync(path.join(unrelated.vault, "journal/migration.jsonl"), "utf8"), "user note");
-
-  const ownedAttack = fixture();
-  const ownedSafe = createSafeMigrationFs({ vaultRoot: ownedAttack.vault });
-  const ownedLock = ownedSafe.createOwnedExclusive("target/maintenance.lock", { token: "one", state: "active" });
-  replaceParentWithOutside(ownedAttack.vault, ownedAttack.outside, "target");
-  assert.throws(() => ownedSafe.readOwnedJson(ownedLock), /符号链接|替换|不安全/);
-  ownedSafe.closeOwned(ownedLock);
-  assertOutsideUntouched(ownedAttack.outside);
-
   console.log("migration-safe-fs: ok");
 })();

@@ -4,11 +4,79 @@ const fs = require("fs");
 const Module = require("module");
 const os = require("os");
 const path = require("path");
+const { createSafeMigrationFs } = require("../../migration-safe-fs.cjs");
 
 const sha256 = (value) => crypto.createHash("sha256").update(value).digest("hex");
 const folder = "山竹视频复刻/旧项目";
 const firstFrame = `${folder}/02-分镜脚本/镜头-001-开场-首帧.png`;
 const video = `${folder}/03-视频片段/镜头-001-开场.mp4`;
+
+function testDescriptorRelativeFs() {
+  return {
+    apiVersion: 1,
+    name: "test-only-openat",
+    vetted: true,
+    createSession({ vaultRoot }) {
+      const resolve = (relative, createParents = false) => {
+        const parts = String(relative).split("/");
+        if (!relative || parts.some((part) => !part || part === "." || part === "..")) throw new Error("test path unsafe");
+        const target = path.resolve(vaultRoot, ...parts);
+        if (path.relative(vaultRoot, target).startsWith("..")) throw new Error("test path outside root");
+        if (createParents) fs.mkdirSync(path.dirname(target), { recursive: true });
+        for (let current = path.dirname(target); current !== vaultRoot; current = path.dirname(current)) {
+          if (fs.lstatSync(current, { throwIfNoEntry: false })?.isSymbolicLink()) throw new Error("测试路径包含符号链接，不安全");
+        }
+        return target;
+      };
+      const parseLast = (text) => {
+        const trimmed = String(text || "").trim();
+        if (!trimmed) return null;
+        const lines = trimmed.split(/\r?\n/);
+        for (let index = lines.length - 1; index >= 0; index -= 1) {
+          try { return JSON.parse(lines[index]); } catch (_) {}
+        }
+        throw new Error("journal JSON 不可读");
+      };
+      const hashVerified = (relative, expected = {}) => {
+        const bytes = fs.readFileSync(resolve(relative));
+        const digest = sha256(bytes);
+        if (expected.size !== undefined && expected.size !== bytes.length) throw new Error("size mismatch");
+        if (expected.sha256 && expected.sha256 !== digest) throw new Error("hash mismatch");
+        return digest;
+      };
+      return {
+        appendJournalRecord(relative, value, validateExisting) {
+          const target = resolve(relative, true);
+          const existing = fs.lstatSync(target, { throwIfNoEntry: false }) ? parseLast(fs.readFileSync(target, "utf8")) : null;
+          if (existing && !validateExisting?.(existing)) throw new Error("journal 被无关文件占用");
+          fs.appendFileSync(target, `${JSON.stringify(value)}\n`, { flag: existing ? "a" : "wx" });
+        },
+        closeOwned() {},
+        copyVerified(from, to, expected) {
+          const source = fs.readFileSync(resolve(from));
+          hashVerified(from, expected);
+          fs.writeFileSync(resolve(to, true), source, { flag: "wx" });
+          return { size: source.length, sha256: sha256(source) };
+        },
+        createOwnedExclusive(relative, value) {
+          const absolutePath = resolve(relative, true);
+          fs.writeFileSync(absolutePath, `${JSON.stringify(value)}\n`, { flag: "wx" });
+          return { absolutePath, relativePath: relative };
+        },
+        hashVerified,
+        manifest() { return []; },
+        readLastJournalRecord(relative) { return parseLast(fs.readFileSync(resolve(relative), "utf8")); },
+        readOwnedJson(handle) { return JSON.parse(fs.readFileSync(handle.absolutePath, "utf8")); },
+        writeOwnedJson(handle, value) { fs.writeFileSync(handle.absolutePath, `${JSON.stringify(value)}\n`); },
+        writeExclusive(relative, value, expected = {}) {
+          const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value);
+          if (expected.sha256 && expected.sha256 !== sha256(bytes)) throw new Error("hash mismatch");
+          fs.writeFileSync(resolve(relative, true), bytes, { flag: "wx" });
+        },
+      };
+    },
+  };
+}
 
 function fixture(overrides = {}) {
   const contents = {
@@ -380,6 +448,7 @@ function memoryAdapters(initial, options = {}) {
     assert.ok(confirmationText.includes(value), `confirmation preview must include ${value}`);
   }
   assert.match(confirmationText, /保留原目录.*不移动.*不删除/);
+  assert.match(confirmationText, /MIGRATION_SAFE_FS_UNAVAILABLE/);
   plugin.previewCurrentProjectMigration = () => ({ ...plan, blocked: true, reasons: ["active paid task"], counts: { ...plan.counts, blocked: 1 } });
   plugin.confirmMigrationPlan = () => { throw new Error("blocked plan must not ask for confirmation"); };
   await command.callback();
@@ -392,6 +461,15 @@ function memoryAdapters(initial, options = {}) {
   plugin.confirmMigrationPlan = () => true;
   await command.callback();
   assert.strictEqual(executions, 0, "the command must revalidate paid-work blockers after confirmation");
+  plugin.previewCurrentProjectMigration = () => plan;
+  plugin.confirmMigrationPlan = () => true;
+  await command.callback();
+  assert.strictEqual(executions, 0, "production execution must fail closed before lock or migration work");
+  assert.ok(notices.some((message) => message.includes("MIGRATION_SAFE_FS_UNAVAILABLE")));
+  plugin.migrationSafeFs = createSafeMigrationFs({
+    vaultRoot: path.resolve(__dirname, "../../.."),
+    descriptorRelativeFs: testDescriptorRelativeFs(),
+  });
   const metadataOnlyFixture = fixture({
     project: { ...base.input.project, shots: [] },
     request: { ...base.input.request, shots: [] },
@@ -421,6 +499,8 @@ function memoryAdapters(initial, options = {}) {
     instance.queueRunnerLocks = new Map();
     instance.queueRunnerLockRequired = new Set();
     instance.processing = new Set();
+    instance.queueRuns = new Map();
+    instance.migrationSafeFs = createSafeMigrationFs({ vaultRoot: lockVault, descriptorRelativeFs: testDescriptorRelativeFs() });
   }
   const maintenanceFirst = pluginA.acquireProjectMaintenanceLock(folder);
   await assert.rejects(() => pluginB.previewWorkbenchGeneration(folder, ["001"]), /维护|迁移/);
@@ -486,6 +566,54 @@ function memoryAdapters(initial, options = {}) {
   assert.throws(() => pluginA.writeProjectMigrationJournal(folder, plan.journalPath, migration.createProjectMigrationJournal(plan)), /符号链接|不安全/);
   fs.rmSync(outsideProjectJournal, { recursive: true, force: true });
   fs.rmSync(lockVault, { recursive: true, force: true });
+
+  const cacheVault = fs.mkdtempSync(path.join(os.tmpdir(), "mangosteen-layout-cache-"));
+  const cacheRoot = path.join(cacheVault, ...folder.split("/"));
+  fs.mkdirSync(path.join(cacheRoot, ".work"), { recursive: true });
+  const queueRequest = {
+    version: 3,
+    confirmed: false,
+    character: { id: "hero", prompt: "same hero", voiceProfile: "clear voice" },
+    products: [],
+    scenes: [{ id: "room", prompt: "same room" }],
+    settings: { imageModel: "image-model", videoModel: "MiniMax-H3", ratio: "9:16", resolution: "768p" },
+    shots: [{ id: "001", title: "shot", sceneId: "room", productIds: [], duration: 4, dialogue: "hello", imagePrompt: "hero", videoPrompt: "wave" }],
+  };
+  fs.writeFileSync(path.join(cacheRoot, "project.json"), JSON.stringify({ ...base.input.project, folder }));
+  fs.writeFileSync(path.join(cacheRoot, "generation-request.json"), JSON.stringify(queueRequest));
+  const cachePlugin = new ReplicaPlugin();
+  cachePlugin.instanceId = "cache-instance";
+  cachePlugin.app = { vault: { adapter: { getBasePath: () => cacheVault }, on: () => ({}) }, workspace: { getLeavesOfType: () => [] }, plugins: { getPlugin: () => null } };
+  cachePlugin.queueApis = new Map();
+  cachePlugin.activeQueueObjects = new Map();
+  cachePlugin.queueRuns = new Map();
+  cachePlugin.queueRunnerLocks = new Map();
+  cachePlugin.queueRunnerLockRequired = new Set();
+  cachePlugin.processing = new Set();
+  cachePlugin.requestWorkbenchRefresh = () => {};
+  cachePlugin.migrationSafeFs = createSafeMigrationFs({ vaultRoot: cacheVault, descriptorRelativeFs: testDescriptorRelativeFs() });
+  const legacyApi = cachePlugin.workbenchQueueApi(folder);
+  assert.strictEqual(legacyApi.__mangosteenLayoutVersion, "legacy");
+  fs.mkdirSync(path.join(cacheRoot, ".mangosteen"), { recursive: true });
+  fs.writeFileSync(path.join(cacheRoot, ".mangosteen/project.json"), JSON.stringify({ ...base.input.project, folder, schemaVersion: 6 }));
+  fs.writeFileSync(path.join(cacheRoot, ".mangosteen/draft.json"), JSON.stringify(queueRequest));
+  const realExecuteProjectMigration = migration.executeProjectMigration;
+  migration.executeProjectMigration = async () => ({ state: "completed" });
+  try {
+    await ReplicaPlugin.prototype.executeCurrentProjectMigration.call(cachePlugin, { projectFolder: folder }, { token: "test" });
+  } finally {
+    migration.executeProjectMigration = realExecuteProjectMigration;
+  }
+  assert.strictEqual(cachePlugin.queueApis.has(folder), false, "successful v6 activation must invalidate the legacy queue API closure");
+  assert.throws(() => legacyApi.preview(queueRequest, ["001"]), /布局已变化|已失效/, "a caller holding the old legacy closure must not use it after activation");
+  const v6Api = cachePlugin.workbenchQueueApi(folder);
+  assert.notStrictEqual(v6Api, legacyApi);
+  assert.strictEqual(v6Api.__mangosteenLayoutVersion, "v6");
+  const queuePlan = v6Api.preview(queueRequest, ["001"]);
+  await v6Api.enqueue(v6Api.confirm(queuePlan, queueRequest));
+  assert.ok(fs.existsSync(path.join(cacheRoot, ".mangosteen/active-run.json")), "next queue write must use the v6 active-run path");
+  assert.strictEqual(fs.existsSync(path.join(cacheRoot, ".work/generation-queue.json")), false, "a legacy cache must never write the old .work queue after activation");
+  fs.rmSync(cacheVault, { recursive: true, force: true });
   global.window = originalWindow;
 
   console.log("project-migration: ok");

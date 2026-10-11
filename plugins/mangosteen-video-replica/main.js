@@ -875,17 +875,34 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
 
   workbenchQueueApi(folder, activeQueueOverride = null) {
     const paths = this.workbenchProjectPaths(folder, { createWorkDirectory: true });
+    const layoutVersion = paths.isV6 ? "v6" : "legacy";
     const existing = this.queueApis.get(paths.folder);
-    if (existing) return existing;
+    if (existing?.__mangosteenLayoutVersion === layoutVersion) return existing;
+    if (existing) {
+      existing.__mangosteenInvalidated = true;
+      this.queueApis.delete(paths.folder);
+      this.activeQueueObjects.delete(paths.folder);
+      this.queueRuns.delete(paths.folder);
+    }
     const activeQueue = activeQueueOverride || this.currentWorkbenchQueue(paths.folder);
     const activeQueues = runState.isRunActive(activeQueue)
       ? [activeQueue]
       : [];
     if (activeQueues.length) this.activeQueueObjects.set(paths.folder, activeQueue);
+    const assertLayoutCurrent = () => {
+      const currentLayout = this.workbenchProjectPaths(paths.folder).isV6 ? "v6" : "legacy";
+      if (api.__mangosteenInvalidated || currentLayout !== layoutVersion) {
+        api.__mangosteenInvalidated = true;
+        throw new Error("项目存储布局已变化，旧队列接口已失效；请重新操作。");
+      }
+      return true;
+    };
     const api = replicaLogicApi.createReplicaLogicApi({
       activeQueues,
       saveQueue: async (queue, saveOptions = {}) => {
+        assertLayoutCurrent();
         const persistQueue = async () => {
+          assertLayoutCurrent();
           const queueId = String(queue?.queueId || "");
           if (this.queueRunnerLockRequired.has(queueId)) {
             const runnerLock = this.queueRunnerLocks.get(queueId);
@@ -912,7 +929,9 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
           : persistQueue();
       },
       saveStop: async (queue) => {
+        assertLayoutCurrent();
         const persistStop = async () => {
+          assertLayoutCurrent();
           const persisted = this.currentWorkbenchQueue(paths.folder);
           if (!persisted && paths.isV6) {
             const runId = String(queue.runId || queue.queueId || "");
@@ -940,6 +959,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         return this.withWorkbenchSubmissionGate(paths.folder, persistStop);
       },
       isStopRequested: async ({ queueId, runId }) => {
+        assertLayoutCurrent();
         const expectedId = String(runId || queueId || "");
         const pending = paths.isV6 ? this.readOptionalJson(paths.pendingStopPath) : null;
         if (pending && String(pending.runId || pending.queueId || "") === expectedId) return true;
@@ -950,19 +970,43 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         }
         return persisted.stopRequested === true;
       },
-      withPaidSubmissionGate: async (identity, operation) => this.withWorkbenchPaidSubmissionGate(paths.folder, identity, operation),
-      runShot: async (shot, context) => this.runWorkbenchQueueShot(paths.folder, shot, context),
+      withPaidSubmissionGate: async (identity, operation) => {
+        assertLayoutCurrent();
+        return this.withWorkbenchPaidSubmissionGate(paths.folder, identity, operation);
+      },
+      runShot: async (shot, context) => {
+        assertLayoutCurrent();
+        return this.runWorkbenchQueueShot(paths.folder, shot, context);
+      },
     });
     for (const methodName of ["preview", "enqueue", "append"]) {
       const method = api[methodName];
       if (typeof method !== "function") continue;
       api[methodName] = (...args) => {
+        assertLayoutCurrent();
         this.assertNoProjectMaintenanceLock(paths.folder);
         return method(...args);
       };
     }
+    Object.defineProperty(api, "__mangosteenLayoutVersion", { value: layoutVersion });
+    Object.defineProperty(api, "__mangosteenInvalidated", { value: false, writable: true });
     this.queueApis.set(paths.folder, api);
     return api;
+  }
+
+  invalidateWorkbenchLayoutCaches(folder) {
+    const normalized = this.workbenchProjectPaths(folder).folder;
+    const queueApi = this.queueApis.get(normalized);
+    if (queueApi) queueApi.__mangosteenInvalidated = true;
+    this.queueApis.delete(normalized);
+    this.activeQueueObjects.delete(normalized);
+    this.queueRuns.delete(normalized);
+    for (const [queueId, lock] of this.queueRunnerLocks.entries()) {
+      if (lock?.folder !== normalized) continue;
+      if (lock.heartbeat) clearInterval(lock.heartbeat);
+      this.queueRunnerLocks.delete(queueId);
+      this.queueRunnerLockRequired.delete(queueId);
+    }
   }
 
   async acquireWorkbenchSubmissionGate(folder, {
@@ -1647,9 +1691,9 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       if (!videoModel) throw this.unavailableGenerationModel("video", requestedVideoModel, catalog?.videoModels || []);
       const selection = { imageModel, videoModel };
       request.settings = Object.assign({}, request.settings, selection);
-      request.confirmed = true;
       this.assertWorkbenchQueueLockOwned(confirmationGate);
       this.assertNoProjectMaintenanceLock(paths.folder);
+      request.confirmed = true;
       writeJson(paths.requestPath, request);
       this.requestWorkbenchRefresh();
       confirmedRequest = request;
@@ -1702,8 +1746,8 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
   hasProjectMaintenanceLock(folder) {
     const relativePath = projectMigration.projectMaintenanceLockPath(folder);
     try {
-      const payload = this.migrationFs().readLastJournalRecord(relativePath);
-      return payload?.state !== "released";
+      const payload = this.migrationFs().previewReadLastJournalRecord(relativePath);
+      return Boolean(payload && payload.state !== "released");
     } catch (error) {
       if (error?.code === "ENOENT") return false;
       throw new Error(`项目维护锁不可读或路径不安全，已停止生成和迁移：${String(error?.message || error)}`);
@@ -1808,7 +1852,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     const name = names[0];
     if (!name) return null;
     const journalPath = `${this.workbenchProjectPaths(folder).folder}/.mangosteen/history/${name}`;
-    const journal = this.migrationFs().readLastJournalRecord(journalPath);
+    const journal = this.migrationFs().previewReadLastJournalRecord(journalPath);
     if (["completed", "rolled-back"].includes(String(journal?.state || ""))) return null;
     if (!journal?.planSnapshot || journal.planId !== journal.planSnapshot.planId
         || projectMigration.projectMigrationPlanId(journal.planSnapshot) !== journal.planId) {
@@ -1847,7 +1891,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
 
   projectMigrationFiles(folder) {
     const checked = this.checkedWorkbenchProjectFolder(folder);
-    const manifest = this.migrationFs().manifest(checked.folder) || [];
+    const manifest = this.migrationFs().previewManifest(checked.folder) || [];
     return manifest.map((item) => ({ ...item, path: `${checked.folder}/${item.relativePath}` }));
   }
 
@@ -1882,6 +1926,8 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
   }
 
   migrationPlanText(plan, title) {
+    const capability = this.migrationFs().capability;
+    const execution = capability.available ? `执行状态：可用（${capability.name}）` : `执行状态：不可用（${capability.code}）— ${capability.reason}`;
     return [
       title,
       `目标复制：${plan.counts.files} 个文件，${plan.counts.bytes} 字节`,
@@ -1893,6 +1939,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       `备份：${plan.backupPath}`,
       "源处理：保留原目录；仅记录 cleanupPending，不移动、不删除。",
       "确认后才会执行；不会永久删除旧文件。",
+      execution,
     ].join("\n");
   }
 
@@ -1920,6 +1967,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
   }
 
   async executeCurrentProjectMigration(plan, maintenanceLock) {
+    this.migrationFs().assertExecutionAvailable();
     const folder = plan.projectFolder;
     const journal = await projectMigration.executeProjectMigration({
       plan,
@@ -1934,6 +1982,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       },
       assertMaintenanceOwned: async () => this.assertProjectMaintenanceLockOwned(maintenanceLock),
     });
+    if (journal?.state === "completed") this.invalidateWorkbenchLayoutCaches(folder);
     this.requestWorkbenchRefresh();
     return journal;
   }
@@ -1952,6 +2001,10 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         return false;
       }
       if (!this.confirmMigrationPlan(this.migrationPlanText(plan, "整理当前视频复刻项目"))) return false;
+      if (!this.migrationFs().capability.available) {
+        new Notice(`${migrationSafeFs.MIGRATION_SAFE_FS_UNAVAILABLE}：${this.migrationFs().capability.reason}`, 10000);
+        return false;
+      }
       maintenanceLock = this.acquireProjectMaintenanceLock(plan.projectFolder);
       this.assertProjectMaintenanceLockOwned(maintenanceLock);
       this.assertProjectGenerationIdle(plan.projectFolder);

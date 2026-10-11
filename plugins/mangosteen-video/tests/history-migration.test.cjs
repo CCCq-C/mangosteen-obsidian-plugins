@@ -306,6 +306,7 @@ function adapters(initial, options = {}) {
   assert.strictEqual(executions, 0);
   for (const value of [String(plan.counts.files), String(plan.counts.bytes), String(plan.counts.blocked), String(plan.counts.skipped), plan.destination, plan.backupPath]) assert.ok(previewText.includes(value));
   assert.match(previewText, /保留原位.*不移动.*不删除/);
+  assert.match(previewText, /MIGRATION_SAFE_FS_UNAVAILABLE/);
   plugin.previewVideoHistoryMigration = () => ({ ...plan, blocked: true, reasons: ["hash mismatch"], counts: { ...plan.counts, blocked: 1 } });
   plugin.confirmMigrationPlan = () => { throw new Error("blocked plan must not confirm"); };
   await command.callback();
@@ -318,12 +319,17 @@ function adapters(initial, options = {}) {
   plugin.confirmMigrationPlan = () => true;
   await command.callback();
   assert.strictEqual(executions, 0, "the command must revalidate task certainty after confirmation");
+  plugin.previewVideoHistoryMigration = () => plan;
+  plugin.confirmMigrationPlan = () => true;
+  await command.callback();
+  assert.strictEqual(executions, 0, "production migration must remain disabled without a vetted descriptor-relative primitive");
+  assert.ok(notices.some((message) => message.includes("MIGRATION_SAFE_FS_UNAVAILABLE")));
   const journalVault = fs.mkdtempSync(path.join(os.tmpdir(), "mangosteen-video-journal-"));
   plugin.app = { vault: { adapter: { getBasePath: () => journalVault } } };
   const journalTarget = path.join(journalVault, ...plan.journalPath.split("/"));
   fs.mkdirSync(path.dirname(journalTarget), { recursive: true });
   fs.writeFileSync(journalTarget, "unrelated note");
-  assert.throws(() => plugin.writeMigrationJournal(plan.journalPath, migration.createVideoHistoryJournal(plan)), /无关|占用|journal|JSON/);
+  assert.throws(() => plugin.writeMigrationJournal(plan.journalPath, migration.createVideoHistoryJournal(plan)), /MIGRATION_SAFE_FS_UNAVAILABLE/);
   assert.strictEqual(fs.readFileSync(journalTarget, "utf8"), "unrelated note");
   fs.mkdirSync(path.join(journalVault, "notes"), { recursive: true });
   fs.writeFileSync(path.join(journalVault, "notes/project.md"), "keep project note");
@@ -333,7 +339,7 @@ function adapters(initial, options = {}) {
   const outsideJournal = fs.mkdtempSync(path.join(os.tmpdir(), "mangosteen-video-journal-outside-"));
   fs.mkdirSync(path.join(journalVault, ".mangosteen-video"), { recursive: true });
   fs.symlinkSync(outsideJournal, path.join(journalVault, ".mangosteen-video/migration-journal"));
-  assert.throws(() => plugin.writeMigrationJournal(plan.journalPath, migration.createVideoHistoryJournal(plan)), /符号链接|不安全/);
+  assert.throws(() => plugin.writeMigrationJournal(plan.journalPath, migration.createVideoHistoryJournal(plan)), /MIGRATION_SAFE_FS_UNAVAILABLE/);
   fs.rmSync(outsideJournal, { recursive: true, force: true });
   fs.rmSync(journalVault, { recursive: true, force: true });
   global.window = originalWindow;

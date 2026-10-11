@@ -11,30 +11,128 @@ fi
 
 vault_path="${1:-$DEFAULT_VAULT}"
 plugin_root="$vault_path/.obsidian/plugins"
-
-if [[ ! -d "$plugin_root" ]]; then
-  printf 'Refusing to sync: target is missing .obsidian/plugins: %s\n' "$vault_path" >&2
-  exit 1
-fi
-
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "$script_dir/.." && pwd)"
 
-# Shared migration primitives live beside plugin folders so every migration uses
-# the same descriptor-based, no-follow implementation.
-cp -- "$repo_root/plugins/migration-safe-fs.cjs" "$plugin_root/migration-safe-fs.cjs"
+fail_sync() {
+  printf 'Refusing to sync: %s\n' "$1" >&2
+  exit 1
+}
+
+assert_regular_directory() {
+  local candidate="$1"
+  [[ ! -L "$candidate" ]] || fail_sync "directory is a symbolic link: $candidate"
+  [[ -d "$candidate" ]] || fail_sync "directory is missing or not regular: $candidate"
+}
+
+assert_directory_chain() {
+  local base="$1"
+  local target="$2"
+  local relative current component
+  assert_regular_directory "$base"
+  [[ "$target" == "$base" || "$target" == "$base/"* ]] || fail_sync "directory escapes plugin root: $target"
+  relative="${target#"$base"}"
+  relative="${relative#/}"
+  [[ -n "$relative" ]] || return 0
+  current="$base"
+  IFS='/' read -r -a components <<< "$relative"
+  for component in "${components[@]}"; do
+    [[ -n "$component" && "$component" != "." && "$component" != ".." ]] || continue
+    current="$current/$component"
+    assert_regular_directory "$current"
+  done
+}
+
+ensure_directory_chain() {
+  local base="$1"
+  local target="$2"
+  local relative current component
+  assert_regular_directory "$base"
+  [[ "$target" == "$base" || "$target" == "$base/"* ]] || fail_sync "directory escapes plugin root: $target"
+  relative="${target#"$base"}"
+  relative="${relative#/}"
+  [[ -n "$relative" ]] || return 0
+  current="$base"
+  IFS='/' read -r -a components <<< "$relative"
+  for component in "${components[@]}"; do
+    [[ -n "$component" && "$component" != "." && "$component" != ".." ]] || continue
+    current="$current/$component"
+    if [[ -e "$current" || -L "$current" ]]; then
+      assert_regular_directory "$current"
+    else
+      mkdir -- "$current"
+      assert_regular_directory "$current"
+    fi
+  done
+}
+
+path_identity() {
+  if stat -f '%d:%i' -- "$1" >/dev/null 2>&1; then
+    stat -f '%d:%i' -- "$1"
+  else
+    stat -c '%d:%i' -- "$1"
+  fi
+}
+
+safe_copy_file() {
+  local source="$1"
+  local destination="$2"
+  local parent parent_identity destination_identity="" temporary
+  [[ ! -L "$source" && -f "$source" ]] || fail_sync "source is not a regular non-symlink file: $source"
+  parent="$(dirname -- "$destination")"
+  assert_directory_chain "$plugin_root" "$parent"
+  parent_identity="$(path_identity "$parent")"
+  if [[ -e "$destination" || -L "$destination" ]]; then
+    [[ ! -L "$destination" && -f "$destination" ]] || fail_sync "destination is a symbolic link or non-regular file: $destination"
+    destination_identity="$(path_identity "$destination")"
+  fi
+
+  temporary="$(mktemp "$parent/.mangosteen-sync.XXXXXX")"
+  [[ ! -L "$temporary" && -f "$temporary" ]] || fail_sync "could not create a regular temporary file in: $parent"
+  if ! cp -- "$source" "$temporary"; then
+    rm -f -- "$temporary"
+    fail_sync "copy failed for: $destination"
+  fi
+  [[ ! -L "$temporary" && -f "$temporary" ]] || { rm -f -- "$temporary"; fail_sync "temporary file changed during copy: $temporary"; }
+  assert_directory_chain "$plugin_root" "$parent"
+  [[ "$(path_identity "$parent")" == "$parent_identity" ]] || { rm -f -- "$temporary"; fail_sync "destination parent changed during copy: $parent"; }
+
+  if [[ -n "$destination_identity" ]]; then
+    [[ ! -L "$destination" && -f "$destination" && "$(path_identity "$destination")" == "$destination_identity" ]] \
+      || { rm -f -- "$temporary"; fail_sync "destination changed during copy: $destination"; }
+    mv -f -- "$temporary" "$destination"
+  else
+    if ! ln -- "$temporary" "$destination"; then
+      rm -f -- "$temporary"
+      fail_sync "destination appeared during copy: $destination"
+    fi
+    rm -f -- "$temporary"
+  fi
+  [[ ! -L "$destination" && -f "$destination" ]] || fail_sync "destination is not a regular file after copy: $destination"
+}
+
+[[ ! -L "$vault_path" ]] || fail_sync "vault path is a symbolic link: $vault_path"
+assert_regular_directory "$vault_path"
+assert_regular_directory "$vault_path/.obsidian"
+assert_regular_directory "$plugin_root"
+
+# Shared migration runtime is copied with the same no-symlink contract as each
+# plugin target. Migration execution itself remains disabled unless the runtime
+# is given a vetted descriptor-relative openat/*at capability.
+safe_copy_file "$repo_root/plugins/migration-safe-fs.cjs" "$plugin_root/migration-safe-fs.cjs"
 
 copy_plugin_files() {
   local plugin="$1"
   shift
   local source_dir="$repo_root/plugins/$plugin"
   local target_dir="$plugin_root/$plugin"
-  local file
+  local file destination
 
-  mkdir -p -- "$target_dir"
+  ensure_directory_chain "$plugin_root" "$target_dir"
   for file in "$@"; do
-    mkdir -p -- "$(dirname -- "$target_dir/$file")"
-    cp -- "$source_dir/$file" "$target_dir/$file"
+    destination="$target_dir/$file"
+    ensure_directory_chain "$plugin_root" "$(dirname -- "$destination")"
+    safe_copy_file "$source_dir/$file" "$destination"
   done
 }
 
@@ -54,7 +152,9 @@ copy_plugin_files mangosteen-video-replica \
   tests/workbench-queue-plugin.test.cjs tests/shot-timeline.test.cjs tests/visual-style.test.cjs tests/project-migration.test.cjs
 
 agent_main="$plugin_root/mangosteen-agent/main.js"
-if [[ -f "$agent_main" ]]; then
+if [[ -e "$agent_main" || -L "$agent_main" ]]; then
+  assert_directory_chain "$plugin_root" "$(dirname -- "$agent_main")"
+  [[ ! -L "$agent_main" && -f "$agent_main" ]] || fail_sync "mangosteen-agent main.js is not a regular non-symlink file: $agent_main"
   node "$repo_root/scripts/patch-mangosteen-agent-structured-analysis.cjs" "$agent_main"
 else
   printf 'Warning: mangosteen-agent is not installed; video analysis will remain unavailable.\n' >&2

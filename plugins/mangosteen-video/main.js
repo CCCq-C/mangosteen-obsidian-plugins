@@ -1,7 +1,7 @@
 const { Plugin, Modal, Notice, requestUrl } = require("obsidian");
 const path = require("path");
 const fs = require("fs");
-const { createSafeMigrationFs } = require("../migration-safe-fs.cjs");
+const { MIGRATION_SAFE_FS_UNAVAILABLE, createSafeMigrationFs } = require("../migration-safe-fs.cjs");
 const historyMigration = require("./history-migration.cjs");
 const { normalizeVideoOutputTarget, standaloneVideoPath } = require("./output-storage.cjs");
 
@@ -338,9 +338,8 @@ module.exports = class MangosteenVideoPlugin extends Plugin {
   }
 
   migrationSafeFs() {
-    return createSafeMigrationFs({
+    return this._migrationSafeFs || createSafeMigrationFs({
       vaultRoot: this.app?.vault?.adapter?.getBasePath?.() || this.app?.vault?.adapter?.basePath || "",
-      beforeFileOp: this.migrationBeforeFileOp,
     });
   }
 
@@ -348,7 +347,7 @@ module.exports = class MangosteenVideoPlugin extends Plugin {
     const output = [];
     const safe = this.migrationSafeFs();
     for (const root of ["山竹视频", "山竹创作记录/视频", ".mangosteen-video/migration-backup"]) {
-      for (const item of safe.manifest(root) || []) output.push({ path: `${root}/${item.relativePath}`, size: item.size, sha256: item.sha256 });
+      for (const item of safe.previewManifest(root) || []) output.push({ path: `${root}/${item.relativePath}`, size: item.size, sha256: item.sha256 });
     }
     return output;
   }
@@ -356,10 +355,10 @@ module.exports = class MangosteenVideoPlugin extends Plugin {
   latestVideoHistoryMigrationJournal() {
     const relativeRoot = ".mangosteen-video/migration-journal";
     const safe = this.migrationSafeFs();
-    const name = (safe.manifest(relativeRoot) || []).map((item) => item.relativePath)
+    const name = (safe.previewManifest(relativeRoot) || []).map((item) => item.relativePath)
       .filter((item) => /^migration-\d{8}-\d{6}-\d{3}\.json$/.test(item)).sort().reverse()[0];
     if (!name) return null;
-    const journal = safe.readLastJournalRecord(`${relativeRoot}/${name}`);
+    const journal = safe.previewReadLastJournalRecord(`${relativeRoot}/${name}`);
     if (["completed", "rolled-back"].includes(String(journal?.state || ""))) return null;
     if (!journal?.planSnapshot || journal.planId !== journal.planSnapshot.planId
         || historyMigration.videoHistoryPlanId(journal.planSnapshot) !== journal.planId) throw new Error(`视频历史迁移 journal 与计划不一致：${name}`);
@@ -405,7 +404,9 @@ module.exports = class MangosteenVideoPlugin extends Plugin {
   }
 
   migrationPlanText(plan, title) {
-    return [title, `目标复制：${plan.counts.files} 个文件，${plan.counts.bytes} 字节`, `备份复制：${plan.counts.backupFiles} 个文件，${plan.counts.backupBytes} 字节`, `阻止项：${plan.counts.blocked}`, `跳过项：${plan.counts.skipped}`, `目标：${plan.destination}`, `备份：${plan.backupPath}`, "源目录处理：保留原位，不移动、不删除；完成后会记录 cleanupPending，后续清理必须另行确认。"].join("\n");
+    const capability = this.migrationSafeFs().capability;
+    const execution = capability.available ? `执行状态：可用（${capability.name}）` : `执行状态：不可用（${capability.code}）— ${capability.reason}`;
+    return [title, `目标复制：${plan.counts.files} 个文件，${plan.counts.bytes} 字节`, `备份复制：${plan.counts.backupFiles} 个文件，${plan.counts.backupBytes} 字节`, `阻止项：${plan.counts.blocked}`, `跳过项：${plan.counts.skipped}`, `目标：${plan.destination}`, `备份：${plan.backupPath}`, "源目录处理：保留原位，不移动、不删除；完成后会记录 cleanupPending，后续清理必须另行确认。", execution].join("\n");
   }
 
   writeMigrationJournal(vaultPath, value) {
@@ -445,6 +446,7 @@ module.exports = class MangosteenVideoPlugin extends Plugin {
 
   async executeVideoHistoryMigration(plan) {
     const safe = this.migrationSafeFs();
+    safe.assertExecutionAvailable();
     const result = await historyMigration.executeVideoHistoryMigration({
       plan,
       copy: async (from, to, expected) => safe.copyVerified(from, to, expected),
@@ -468,6 +470,10 @@ module.exports = class MangosteenVideoPlugin extends Plugin {
       if (!this.confirmMigrationPlan(this.migrationPlanText(plan, "整理山竹视频历史记录"))) return false;
       const current = await this.previewVideoHistoryMigration(plan.plannedAt);
       if (current.blocked || historyMigration.videoHistoryPlanId(current) !== plan.planId) throw new Error(`确认后任务状态已变化：${current.reasons.join("；") || "整理清单不再一致"}`);
+      if (!this.migrationSafeFs().capability.available) {
+        new Notice(`${MIGRATION_SAFE_FS_UNAVAILABLE}：${this.migrationSafeFs().capability.reason}`, 10000);
+        return false;
+      }
       await this.executeVideoHistoryMigration(current);
       new Notice(`视频历史整理完成；已复制备份到 ${plan.backupPath}，旧目录保留原位并标记待单独清理。`, 9000);
       return true;
