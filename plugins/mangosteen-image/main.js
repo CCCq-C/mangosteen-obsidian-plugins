@@ -1,11 +1,15 @@
 const { Plugin, Modal, Notice, requestUrl } = require("obsidian");
+const crypto = require("crypto");
+const fs = require("fs");
 const path = require("path");
+const historyMigration = require("./history-migration.cjs");
 const { normalizeImageOutputTarget, standaloneImagePath } = require("./output-storage.cjs");
 
 const API_BASE = "https://apimodel.aihubkit.com";
 const HISTORY_ROOT = "生图记录";
 const IMAGE_TASK_WAIT_ATTEMPTS = 450;
 const DEFAULT_SETTINGS = { imageTasks: [], submissionMarkers: [], model: "gpt-image-2", size: "1024x1024", count: 1, editCount: 1 };
+const cloneMigrationValue = (value) => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
 const preferredImageModel = (models, current) => models.includes(current)
   ? current
   : models.find((id) => id.toLowerCase() === "gpt-image-2")
@@ -394,6 +398,7 @@ module.exports = class MangosteenImagePlugin extends Plugin {
     this.imageTaskViews = new Set();
     this.addRibbonIcon("image-plus", "山竹出图", () => void this.openModal());
     this.addCommand({ id: "open-image-generator", name: "山竹出图", callback: () => void this.openModal() });
+    this.addCommand({ id: "organize-mangosteen-image-history", name: "整理山竹生图历史记录", callback: () => this.organizeImageHistory() });
     if (typeof this.registerInterval === "function" && typeof window !== "undefined") {
       this.registerInterval(window.setInterval(() => {
         if ((this.settings.imageTasks || []).some((task) => !task.saved && task.status !== "failed")) void this.refreshImageTasks();
@@ -403,6 +408,200 @@ module.exports = class MangosteenImagePlugin extends Plugin {
   }
 
   async saveSettings() { await this.saveData(this.settings); }
+  migrationVaultPath(vaultPath, { createParents = false, directory = false } = {}) {
+    const relative = String(vaultPath || "").trim();
+    const segments = relative.split("/");
+    if (!relative || relative.includes("\\") || relative.includes("\0") || path.posix.isAbsolute(relative) || /^[A-Za-z]:\//.test(relative)
+        || segments.some((segment) => !segment || segment === "." || segment === "..")) throw new Error(`历史整理路径不安全：${relative}`);
+    const base = path.resolve(this.app?.vault?.adapter?.getBasePath?.() || this.app?.vault?.adapter?.basePath || "");
+    if (!fs.statSync(base, { throwIfNoEntry: false })?.isDirectory()) throw new Error("无法定位当前 Obsidian 知识库。");
+    const realBase = fs.realpathSync(base);
+    let current = realBase;
+    for (let index = 0; index < segments.length; index += 1) {
+      const last = index === segments.length - 1;
+      const candidate = path.join(current, segments[index]);
+      let stat = fs.lstatSync(candidate, { throwIfNoEntry: false });
+      if (!stat && createParents && (!last || directory)) {
+        fs.mkdirSync(candidate);
+        stat = fs.lstatSync(candidate);
+      }
+      if (!stat) {
+        const target = path.join(current, ...segments.slice(index));
+        const rel = path.relative(realBase, target);
+        if (rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) throw new Error("历史整理路径超出知识库范围。");
+        return target;
+      }
+      if (stat.isSymbolicLink()) throw new Error(`历史整理路径包含符号链接：${relative}`);
+      if ((!last || directory) && !stat.isDirectory()) throw new Error(`历史整理父路径不是目录：${relative}`);
+      current = fs.realpathSync(candidate);
+      const rel = path.relative(realBase, current);
+      if (rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) throw new Error("历史整理路径超出知识库范围。");
+    }
+    return current;
+  }
+  migrationFileHash(absolutePath) {
+    const stat = fs.lstatSync(absolutePath, { throwIfNoEntry: false });
+    if (!stat || stat.isSymbolicLink() || !stat.isFile()) throw Object.assign(new Error(`历史文件不存在或不安全：${absolutePath}`), { code: stat ? "UNSAFE_PATH" : "ENOENT" });
+    const digest = crypto.createHash("sha256");
+    const descriptor = fs.openSync(absolutePath, "r");
+    const buffer = Buffer.allocUnsafe(1024 * 1024);
+    try {
+      let bytesRead;
+      do {
+        bytesRead = fs.readSync(descriptor, buffer, 0, buffer.length, null);
+        if (bytesRead) digest.update(buffer.subarray(0, bytesRead));
+      } while (bytesRead);
+    } finally { fs.closeSync(descriptor); }
+    return digest.digest("hex");
+  }
+  imageHistoryMigrationFiles() {
+    const output = [];
+    const walk = (relativeFolder) => {
+      const absoluteFolder = this.migrationVaultPath(relativeFolder);
+      const rootStat = fs.lstatSync(absoluteFolder, { throwIfNoEntry: false });
+      if (!rootStat) return;
+      if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) throw new Error(`历史目录不安全：${relativeFolder}`);
+      for (const entry of fs.readdirSync(absoluteFolder, { withFileTypes: true })) {
+        const relativePath = `${relativeFolder}/${entry.name}`;
+        const absolutePath = path.join(absoluteFolder, entry.name);
+        const stat = fs.lstatSync(absolutePath);
+        if (stat.isSymbolicLink()) output.push({ path: relativePath, size: stat.size, sha256: "0".repeat(64), symlink: true });
+        else if (stat.isDirectory()) walk(relativePath);
+        else if (stat.isFile()) output.push({ path: relativePath, size: stat.size, sha256: this.migrationFileHash(absolutePath) });
+      }
+    };
+    for (const root of ["生图记录", "山竹创作记录/图片", ".mangosteen-image/migration-backup"]) {
+      const absolute = this.migrationVaultPath(root);
+      if (fs.lstatSync(absolute, { throwIfNoEntry: false })) walk(root);
+    }
+    return output;
+  }
+  latestImageHistoryMigrationJournal() {
+    const relativeRoot = ".mangosteen-image/migration-journal";
+    const absoluteRoot = this.migrationVaultPath(relativeRoot);
+    const stat = fs.lstatSync(absoluteRoot, { throwIfNoEntry: false });
+    if (!stat) return null;
+    if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error("生图历史迁移 journal 目录不安全。");
+    const name = fs.readdirSync(absoluteRoot).filter((item) => /^migration-\d{8}-\d{6}-\d{3}\.json$/.test(item)).sort().reverse()[0];
+    if (!name) return null;
+    const journal = JSON.parse(fs.readFileSync(path.join(absoluteRoot, name), "utf8"));
+    if (journal?.state === "completed") return null;
+    if (!journal?.planSnapshot || journal.planId !== journal.planSnapshot.planId
+        || historyMigration.imageHistoryPlanId(journal.planSnapshot) !== journal.planId) throw new Error(`生图历史迁移 journal 与计划不一致：${name}`);
+    return journal;
+  }
+  recoverableImageHistoryMigrationPlan() {
+    const journal = this.latestImageHistoryMigrationJournal();
+    if (!journal) return null;
+    const plan = { ...journal.planSnapshot, journal };
+    const reasons = [];
+    for (const operation of plan.operations || []) {
+      const original = plan.originalTasks?.[operation.taskIndex];
+      const expectedNext = plan.nextTasks?.[operation.taskIndex];
+      const current = (this.settings.imageTasks || []).find((task) => String(task?.id || "") === String(original?.id || ""));
+      if (!current || current.status !== "completed" || current.saved !== true || current.outputTarget
+          || current.submissionUncertain === true || current.uncertain === true || this.submissionMarker(current.submissionFingerprint)) {
+        reasons.push(`任务 ${String(original?.id || "未知")} 已不再满足安全整理条件。`);
+        continue;
+      }
+      const currentPaths = JSON.stringify(current.imagePaths || []);
+      if (![JSON.stringify(original?.imagePaths || []), JSON.stringify(expectedNext?.imagePaths || [])].includes(currentPaths)) {
+        reasons.push(`任务 ${String(original?.id || "未知")} 的图片路径已变化。`);
+      }
+    }
+    if (!reasons.length) return plan;
+    return { ...plan, blocked: true, reasons, counts: { ...plan.counts, blocked: reasons.length } };
+  }
+  previewImageHistoryMigration(now) {
+    const recovery = this.recoverableImageHistoryMigrationPlan();
+    if (recovery) return recovery;
+    return historyMigration.planImageHistoryMigration({
+      tasks: this.settings.imageTasks || [],
+      submissionMarkers: this.settings.submissionMarkers || [],
+      files: this.imageHistoryMigrationFiles(),
+      now,
+    });
+  }
+  confirmMigrationPlan(message) {
+    return typeof window !== "undefined" && typeof window.confirm === "function" ? window.confirm(message) : false;
+  }
+  migrationPlanText(plan, title) {
+    return [title, `目标复制：${plan.counts.files} 个文件，${plan.counts.bytes} 字节`, `备份移动：${plan.counts.backupFiles} 个文件，${plan.counts.backupBytes} 字节`, `阻止项：${plan.counts.blocked}`, `跳过项：${plan.counts.skipped}`, `目标：${plan.destination}`, `备份：${plan.backupPath}`, "确认后才会执行；不会永久删除旧文件。"].join("\n");
+  }
+  writeMigrationJournal(vaultPath, value) {
+    const target = this.migrationVaultPath(vaultPath, { createParents: true });
+    const temporary = `${target}.tmp-${process.pid}-${crypto.randomUUID()}`;
+    const descriptor = fs.openSync(temporary, "wx");
+    try { fs.writeFileSync(descriptor, `${JSON.stringify(value, null, 2)}\n`); fs.fsyncSync(descriptor); }
+    finally { fs.closeSync(descriptor); }
+    try { fs.renameSync(temporary, target); }
+    finally { fs.rmSync(temporary, { force: true }); }
+  }
+  async persistImageMigrationTasks(tasks, plan) {
+    const desiredById = new Map(tasks.map((task) => [String(task?.id || ""), task]));
+    const currentIds = new Set((this.settings.imageTasks || []).map((task) => String(task?.id || "")));
+    for (const id of desiredById.keys()) if (!currentIds.has(id)) throw new Error(`生图任务记录已变化，缺少任务 ${id}。`);
+    const merged = (this.settings.imageTasks || []).map((current) => {
+      const desired = desiredById.get(String(current?.id || ""));
+      if (!desired) return current;
+      const next = { ...current, imagePaths: cloneMigrationValue(desired.imagePaths), recordPath: desired.recordPath ?? null };
+      for (const key of ["historyMigratedAt", "historyBackupPath"]) {
+        if (Object.prototype.hasOwnProperty.call(desired, key)) next[key] = desired[key];
+        else delete next[key];
+      }
+      return next;
+    });
+    const previous = this.settings.imageTasks;
+    this.settings.imageTasks = merged;
+    try { await this.saveSettings(); } catch (error) { this.settings.imageTasks = previous; throw error; }
+    return merged;
+  }
+  async executeImageHistoryMigration(plan) {
+    const result = await historyMigration.executeImageHistoryMigration({
+      plan,
+      copy: async (from, to) => {
+        const source = this.migrationVaultPath(from);
+        const target = this.migrationVaultPath(to, { createParents: true });
+        if (fs.lstatSync(target, { throwIfNoEntry: false })) throw Object.assign(new Error(`整理目标已存在：${to}`), { code: "EEXIST" });
+        fs.copyFileSync(source, target, fs.constants.COPYFILE_EXCL);
+      },
+      move: async (from, to) => {
+        const source = this.migrationVaultPath(from);
+        const target = this.migrationVaultPath(to, { createParents: true });
+        if (!fs.lstatSync(source, { throwIfNoEntry: false })) throw Object.assign(new Error(`整理源目录不存在：${from}`), { code: "ENOENT" });
+        if (fs.lstatSync(target, { throwIfNoEntry: false })) throw Object.assign(new Error(`整理备份已存在：${to}`), { code: "EEXIST" });
+        fs.renameSync(source, target);
+      },
+      hash: async (vaultPath) => this.migrationFileHash(this.migrationVaultPath(vaultPath)),
+      atomicWriteSettings: async (tasks) => this.persistImageMigrationTasks(tasks, plan),
+      writeJournal: async (vaultPath, value) => this.writeMigrationJournal(vaultPath, value),
+      removeNew: async (operation) => {
+        const target = this.migrationVaultPath(operation.to);
+        const stat = fs.lstatSync(target, { throwIfNoEntry: false });
+        if (!stat) return;
+        if (stat.isSymbolicLink() || !stat.isFile() || this.migrationFileHash(target) !== operation.sha256) throw new Error(`回滚目标内容已变化：${operation.to}`);
+        fs.unlinkSync(target);
+      },
+    });
+    this.refreshImageTaskViews();
+    return result;
+  }
+  async organizeImageHistory() {
+    try {
+      const plan = await this.previewImageHistoryMigration();
+      if (plan.blocked) { new Notice(`生图历史整理已阻止：${plan.reasons.join("；")}`, 10000); return false; }
+      if (!plan.operations.length) { new Notice(`没有可整理的生图历史；已跳过 ${plan.counts.skipped} 项。`, 6000); return false; }
+      if (!this.confirmMigrationPlan(this.migrationPlanText(plan, "整理山竹生图历史记录"))) return false;
+      const current = await this.previewImageHistoryMigration(plan.plannedAt);
+      if (current.blocked || historyMigration.imageHistoryPlanId(current) !== plan.planId) throw new Error(`确认后任务状态已变化：${current.reasons.join("；") || "整理清单不再一致"}`);
+      await this.executeImageHistoryMigration(current);
+      new Notice(`生图历史整理完成；旧目录已移入 ${plan.backupPath}。`, 9000);
+      return true;
+    } catch (error) {
+      new Notice(`生图历史整理失败：${String(error?.message || error)}`, 10000);
+      return false;
+    }
+  }
   submissionMarker(fingerprint) {
     return (this.settings.submissionMarkers || []).find((item) => item.fingerprint === fingerprint);
   }

@@ -5,6 +5,7 @@ const crypto = require("crypto");
 
 let core;
 let generationPolicy;
+let projectMigration;
 let projectStorage;
 let referenceAssets;
 let replicaEditor;
@@ -354,6 +355,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     const pluginRoot = path.join(this.vaultPath(), ...String(this.manifest.dir || "").split(/[\\/]/).filter(Boolean));
     core = require(path.join(pluginRoot, "replica-core.cjs"));
     generationPolicy = require(path.join(pluginRoot, "generation-policy.cjs"));
+    projectMigration = require(path.join(pluginRoot, "project-migration.cjs"));
     projectStorage = require(path.join(pluginRoot, "project-storage.cjs"));
     shotTimeline = require(path.join(pluginRoot, "shot-timeline.cjs"));
     visualStyle = require(path.join(pluginRoot, "visual-style.cjs"));
@@ -388,6 +390,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     this.addCommand({ id: "concat-latest-project", name: "拼接最近已完成项目", callback: () => void this.concatLatestProject() });
     this.addCommand({ id: "stop-latest-generation", name: "停止最近的视频复刻任务", callback: () => void this.stopLatestGeneration() });
     this.addCommand({ id: "scan-generation-requests", name: "检查已确认的视频复刻任务", callback: () => void this.scanRequests(true) });
+    this.addCommand({ id: "organize-current-video-replica-project", name: "整理当前视频复刻项目", callback: () => this.organizeCurrentReplicaProject() });
     this.registerInterval(window.setInterval(() => void this.scanRequests(false), 5000));
     const handleProjectFileChange = (file) => {
       if (this.isWorkbenchDataFile(file)) this.requestWorkbenchRefresh();
@@ -1351,6 +1354,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
   }
 
   async recoverWorkbenchQueue(folder) {
+    if (this.isProjectMigrationLocked(folder)) return false;
     const paths = this.workbenchProjectPaths(folder, { createWorkDirectory: true });
     const candidate = this.currentWorkbenchQueue(paths.folder);
     if (candidate && paths.isV6 && !runState.isRunActive(candidate) && fs.existsSync(paths.activeRunPath)) {
@@ -1640,6 +1644,225 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
 
   latestProject(predicate = () => true) {
     return this.projectRecords().find((record) => predicate(record.project));
+  }
+
+  migrationProjectFolder() {
+    const selected = this.app.workspace?.getLeavesOfType?.(this.workbenchViewType)
+      ?.map((leaf) => String(leaf?.view?.selectedFolder || "").trim())
+      .find(Boolean);
+    return selected || this.latestProject()?.project?.folder || "";
+  }
+
+  latestProjectMigrationJournal(folder) {
+    let historyPath;
+    try { historyPath = this.checkedProjectPath(folder, `${folder}/.mangosteen/history`); }
+    catch (_) { return null; }
+    const stat = fs.lstatSync(historyPath, { throwIfNoEntry: false });
+    if (!stat) return null;
+    if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error("项目迁移 journal 目录不安全。");
+    const names = fs.readdirSync(historyPath)
+      .filter((name) => /^\.migration-journal-\d{8}-\d{6}-\d{3}\.json$/.test(name))
+      .sort().reverse();
+    const name = names[0];
+    if (!name) return null;
+    const journal = this.readJson(path.join(historyPath, name));
+    if (journal?.state === "completed") return null;
+    if (!journal?.planSnapshot || journal.planId !== journal.planSnapshot.planId
+        || projectMigration.projectMigrationPlanId(journal.planSnapshot) !== journal.planId) {
+      throw new Error(`项目迁移 journal 与计划不一致：${name}`);
+    }
+    return journal;
+  }
+
+  isProjectMigrationLocked(folder) {
+    try {
+      const journal = this.latestProjectMigrationJournal(folder);
+      return Boolean(journal && !["completed", "rolled-back"].includes(String(journal.state || "")));
+    } catch (_) {
+      return true;
+    }
+  }
+
+  recoverableProjectMigrationPlan(folder) {
+    const journal = this.latestProjectMigrationJournal(folder);
+    if (!journal) return null;
+    const plan = { ...journal.planSnapshot, journal };
+    const blockedJournal = ["blocked", "rollback-failed"].includes(String(journal.state || ""));
+    const readErrors = {};
+    const activeRun = this.readOptionalJson(this.checkedProjectPath(folder, `${folder}/.mangosteen/active-run.json`), readErrors, "activeRun");
+    const legacyQueue = this.readOptionalJson(this.checkedProjectPath(folder, QUEUE_FILE), readErrors, "generationQueue");
+    const legacyState = this.readOptionalJson(this.checkedProjectPath(folder, STATE_FILE), readErrors, "generationState");
+    const pendingStop = this.readOptionalJson(this.checkedProjectPath(folder, STOP_FILE), readErrors, "pendingStop");
+    const reasons = projectMigration.projectMigrationSafetyReasons({ activeRun, legacyQueue, legacyState, pendingStop, readErrors, project: plan.project });
+    if (blockedJournal) reasons.unshift(journal.error || "迁移 journal 处于阻止状态，需要人工核对。");
+    if (!reasons.length) return plan;
+    return {
+      ...plan,
+      blocked: true,
+      reasons: [...new Set(reasons)],
+      counts: { ...plan.counts, blocked: new Set(reasons).size },
+    };
+  }
+
+  migrationFileHash(absolutePath) {
+    const stat = fs.lstatSync(absolutePath, { throwIfNoEntry: false });
+    if (!stat || stat.isSymbolicLink() || !stat.isFile()) throw Object.assign(new Error(`迁移文件不存在或不安全：${absolutePath}`), { code: stat ? "UNSAFE_PATH" : "ENOENT" });
+    const digest = crypto.createHash("sha256");
+    const descriptor = fs.openSync(absolutePath, "r");
+    const buffer = Buffer.allocUnsafe(1024 * 1024);
+    try {
+      let bytesRead;
+      do {
+        bytesRead = fs.readSync(descriptor, buffer, 0, buffer.length, null);
+        if (bytesRead) digest.update(buffer.subarray(0, bytesRead));
+      } while (bytesRead);
+    } finally { fs.closeSync(descriptor); }
+    return digest.digest("hex");
+  }
+
+  projectMigrationFiles(folder) {
+    const checked = this.checkedWorkbenchProjectFolder(folder);
+    const output = [];
+    const walk = (absoluteFolder, relativeFolder) => {
+      for (const entry of fs.readdirSync(absoluteFolder, { withFileTypes: true })) {
+        const relativePath = `${relativeFolder}/${entry.name}`;
+        const absolutePath = path.join(absoluteFolder, entry.name);
+        const stat = fs.lstatSync(absolutePath);
+        if (stat.isSymbolicLink()) {
+          output.push({ path: relativePath, size: stat.size, sha256: "0".repeat(64), symlink: true });
+        } else if (stat.isDirectory()) {
+          walk(absolutePath, relativePath);
+        } else if (stat.isFile()) {
+          output.push({ path: relativePath, size: stat.size, sha256: this.migrationFileHash(absolutePath) });
+        }
+      }
+    };
+    walk(checked.realFolder, checked.folder);
+    return output;
+  }
+
+  previewCurrentProjectMigration(now) {
+    const folder = this.migrationProjectFolder();
+    if (!folder) throw new Error("没有找到可整理的视频复刻项目。");
+    const recovery = this.recoverableProjectMigrationPlan(folder);
+    if (recovery) return recovery;
+    const snapshot = this.loadWorkbenchProject(folder);
+    const paths = this.workbenchProjectPaths(folder);
+    const pendingStop = this.readOptionalJson(paths.pendingStopPath || paths.stopPath, snapshot.readErrors, "pendingStop");
+    return projectMigration.planLegacyProjectMigration({
+      projectFolder: folder,
+      files: this.projectMigrationFiles(folder),
+      project: snapshot.project,
+      request: snapshot.request,
+      activeRun: snapshot.currentRun,
+      pendingStop,
+      readErrors: snapshot.readErrors,
+      now,
+    });
+  }
+
+  confirmMigrationPlan(message) {
+    return typeof window !== "undefined" && typeof window.confirm === "function" ? window.confirm(message) : false;
+  }
+
+  migrationPlanText(plan, title) {
+    return [
+      title,
+      `目标复制：${plan.counts.files} 个文件，${plan.counts.bytes} 字节`,
+      `备份移动：${plan.counts.backupFiles} 个文件，${plan.counts.backupBytes} 字节`,
+      `新版记录：${plan.counts.writeFiles} 个文件，${plan.counts.writeBytes} 字节`,
+      `阻止项：${plan.counts.blocked}`,
+      `跳过项：${plan.counts.skipped}`,
+      `目标：${plan.destination}`,
+      `备份：${plan.backupPath}`,
+      "确认后才会执行；不会永久删除旧文件。",
+    ].join("\n");
+  }
+
+  writeExclusiveMigrationBundle(folder, writes) {
+    const prepared = [];
+    const created = [];
+    try {
+      for (const [index, write] of writes.entries()) {
+        const target = this.checkedProjectPath(folder, write.path, { createParents: true });
+        if (fs.lstatSync(target, { throwIfNoEntry: false })) throw Object.assign(new Error(`迁移目标已存在：${write.path}`), { code: "EEXIST" });
+        const temporary = `${target}.migration-${process.pid}-${crypto.randomUUID()}-${index}`;
+        const descriptor = fs.openSync(temporary, "wx");
+        try { fs.writeFileSync(descriptor, write.content); fs.fsyncSync(descriptor); } finally { fs.closeSync(descriptor); }
+        prepared.push({ target, temporary });
+      }
+      for (const item of prepared) {
+        fs.linkSync(item.temporary, item.target);
+        created.push(item.target);
+      }
+    } catch (error) {
+      for (const target of created.reverse()) fs.rmSync(target, { force: true });
+      throw error;
+    } finally {
+      for (const item of prepared) fs.rmSync(item.temporary, { force: true });
+    }
+  }
+
+  async executeCurrentProjectMigration(plan) {
+    const folder = plan.projectFolder;
+    const resolve = (vaultPath, options = {}) => this.checkedProjectPath(folder, vaultPath, options);
+    const journal = await projectMigration.executeProjectMigration({
+      plan,
+      copy: async (from, to) => {
+        const source = resolve(from);
+        const target = resolve(to, { createParents: true });
+        if (fs.lstatSync(target, { throwIfNoEntry: false })) throw Object.assign(new Error(`迁移目标已存在：${to}`), { code: "EEXIST" });
+        fs.copyFileSync(source, target, fs.constants.COPYFILE_EXCL);
+      },
+      move: async (from, to) => {
+        const source = resolve(from);
+        const target = resolve(to, { createParents: true });
+        if (fs.lstatSync(target, { throwIfNoEntry: false })) throw Object.assign(new Error(`迁移备份已存在：${to}`), { code: "EEXIST" });
+        if (!fs.lstatSync(source, { throwIfNoEntry: false })) throw Object.assign(new Error(`迁移源文件不存在：${from}`), { code: "ENOENT" });
+        fs.renameSync(source, target);
+      },
+      hash: async (vaultPath) => this.migrationFileHash(resolve(vaultPath)),
+      atomicWrite: async (operation) => {
+        if (operation.type === "bundle") return this.writeExclusiveMigrationBundle(folder, operation.writes);
+        const target = resolve(operation.path, { createParents: true });
+        return atomicWrite(target, `${JSON.stringify(operation.value, null, 2)}\n`);
+      },
+      removeNew: async (operation) => {
+        const vaultPath = operation.to || operation.path;
+        const target = resolve(vaultPath);
+        const stat = fs.lstatSync(target, { throwIfNoEntry: false });
+        if (!stat) return;
+        if (stat.isSymbolicLink() || !stat.isFile() || this.migrationFileHash(target) !== operation.sha256) {
+          throw new Error(`回滚目标内容已变化，拒绝移除：${vaultPath}`);
+        }
+        fs.unlinkSync(target);
+      },
+    });
+    this.requestWorkbenchRefresh();
+    return journal;
+  }
+
+  async organizeCurrentReplicaProject() {
+    try {
+      const plan = await this.previewCurrentProjectMigration();
+      if (plan.blocked) {
+        new Notice(`项目整理已阻止：${plan.reasons.join("；")}`, 10000);
+        return false;
+      }
+      if (!plan.operations.length && !plan.writes.length && !plan.moves.length) {
+        new Notice("当前项目没有需要整理的旧项目文件。", 6000);
+        return false;
+      }
+      if (!this.confirmMigrationPlan(this.migrationPlanText(plan, "整理当前视频复刻项目"))) return false;
+      const current = await this.previewCurrentProjectMigration(plan.plannedAt);
+      if (current.blocked || projectMigration.projectMigrationPlanId(current) !== plan.planId) throw new Error(`确认后项目状态已变化：${current.reasons.join("；") || "迁移清单不再一致"}`);
+      await this.executeCurrentProjectMigration(current);
+      new Notice(`项目整理完成；旧文件已移入 ${plan.backupPath}。`, 9000);
+      return true;
+    } catch (error) {
+      new Notice(`项目整理失败：${String(error?.message || error)}`, 10000);
+      return false;
+    }
   }
 
   analysisSettings() {
@@ -2189,6 +2412,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       const canonicalRequestPath = fs.realpathSync(path.resolve(requestPath));
       const relative = path.relative(root, path.dirname(canonicalRequestPath));
       projectFolder = core.normalizeVaultPath(`${ROOT}/${relative.replace(/\\/g, "/")}`);
+      if (this.isProjectMigrationLocked(projectFolder)) return;
       const checkedRequestPath = this.checkedProjectPath(projectFolder, REQUEST_FILE);
       if (canonicalRequestPath !== fs.realpathSync(checkedRequestPath)) throw new Error("生成请求路径不安全，已拒绝处理。");
       requestPath = checkedRequestPath;
