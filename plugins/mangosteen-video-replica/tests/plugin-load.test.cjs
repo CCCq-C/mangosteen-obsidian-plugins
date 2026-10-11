@@ -4,6 +4,8 @@ const Module = require("module");
 const os = require("os");
 const path = require("path");
 const { createReplicaLogicApi } = require("../replica-logic-api.cjs");
+const projectStorage = require("../project-storage.cjs");
+const noticeMessages = [];
 
 assert.strictEqual(typeof createReplicaLogicApi, "function");
 assert.doesNotMatch(
@@ -20,7 +22,9 @@ Module._load = function patchedLoad(request, parent, isMain) {
         constructor(leaf) { this.leaf = leaf; }
       },
       Modal: class Modal {},
-      Notice: class Notice {},
+      Notice: class Notice {
+        constructor(message) { noticeMessages.push(String(message)); }
+      },
       Plugin: class Plugin {},
       requestUrl: async () => ({ status: 200, arrayBuffer: new ArrayBuffer(0) }),
     };
@@ -650,6 +654,7 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   let targetAwareSaveInput = null;
   const targetAwareImageTask = { id: "image-task-008", saved: false };
   const targetAwareImage = {
+    supportsOutputTargetSave: () => true,
     generateText: async (_prompt, _count, _slot, options) => {
       targetAwareGenerateOptions = options;
       return {
@@ -693,14 +698,27 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   const compatibilityPath = "山竹视频复刻/project-compat/03-分镜/008/首帧.png";
   const compatibilityTarget = { ...targetAwareOutputTarget, projectId: "project-compat", destinationPath: compatibilityPath };
   fs.mkdirSync(path.join(vault, "山竹视频复刻", "project-compat"), { recursive: true });
+  let legacySaveCalls = 0;
+  const legacyGlobalDuplicate = "山竹图片生成/legacy-duplicate.png";
+  const realisticLegacyImage = {
+    saveImageResult: async () => {
+      legacySaveCalls += 1;
+      fs.mkdirSync(path.dirname(path.join(vault, ...legacyGlobalDuplicate.split("/"))), { recursive: true });
+      fs.writeFileSync(path.join(vault, ...legacyGlobalDuplicate.split("/")), "misleading-global-copy");
+      return { saved: true, imagePaths: [legacyGlobalDuplicate] };
+    },
+  };
   await plugin.saveImageCandidate(
-    {},
+    realisticLegacyImage,
     { kind: "base64", value: Buffer.from("compatibility-image").toString("base64") },
     compatibilityPath,
     compatibilityTarget,
   );
   assert.strictEqual(fs.readFileSync(path.join(vault, ...compatibilityPath.split("/")), "utf8"), "compatibility-image");
+  assert.strictEqual(legacySaveCalls, 0, "legacy saveImageResult must not be mistaken for target-aware capability");
+  assert.strictEqual(fs.existsSync(path.join(vault, ...legacyGlobalDuplicate.split("/"))), false, "compatibility save must not create a second global image");
   assert.strictEqual(plugin.imageTargetUpgradeNoticeShown, true, "older image plugins must trigger one clear upgrade notice while retaining the atomic fallback");
+  assert(noticeMessages.some((message) => /安全兼容保存.*升级山竹生图/.test(message)), "compatibility fallback must show a clear image-plugin upgrade notice");
 
   const rollbackFolder = "山竹视频复刻/project-rollback";
   const rollbackPath = `${rollbackFolder}/03-分镜/008/首帧.png`;
@@ -720,6 +738,60 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   const rollbackHistoryFiles = fs.readdirSync(rollbackHistoryRoot, { recursive: true })
     .filter((entry) => fs.statSync(path.join(rollbackHistoryRoot, entry)).isFile());
   assert.deepStrictEqual(rollbackHistoryFiles, [], "a successful rollback must not leave a duplicate history link");
+
+  fs.writeFileSync(path.join(vault, ...rollbackPath.split("/")), "visible-before-late-failure");
+  await assert.rejects(
+    () => plugin.withArchivedProjectArtifact({
+      projectFolder: rollbackFolder,
+      shotId: "008",
+      kind: "first-frame",
+      enabled: true,
+    }, async () => {
+      fs.writeFileSync(path.join(vault, ...rollbackPath.split("/")), "failed-new-bytes");
+      throw new Error("injected state persistence failure after media write");
+    }),
+    /injected state persistence failure after media write/,
+  );
+  assert.strictEqual(fs.readFileSync(path.join(vault, ...rollbackPath.split("/")), "utf8"), "visible-before-late-failure", "late failure must restore the old visible artifact byte-for-byte");
+  const failedRollbackFiles = fs.readdirSync(rollbackHistoryRoot, { recursive: true })
+    .map(String)
+    .filter((entry) => entry.includes("failed") && fs.statSync(path.join(rollbackHistoryRoot, entry)).isFile());
+  assert.strictEqual(failedRollbackFiles.length, 1, "failed new bytes must remain recoverable in hidden history");
+  assert.strictEqual(fs.readFileSync(path.join(rollbackHistoryRoot, failedRollbackFiles[0]), "utf8"), "failed-new-bytes");
+
+  const rollbackFailureFolder = "山竹视频复刻/project-rollback-compound";
+  const rollbackFailurePath = `${rollbackFailureFolder}/03-分镜/008/首帧.png`;
+  fs.mkdirSync(path.dirname(path.join(vault, ...rollbackFailurePath.split("/"))), { recursive: true });
+  fs.writeFileSync(path.join(vault, ...rollbackFailurePath.split("/")), "compound-old-bytes");
+  const realArchiveFailedArtifact = projectStorage.archiveFailedArtifact;
+  projectStorage.archiveFailedArtifact = (options) => {
+    const failedPath = realArchiveFailedArtifact(options);
+    const error = new Error("injected rollback interruption");
+    error.failedArtifactPath = failedPath;
+    throw error;
+  };
+  try {
+    await assert.rejects(
+      () => plugin.withArchivedProjectArtifact({
+        projectFolder: rollbackFailureFolder,
+        shotId: "008",
+        kind: "first-frame",
+        enabled: true,
+      }, async () => {
+        fs.writeFileSync(path.join(vault, ...rollbackFailurePath.split("/")), "compound-new-bytes");
+        throw new Error("injected original persistence failure");
+      }),
+      /原操作失败.*injected original persistence failure.*产物回滚失败.*injected rollback interruption/,
+    );
+  } finally {
+    projectStorage.archiveFailedArtifact = realArchiveFailedArtifact;
+  }
+  const compoundHistoryRoot = path.join(vault, ...rollbackFailureFolder.split("/"), ".mangosteen", "history");
+  const compoundBytes = fs.readdirSync(compoundHistoryRoot, { recursive: true })
+    .map(String)
+    .filter((entry) => fs.statSync(path.join(compoundHistoryRoot, entry)).isFile())
+    .map((entry) => fs.readFileSync(path.join(compoundHistoryRoot, entry), "utf8"));
+  assert.deepStrictEqual(compoundBytes.sort(), ["compound-new-bytes", "compound-old-bytes"], "rollback failure must preserve both generations without clobbering history");
 
   let releaseCatalog;
   let catalogStarted;

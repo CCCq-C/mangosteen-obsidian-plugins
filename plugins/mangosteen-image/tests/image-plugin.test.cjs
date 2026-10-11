@@ -38,6 +38,7 @@ function createVault(initialFiles = {}) {
 
 (async () => {
   const plugin = new ImagePlugin();
+  assert.strictEqual(plugin.supportsOutputTargetSave(), true, "current image plugin must explicitly advertise target-aware saves");
   let polls = 0;
   plugin.api = {
     readImageTaskProgress: () => null,

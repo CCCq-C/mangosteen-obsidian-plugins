@@ -295,6 +295,37 @@ try {
     "the racing historical file must not be overwritten",
   );
 
+  const failedArtifactVault = createVault();
+  const failedArtifact = storage.shotArtifactPaths(projectFolder, "008");
+  fs.mkdirSync(path.dirname(failedArtifactVault.resolveSafe(failedArtifact.video)), { recursive: true });
+  fs.writeFileSync(failedArtifactVault.resolveSafe(failedArtifact.video), "failed-new-video");
+  const failedArchive = storage.archiveFailedArtifact({
+    resolveSafe: failedArtifactVault.resolveSafe,
+    projectFolder,
+    shotId: "008",
+    kind: "video",
+    now: new Date("2026-10-11T07:00:51.000Z"),
+    failureId: "failure-1",
+  });
+  assert.strictEqual(failedArchive, `${projectFolder}/.mangosteen/history/failed/20261011-070051-000/008/failure-1-视频.mp4`);
+  assert.strictEqual(fs.existsSync(failedArtifactVault.resolveSafe(failedArtifact.video)), false);
+  assert.strictEqual(fs.readFileSync(failedArtifactVault.resolveSafe(failedArchive), "utf8"), "failed-new-video");
+  fs.writeFileSync(failedArtifactVault.resolveSafe(failedArtifact.video), "second-failed-new-video");
+  assert.throws(
+    () => storage.archiveFailedArtifact({
+      resolveSafe: failedArtifactVault.resolveSafe,
+      projectFolder,
+      shotId: "008",
+      kind: "video",
+      now: new Date("2026-10-11T07:00:51.000Z"),
+      failureId: "failure-1",
+    }),
+    /已存在|EEXIST/,
+    "failed history must use no-clobber semantics",
+  );
+  assert.strictEqual(fs.readFileSync(failedArtifactVault.resolveSafe(failedArtifact.video), "utf8"), "second-failed-new-video");
+  assert.strictEqual(fs.readFileSync(failedArtifactVault.resolveSafe(failedArchive), "utf8"), "failed-new-video");
+
   const missingVault = createVault();
   assert.strictEqual(storage.archiveCurrentArtifact({
     resolveSafe: missingVault.resolveSafe,

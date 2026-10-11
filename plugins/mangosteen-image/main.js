@@ -525,6 +525,9 @@ module.exports = class MangosteenImagePlugin extends Plugin {
     if (!await this.app.vault.adapter.exists(HISTORY_ROOT)) await this.app.vault.createFolder(HISTORY_ROOT);
     return HISTORY_ROOT;
   }
+  supportsOutputTargetSave() {
+    return true;
+  }
   async historyRecordFile() {
     const root = await this.ensureHistoryFolder();
     const path = `${root}/任务记录.md`;

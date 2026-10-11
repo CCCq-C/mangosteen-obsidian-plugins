@@ -187,6 +187,42 @@ function archiveCurrentArtifact({ resolveSafe, projectFolder, shotId, kind, now 
   return archivedRelativePath;
 }
 
+function archiveFailedArtifact({ resolveSafe, projectFolder, shotId, kind, now, failureId = crypto.randomUUID() } = {}) {
+  const artifactKey = ARTIFACT_KINDS[kind];
+  if (!artifactKey) throw new Error(`不支持归档的镜头文件类型：${String(kind)}`);
+  const normalizedFailureId = String(failureId ?? "").trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(normalizedFailureId)) {
+    throw new Error("失败产物归档编号不安全。");
+  }
+  const artifacts = shotArtifactPaths(projectFolder, shotId);
+  const currentRelativePath = artifacts[artifactKey];
+  const currentAbsolutePath = absoluteFrom(resolveSafe, currentRelativePath);
+  const currentStat = fs.lstatSync(currentAbsolutePath, { throwIfNoEntry: false });
+  if (!currentStat) return null;
+  if (currentStat.isSymbolicLink() || !currentStat.isFile()) throw new Error("失败的新镜头文件不安全，已拒绝归档。");
+
+  const paths = projectRelativePaths(projectFolder);
+  const normalizedShotId = path.posix.basename(artifacts.folder);
+  const historyFolder = `${paths.history}/failed/${historyTimestamp(now)}/${normalizedShotId}`;
+  const historyAbsoluteFolder = ensureDirectory(resolveSafe, historyFolder);
+  const failedRelativePath = `${historyFolder}/${normalizedFailureId}-${path.posix.basename(currentRelativePath)}`;
+  const failedAbsolutePath = absoluteFrom(resolveSafe, failedRelativePath, { createParents: true });
+  if (path.resolve(path.dirname(failedAbsolutePath)) !== path.resolve(historyAbsoluteFolder)) {
+    throw new Error("失败产物历史路径解析结果不一致，已拒绝归档。");
+  }
+  if (fs.lstatSync(failedAbsolutePath, { throwIfNoEntry: false })) {
+    throw new Error("失败产物历史文件已存在，已拒绝覆盖。");
+  }
+  fs.linkSync(currentAbsolutePath, failedAbsolutePath);
+  try {
+    fs.unlinkSync(currentAbsolutePath);
+  } catch (error) {
+    error.failedArtifactPath = failedRelativePath;
+    throw error;
+  }
+  return failedRelativePath;
+}
+
 function restoreArchivedArtifact({ resolveSafe, projectFolder, shotId, kind, archivedPath } = {}) {
   const artifactKey = ARTIFACT_KINDS[kind];
   if (!artifactKey) throw new Error(`不支持恢复的镜头文件类型：${String(kind)}`);
@@ -222,6 +258,7 @@ function restoreArchivedArtifact({ resolveSafe, projectFolder, shotId, kind, arc
 }
 
 module.exports = {
+  archiveFailedArtifact,
   archiveCurrentArtifact,
   atomicWriteJson,
   createProjectLayout,
