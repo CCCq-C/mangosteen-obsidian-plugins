@@ -719,13 +719,18 @@ module.exports = class MangosteenVideoPlugin extends Plugin {
     if (download.status >= 400 || !download.arrayBuffer) throw new Error("视频已经生成，但保存失败，请稍后重新保存。");
     this.api.assertVideoDownloadSize(download);
     const outputTarget = normalizeVideoOutputTarget(task.outputTarget);
-    const filePath = outputTarget?.destinationPath || standaloneVideoPath({ now: new Date(), taskId: task.id });
+    const persistedLocalTarget = !outputTarget && task.localPath
+      ? normalizeVideoOutputTarget({ destinationPath: task.localPath })
+      : null;
+    const filePath = outputTarget?.destinationPath
+      || persistedLocalTarget?.destinationPath
+      || standaloneVideoPath({ now: task.createdAt || new Date(), taskId: task.id });
+    task.localPath = filePath;
     const folder = filePath.split("/").slice(0, -1).join("/");
     await this.ensureVaultFolder(folder);
     const existing = this.app.vault.getAbstractFileByPath?.(filePath);
     if (existing && typeof this.app.vault.modifyBinary === "function") await this.app.vault.modifyBinary(existing, Buffer.from(download.arrayBuffer));
     else await this.app.vault.createBinary(filePath, Buffer.from(download.arrayBuffer));
-    task.localPath = filePath;
     return filePath;
   }
 

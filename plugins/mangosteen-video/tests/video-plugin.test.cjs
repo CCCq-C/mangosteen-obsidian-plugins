@@ -346,6 +346,45 @@ const outputTarget = {
   assert.strictEqual(new Set(standaloneVault.createdBinaryPaths.map((filePath) => filePath.split("/").slice(0, -1).join("/"))).size, 1, "standalone videos must share one monthly directory");
   assert.ok(standaloneVault.createdBinaryPaths.every((filePath) => /^山竹创作记录\/视频\/\d{4}-\d{2}\/[^/]+\.mp4$/.test(filePath)), "standalone videos must not create one directory per task");
 
+  const retryVault = createVault();
+  const retryPlugin = new VideoPlugin();
+  retryPlugin.api = videoApi;
+  retryPlugin.settings = { resolutionsByModel: {}, videoTasks: [], submissionMarkers: [] };
+  retryPlugin.app = { vault: retryVault.vault, plugins: {} };
+  retryPlugin.request = async () => ({ status: 200, arrayBuffer: Buffer.from("retried standalone video") });
+  const retryTask = {
+    id: "stable-retry-task",
+    model: "seedance-2.5",
+    prompt: "stable standalone retry",
+    createdAt: "2026-10-11T07:13:02.000Z",
+  };
+  const RealDate = global.Date;
+  const fakeDateAt = (iso) => class FakeDate extends RealDate {
+    constructor(...args) { super(...(args.length ? args : [iso])); }
+    static now() { return new RealDate(iso).getTime(); }
+  };
+  let firstRetryPath;
+  let secondRetryPath;
+  try {
+    global.Date = fakeDateAt("2026-10-11T08:00:00.000Z");
+    firstRetryPath = await retryPlugin.saveCompletedVideo(
+      { ...retryTask },
+      { id: retryTask.id, status: "completed", url: "https://downloads.example/retry-1.mp4" },
+    );
+    global.Date = fakeDateAt("2026-11-12T09:00:00.000Z");
+    secondRetryPath = await retryPlugin.saveCompletedVideo(
+      { ...retryTask },
+      { id: retryTask.id, status: "completed", url: "https://downloads.example/retry-2.mp4" },
+    );
+  } finally {
+    global.Date = RealDate;
+  }
+  assert.strictEqual(firstRetryPath, "山竹创作记录/视频/2026-10/20261011-151302-stable-retry-task.mp4");
+  assert.strictEqual(secondRetryPath, firstRetryPath, "the same persisted task must resolve the same path across wall-clock retries");
+  assert.deepStrictEqual(retryVault.createdBinaryPaths, [firstRetryPath], "retry must not create a second standalone file");
+  assert.deepStrictEqual(retryVault.modifiedBinaryPaths, [firstRetryPath], "retry must replace the first file at its stable path");
+  assert.strictEqual(retryVault.files.size, 1);
+
   const downloadFailurePlugin = new VideoPlugin();
   downloadFailurePlugin.api = videoApi;
   downloadFailurePlugin.settings = { resolutionsByModel: {}, videoTasks: [], submissionMarkers: [] };
