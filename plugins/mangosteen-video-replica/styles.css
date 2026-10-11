@@ -459,6 +459,58 @@
   margin: 0;
 }
 
+.mangosteen-replica-timeline-list {
+  display: grid;
+  gap: 12px;
+}
+
+.mangosteen-replica-timeline-row {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--background-secondary) 78%, transparent);
+}
+
+.mangosteen-replica-timeline-header,
+.mangosteen-replica-timeline-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mangosteen-replica-timeline-header {
+  justify-content: space-between;
+}
+
+.mangosteen-replica-timeline-time {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 140px));
+  gap: 10px;
+}
+
+.mangosteen-replica-timeline-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.mangosteen-replica-timeline-fields .mangosteen-replica-field:first-child,
+.mangosteen-replica-prompt-preview {
+  grid-column: 1 / -1;
+}
+
+.mangosteen-replica-prompt-preview {
+  margin-top: 12px;
+}
+
+.mangosteen-replica-prompt-preview textarea {
+  min-height: 180px;
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+}
+
 .mangosteen-replica-save-row {
   justify-content: flex-end;
   margin-top: var(--replica-gap);
@@ -542,6 +594,7 @@
   .mangosteen-replica-asset-grid { grid-template-columns: minmax(0, 1fr); }
   .mangosteen-replica-toolbar-primary { align-items: stretch; flex-direction: column; }
   .mangosteen-replica-shot-fields,
+  .mangosteen-replica-timeline-fields,
   .mangosteen-replica-model-grid { grid-template-columns: minmax(0, 1fr); }
   .mangosteen-replica-shot-summary-row { grid-template-columns: minmax(60px, 0.35fr) minmax(0, 1fr); }
   .mangosteen-replica-shot-summary-row .is-title { grid-column: 2; }
@@ -566,6 +619,9 @@
   .mangosteen-replica-shot-actions { grid-column: 1; }
   .mangosteen-replica-shot-actions { flex-wrap: wrap; justify-content: flex-start; min-width: 0; }
   .mangosteen-replica-model-error { align-items: stretch; flex-direction: column; }
+  .mangosteen-replica-timeline-header { align-items: stretch; flex-direction: column; }
+  .mangosteen-replica-timeline-actions { flex-wrap: wrap; }
+  .mangosteen-replica-timeline-time { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .mangosteen-replica-workbench input,
   .mangosteen-replica-workbench select,
   .mangosteen-replica-workbench textarea { max-width: 100%; min-width: 0; }
@@ -600,6 +656,7 @@
     .mangosteen-replica-asset-grid { grid-template-columns: minmax(0, 1fr); }
     .mangosteen-replica-toolbar-primary { align-items: stretch; flex-direction: column; }
     .mangosteen-replica-shot-fields,
+    .mangosteen-replica-timeline-fields,
     .mangosteen-replica-model-grid { grid-template-columns: minmax(0, 1fr); }
     .mangosteen-replica-shot-summary-row { grid-template-columns: minmax(60px, 0.35fr) minmax(0, 1fr); }
     .mangosteen-replica-shot-summary-row .is-title { grid-column: 2; }
@@ -624,6 +681,9 @@
     .mangosteen-replica-shot-actions { grid-column: 1; }
     .mangosteen-replica-shot-actions { flex-wrap: wrap; justify-content: flex-start; min-width: 0; }
     .mangosteen-replica-model-error { align-items: stretch; flex-direction: column; }
+    .mangosteen-replica-timeline-header { align-items: stretch; flex-direction: column; }
+    .mangosteen-replica-timeline-actions { flex-wrap: wrap; }
+    .mangosteen-replica-timeline-time { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .mangosteen-replica-workbench input,
     .mangosteen-replica-workbench select,
     .mangosteen-replica-workbench textarea { max-width: 100%; min-width: 0; }

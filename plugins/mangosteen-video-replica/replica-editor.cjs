@@ -26,6 +26,8 @@ const DIRECT_FIELDS = {
   settings: new Set(["imageModel", "videoModel", "ratio", "resolution"]),
 };
 
+const TIMELINE_FIELDS = new Set(["start", "end", "action", "dialogue", "performance", "camera", "environment"]);
+
 function clone(value) {
   if (Array.isArray(value)) return value.map(clone);
   if (!value || typeof value !== "object") return value;
@@ -54,6 +56,16 @@ function updateDraftField(request, target, value) {
       || !target || typeof target !== "object" || Array.isArray(target)) unsupportedEdit();
 
   const next = clone(request);
+  if (target.section === "timeline") {
+    if (!TIMELINE_FIELDS.has(target.field)
+        || !Number.isInteger(target.shotIndex) || target.shotIndex < 0
+        || !Number.isInteger(target.segmentIndex) || target.segmentIndex < 0
+        || !Array.isArray(next.shots) || target.shotIndex >= next.shots.length
+        || !Array.isArray(next.shots[target.shotIndex]?.timeline)
+        || target.segmentIndex >= next.shots[target.shotIndex].timeline.length) unsupportedEdit();
+    next.shots[target.shotIndex].timeline[target.segmentIndex][target.field] = clone(value);
+    return next;
+  }
   const directFields = Object.prototype.hasOwnProperty.call(DIRECT_FIELDS, target.section)
     ? DIRECT_FIELDS[target.section]
     : null;
@@ -74,6 +86,42 @@ function updateDraftField(request, target, value) {
     unsupportedEdit();
   }
   next[collection.key][target.index][target.field] = clone(value);
+  return next;
+}
+
+function addTimelineSegment(request, shotIndex, segmentIndex) {
+  const next = clone(request);
+  const timeline = next?.shots?.[shotIndex]?.timeline;
+  if (!Array.isArray(timeline) || !timeline[segmentIndex]) unsupportedEdit();
+  const segment = timeline[segmentIndex];
+  const start = Number(segment.start);
+  const end = Number(segment.end);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end - start < 0.2) {
+    throw new Error("当前时间段太短，无法继续拆分。");
+  }
+  const midpoint = Number(((start + end) / 2).toFixed(3));
+  segment.end = midpoint;
+  timeline.splice(segmentIndex + 1, 0, {
+    start: midpoint,
+    end,
+    action: "",
+    dialogue: "",
+    performance: "",
+    camera: "",
+    environment: "",
+  });
+  return next;
+}
+
+function removeTimelineSegment(request, shotIndex, segmentIndex) {
+  const next = clone(request);
+  const timeline = next?.shots?.[shotIndex]?.timeline;
+  if (!Array.isArray(timeline) || !timeline[segmentIndex]) unsupportedEdit();
+  if (timeline.length === 1) throw new Error("每个镜头至少保留一个时间段。");
+  const removed = timeline[segmentIndex];
+  timeline.splice(segmentIndex, 1);
+  if (segmentIndex === 0) timeline[0].start = Number(removed.start);
+  else timeline[segmentIndex - 1].end = Number(removed.end);
   return next;
 }
 
@@ -103,8 +151,10 @@ function validateDraft(request, normalizeGenerationRequest) {
 }
 
 module.exports = {
+  addTimelineSegment,
   isDraftLocked,
   moveShot,
+  removeTimelineSegment,
   updateDraftField,
   validateDraft,
 };

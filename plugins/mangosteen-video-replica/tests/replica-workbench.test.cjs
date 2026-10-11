@@ -124,7 +124,7 @@ assert.strictEqual(
 );
 
 const request = {
-  version: 3,
+  version: 4,
   confirmed: false,
   character: { id: "hero", prompt: "短发人物，蓝色工装", voiceProfile: "年轻清亮女声，轻微四川口音" },
   products: [{ id: "phone", prompt: "银色手机" }],
@@ -136,14 +136,10 @@ const request = {
     sceneId: "room",
     productIds: ["phone"],
     duration: 4,
-    dialogue: "你好",
-    voiceDirection: "亲切，语速中等，句尾上扬",
-    plot: "人物举起手机",
-    environment: "白色背景",
-    camera: "缓慢推进",
-    imagePrompt: "人物手持手机",
-    lastImagePrompt: "人物看向镜头",
-    videoPrompt: "人物举起手机，镜头推进",
+    timeline: [
+      { start: 0, end: 2, action: "人物走入画面", dialogue: "", performance: "自然", camera: "远景跟拍", environment: "白色背景" },
+      { start: 2, end: 4, action: "人物举起手机", dialogue: "你好", performance: "亲切，语速中等，句尾上扬", camera: "缓慢推进", environment: "同一摄影棚" },
+    ],
   }],
 };
 
@@ -193,7 +189,7 @@ function createPlugin(snapshot = readySnapshot, projects = [{ folder: readySnaps
         selectedShotIds: this.snapshot.request.shots.filter((shot) => selected.has(shot.id)).map((shot) => shot.id),
         shots: this.snapshot.request.shots.filter((shot) => selected.has(shot.id)).map((shot) => ({
           ...clone(shot),
-          effectiveVideoPrompt: shot.videoPromptOverride || `最终提示词：${shot.videoPrompt}`,
+          effectiveVideoPrompt: shot.videoPromptOverride || "最终结构化时间轴提示词",
         })),
       };
     },
@@ -298,13 +294,26 @@ function createView(plugin) {
       && element.dataset.field === "title"
   ));
   assert(titleInput, "shot title input should render");
-  const voiceDirectionInput = view.contentEl.find((element) => (
+  const timelineRows = view.contentEl.findAll((element) => element.classList.contains("mangosteen-replica-timeline-row"));
+  assert.strictEqual(timelineRows.length, 2, "every dynamic timeline segment must render as one editable row");
+  const timelineFields = new Set(view.contentEl.findAll((element) => element.dataset.section === "timeline").map((element) => element.dataset.field));
+  assert.deepStrictEqual([...timelineFields].sort(), ["action", "camera", "dialogue", "end", "environment", "performance", "start"]);
+  for (const removedField of ["imagePrompt", "lastImagePrompt", "videoPrompt", "plot", "voiceDirection"]) {
+    assert.strictEqual(view.contentEl.find((element) => element.dataset.field === removedField), null, `${removedField} must not remain as a duplicate editor`);
+  }
+  const performanceInput = view.contentEl.find((element) => (
     element.tagName === "TEXTAREA"
-      && element.dataset.section === "shot"
-      && element.dataset.field === "voiceDirection"
+      && element.dataset.section === "timeline"
+      && element.dataset.field === "performance"
   ));
-  assert(voiceDirectionInput, "per-shot voice direction should be editable in the workbench");
-  assert.strictEqual(voiceDirectionInput.value, "亲切，语速中等，句尾上扬");
+  assert(performanceInput, "per-segment performance should be editable in the workbench");
+  assert.strictEqual(performanceInput.value, "自然");
+  const addSegmentButton = view.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "在后面添加");
+  await addSegmentButton.dispatch("click");
+  assert.strictEqual(view.draft.shots[0].timeline.length, 3);
+  const deleteSegmentButton = view.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "删除此段");
+  await deleteSegmentButton.dispatch("click");
+  assert.strictEqual(view.draft.shots[0].timeline.length, 2);
   titleInput.value = "本地改名";
   await titleInput.dispatch("input");
   assert.strictEqual(view.dirty, true);
@@ -616,10 +625,10 @@ function createView(plugin) {
   await partialLockView.onOpen();
   await partialLockView.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "分镜").dispatch("click");
   const lockedPrompt = partialLockView.contentEl.find((element) => (
-    element.tagName === "TEXTAREA" && element.dataset.index === "0" && element.dataset.field === "videoPrompt"
+    element.tagName === "TEXTAREA" && element.dataset.shotIndex === "0" && element.dataset.field === "action"
   ));
   const editablePrompt = partialLockView.contentEl.find((element) => (
-    element.tagName === "TEXTAREA" && element.dataset.index === "1" && element.dataset.field === "videoPrompt"
+    element.tagName === "TEXTAREA" && element.dataset.shotIndex === "1" && element.dataset.field === "action"
   ));
   assert.strictEqual(lockedPrompt.disabled, true, "queued or processing shots must be locked");
   assert.strictEqual(editablePrompt.disabled, false, "unselected shots must remain editable");
@@ -737,6 +746,21 @@ function createView(plugin) {
     false,
   );
   await failedStopView.onClose();
+
+  const invalidTimelineRequest = clone(request);
+  invalidTimelineRequest.shots[0].timeline = [
+    { ...invalidTimelineRequest.shots[0].timeline[0], end: 1 },
+    { ...invalidTimelineRequest.shots[0].timeline[1], start: 2, end: 4 },
+  ];
+  const invalidTimelinePlugin = createPlugin({ ...clone(readySnapshot), request: invalidTimelineRequest });
+  const invalidTimelineView = createView(invalidTimelinePlugin);
+  await invalidTimelineView.onOpen();
+  invalidTimelineView.dirty = true;
+  assert.strictEqual(await invalidTimelineView.saveDraft(), false, "a timeline gap must block saving");
+  assert.strictEqual(await invalidTimelineView.generateShots(["001"]), false, "a timeline gap must block paid generation");
+  assert.strictEqual(invalidTimelinePlugin.saveCalls.length, 0);
+  assert.strictEqual(invalidTimelinePlugin.queueCalls.length, 0);
+  await invalidTimelineView.onClose();
 
   const css = fs.readFileSync(path.join(__dirname, "../styles.css"), "utf8");
   const fallbackStart = css.indexOf("@supports not (container-type: inline-size)");

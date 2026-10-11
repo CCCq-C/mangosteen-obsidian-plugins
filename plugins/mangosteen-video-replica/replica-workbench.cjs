@@ -1,8 +1,11 @@
 const { normalizeGenerationRequest } = require("./replica-core.cjs");
 const { videoDurationRange } = require("./generation-policy.cjs");
+const { compileTimelinePrompt, legacyTimeline } = require("./shot-timeline.cjs");
 const {
+  addTimelineSegment,
   isDraftLocked,
   moveShot,
+  removeTimelineSegment,
   updateDraftField,
   validateDraft,
 } = require("./replica-editor.cjs");
@@ -26,6 +29,21 @@ function clone(value) {
   const output = {};
   for (const [key, item] of Object.entries(value)) output[key] = clone(item);
   return output;
+}
+
+function editableRequest(request) {
+  const next = clone(request || {});
+  const version = Number(next.version || 1);
+  if (version >= 2 && version < 4 && Array.isArray(next.scenes)) {
+    next.version = 4;
+    if (!Array.isArray(next.products)) next.products = [];
+    next.shots = list(next.shots).map((shot) => ({
+      ...shot,
+      productIds: Array.isArray(shot.productIds) ? shot.productIds : [],
+      timeline: Array.isArray(shot.timeline) && shot.timeline.length ? shot.timeline : legacyTimeline(shot),
+    }));
+  }
+  return next;
 }
 
 function text(value, fallback = "") {
@@ -168,7 +186,7 @@ function createVideoReplicaWorkbenchView(ItemView) {
       };
       const folderChanged = previousFolder !== text(nextSnapshot.project.folder);
       if (folderChanged) this.dirty = false;
-      if (!this.dirty || folderChanged || !this.draft) this.draft = clone(nextSnapshot.request);
+      if (!this.dirty || folderChanged || !this.draft) this.draft = editableRequest(nextSnapshot.request);
       this.snapshot = nextSnapshot;
       this.viewModel = deriveWorkbenchState(nextSnapshot);
       const availableShotIds = new Set(list(this.draft?.shots).map((shot) => String(shot.id)));
@@ -506,19 +524,38 @@ function createVideoReplicaWorkbenchView(ItemView) {
       if (projectShot.videoPath) this.createButton(cardActions, "打开视频", () => this.plugin.openVaultPath(projectShot.videoPath));
 
       const details = this.createDetails(card, `shot-${shot.id || index}`, "展开镜头内容", projectShot.status === "失败");
-      const detailGrid = details.createDiv({ cls: "mangosteen-replica-shot-fields" });
+      const timelineList = details.createDiv({ cls: "mangosteen-replica-timeline-list" });
       const lockedOptions = { disabled: shotLocked };
-      this.createDraftControl(detailGrid, "剧情 / 动作", "textarea", shot.plot, { section: "shot", index, field: "plot" }, lockedOptions);
-      this.createDraftControl(detailGrid, "台词", "textarea", shot.dialogue, { section: "shot", index, field: "dialogue" }, lockedOptions);
-      this.createDraftControl(detailGrid, "情绪与语调（语速、重音、停顿）", "textarea", shot.voiceDirection, { section: "shot", index, field: "voiceDirection" }, lockedOptions);
-      this.createDraftControl(detailGrid, "环境", "textarea", shot.environment, { section: "shot", index, field: "environment" }, lockedOptions);
-      this.createDraftControl(detailGrid, "镜头语言", "textarea", shot.camera, { section: "shot", index, field: "camera" }, lockedOptions);
-      this.createDraftControl(detailGrid, "首帧提示词", "textarea", shot.imagePrompt, { section: "shot", index, field: "imagePrompt" }, lockedOptions);
-      this.createDraftControl(detailGrid, "尾帧提示词", "textarea", shot.lastImagePrompt, { section: "shot", index, field: "lastImagePrompt" }, lockedOptions);
-      this.createDraftControl(detailGrid, "视频提示词", "textarea", shot.videoPrompt, { section: "shot", index, field: "videoPrompt" }, lockedOptions);
-      this.createDraftControl(detailGrid, "完整视频提示词（选填）", "textarea", shot.videoPromptOverride, {
-        section: "shot", index, field: "videoPromptOverride",
-      }, lockedOptions);
+      const timeline = list(shot.timeline).length ? list(shot.timeline) : legacyTimeline(shot);
+      timeline.forEach((segment, segmentIndex) => {
+        const row = timelineList.createDiv({ cls: "mangosteen-replica-timeline-row" });
+        const rowHeader = row.createDiv({ cls: "mangosteen-replica-timeline-header" });
+        rowHeader.createEl("strong", { text: `时间段 ${segmentIndex + 1}` });
+        const rowActions = rowHeader.createDiv({ cls: "mangosteen-replica-timeline-actions" });
+        this.createButton(rowActions, "在后面添加", () => this.addTimelineRow(index, segmentIndex), "", shotLocked);
+        this.createButton(rowActions, "删除此段", () => this.removeTimelineRow(index, segmentIndex), "", shotLocked || timeline.length <= 1);
+        const timeGrid = row.createDiv({ cls: "mangosteen-replica-timeline-time" });
+        this.createDraftControl(timeGrid, "开始（秒）", "input", segment.start, {
+          section: "timeline", shotIndex: index, segmentIndex, field: "start",
+        }, { inputType: "number", min: "0", max: String(shot.duration), step: "0.1", disabled: shotLocked });
+        this.createDraftControl(timeGrid, "结束（秒）", "input", segment.end, {
+          section: "timeline", shotIndex: index, segmentIndex, field: "end",
+        }, { inputType: "number", min: "0", max: String(shot.duration), step: "0.1", disabled: shotLocked });
+        const contentGrid = row.createDiv({ cls: "mangosteen-replica-timeline-fields" });
+        this.createDraftControl(contentGrid, "画面动作", "textarea", segment.action, { section: "timeline", shotIndex: index, segmentIndex, field: "action" }, lockedOptions);
+        this.createDraftControl(contentGrid, "人物台词", "textarea", segment.dialogue, { section: "timeline", shotIndex: index, segmentIndex, field: "dialogue" }, lockedOptions);
+        this.createDraftControl(contentGrid, "情绪与声音", "textarea", segment.performance, { section: "timeline", shotIndex: index, segmentIndex, field: "performance" }, lockedOptions);
+        this.createDraftControl(contentGrid, "景别与运镜", "textarea", segment.camera, { section: "timeline", shotIndex: index, segmentIndex, field: "camera" }, lockedOptions);
+        this.createDraftControl(contentGrid, "环境", "textarea", segment.environment, { section: "timeline", shotIndex: index, segmentIndex, field: "environment" }, lockedOptions);
+      });
+      const previewLabel = details.createEl("label", { cls: "mangosteen-replica-field mangosteen-replica-prompt-preview" });
+      previewLabel.createEl("span", { text: "最终视频提示词预览" });
+      const preview = previewLabel.createEl("textarea", { attr: { readonly: "true", "aria-label": "最终视频提示词预览" } });
+      try {
+        preview.value = compileTimelinePrompt(timeline, { duration: shot.duration, voiceProfile: this.draft?.character?.voiceProfile });
+      } catch (error) {
+        preview.value = `时间轴待修正：${String(error?.message || error)}`;
+      }
 
       if (projectShot.error) card.createDiv({ cls: "mangosteen-replica-error", text: projectShot.error });
     });
@@ -636,6 +673,8 @@ function createVideoReplicaWorkbenchView(ItemView) {
     control.dataset.section = target.section;
     control.dataset.field = target.field;
     if (target.index !== undefined) control.dataset.index = String(target.index);
+    if (target.shotIndex !== undefined) control.dataset.shotIndex = String(target.shotIndex);
+    if (target.segmentIndex !== undefined) control.dataset.segmentIndex = String(target.segmentIndex);
     if (tagName === "select") {
       for (const [optionValue, optionLabel] of options.options || []) {
         control.createEl("option", { text: optionLabel, attr: { value: optionValue } });
@@ -648,7 +687,7 @@ function createVideoReplicaWorkbenchView(ItemView) {
     control.value = value === undefined || value === null ? "" : String(value);
     control.disabled = this.editingLocked() || Boolean(options.disabled);
     control.addEventListener(tagName === "select" ? "change" : "input", async () => {
-      const nextValue = target.field === "duration" ? Number(control.value) : control.value;
+      const nextValue = ["duration", "start", "end"].includes(target.field) ? Number(control.value) : control.value;
       try {
         this.draft = updateDraftField(this.draft, target, nextValue);
         this.dirty = true;
@@ -732,6 +771,22 @@ function createVideoReplicaWorkbenchView(ItemView) {
   reorderShot(index, direction) {
     if (this.editingLocked()) return;
     this.draft = moveShot(this.draft, index, direction);
+    this.dirty = true;
+    this.render();
+    this.renderSignature = this.buildRenderSignature();
+  }
+
+  addTimelineRow(shotIndex, segmentIndex) {
+    if (this.editingLocked() || this.shotLocked(this.draft?.shots?.[shotIndex]?.id)) return;
+    this.draft = addTimelineSegment(this.draft, shotIndex, segmentIndex);
+    this.dirty = true;
+    this.render();
+    this.renderSignature = this.buildRenderSignature();
+  }
+
+  removeTimelineRow(shotIndex, segmentIndex) {
+    if (this.editingLocked() || this.shotLocked(this.draft?.shots?.[shotIndex]?.id)) return;
+    this.draft = removeTimelineSegment(this.draft, shotIndex, segmentIndex);
     this.dirty = true;
     this.render();
     this.renderSignature = this.buildRenderSignature();

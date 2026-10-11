@@ -295,6 +295,7 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
     { id: "002", title: "A 新标题", workbenchId: "001" },
   ]);
   const savedWorkbenchProject = JSON.parse(fs.readFileSync(path.join(workbenchRoot, "project.json"), "utf8"));
+  assert(savedWorkbenchProject.shots.every((shot) => Array.isArray(shot.timeline)), "saved structured timelines must be mirrored into project.json");
   assert.deepStrictEqual(savedWorkbenchProject.shots.map((shot) => ({
     title: shot.title,
     dialogue: shot.dialogue,

@@ -26,6 +26,7 @@ const WORKBENCH_SHOT_FIELDS = [
   "duration",
   "sceneId",
   "productIds",
+  "timeline",
   "dialogue",
   "voiceDirection",
   "plot",
