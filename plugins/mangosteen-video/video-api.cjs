@@ -100,7 +100,7 @@ function createVideoPayload(options = {}) {
   const inputCapabilities = VIDEO_INPUT_CAPABILITIES[modelFamily];
   if (!prompt) throw new Error("请先描述想生成的视频");
   if (capabilities.maxPrompt && prompt.length > capabilities.maxPrompt) throw new Error(`${model} 的视频描述不能超过 ${capabilities.maxPrompt} 个字符`);
-  if (!Number.isInteger(duration) || duration < capabilities.minDuration || duration > capabilities.maxDuration) throw new Error(`视频时长必须是 ${capabilities.minDuration} 到 ${capabilities.maxDuration} 秒`);
+  if (!Number.isInteger(duration) || duration < capabilities.minDuration || duration > capabilities.maxDuration) throw new Error(`视频时长必须是 ${capabilities.minDuration} 到 ${capabilities.maxDuration} 的整数秒`);
   if (!["16:9", "9:16", "1:1"].includes(ratio)) throw new Error("视频比例仅支持 16:9、9:16 或 1:1");
   if (!capabilities.resolutions.includes(resolution)) throw new Error(`${model} 的分辨率仅支持 ${capabilities.resolutions.join("、")}`);
   const firstImage = clean(options.firstImage);

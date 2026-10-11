@@ -105,6 +105,9 @@ assert.throws(() => api.createVideoPayload({
   model: "MiniMax-H3", prompt: "move", duration: 4, resolution: "768p", generateAudio: true
 }), /MiniMax-H3.*音频/);
 assert.throws(() => api.createVideoPayload({
+  model: "MiniMax-H3", prompt: "move", duration: 13.5, resolution: "768p"
+}), /4 到 15 的整数秒/);
+assert.throws(() => api.createVideoPayload({
   model: "vendor-seedance-preview", prompt: "move", duration: 4, ratio: "9:16", resolution: "720p"
 }), /不支持的 Seedance/);
 assert.strictEqual(api.resolveVideoModelFamily("vendor-seedance-preview"), "unsupported-seedance");
