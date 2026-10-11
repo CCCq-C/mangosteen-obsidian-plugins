@@ -232,6 +232,8 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     this.queueApis = new Map();
     this.queueRuns = new Map();
     this.activeQueueObjects = new Map();
+    this.queueRunnerLocks = new Map();
+    this.queueRunnerLockRequired = new Set();
     const savedSettings = typeof this.loadData === "function" ? await this.loadData() : null;
     this.settings = Object.assign({}, DEFAULT_SETTINGS, savedSettings && typeof savedSettings === "object" ? savedSettings : {});
     this.registerView(this.workbenchViewType, (leaf) => new VideoReplicaWorkbenchView(leaf, this));
@@ -476,11 +478,11 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     }
   }
 
-  workbenchQueueApi(folder) {
+  workbenchQueueApi(folder, activeQueueOverride = null) {
     const paths = this.workbenchProjectPaths(folder, { createWorkDirectory: true });
     const existing = this.queueApis.get(paths.folder);
     if (existing) return existing;
-    const activeQueue = this.currentWorkbenchQueue(paths.folder);
+    const activeQueue = activeQueueOverride || this.currentWorkbenchQueue(paths.folder);
     const activeQueues = activeQueue && ["idle", "processing"].includes(String(activeQueue.status))
       ? [activeQueue]
       : [];
@@ -488,6 +490,12 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     const api = replicaLogicApi.createReplicaLogicApi({
       activeQueues,
       saveQueue: async (queue) => {
+        const queueId = String(queue?.queueId || "");
+        if (this.queueRunnerLockRequired.has(queueId)) {
+          const runnerLock = this.queueRunnerLocks.get(queueId);
+          if (!runnerLock) throw new Error("生成队列运行锁已丢失，已停止后续付费任务。");
+          this.assertWorkbenchQueueLockOwned(runnerLock);
+        }
         const persisted = this.currentWorkbenchQueue(paths.folder);
         if (persisted?.queueId === queue.queueId && persisted.stopRequested === true) queue.stopRequested = true;
         const liveQueue = this.activeQueueObjects.get(paths.folder);
@@ -533,10 +541,10 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         throw new Error("当前项目正在创建生成队列，请勿重复操作。");
       }
     }
-    const lock = { queueLockPath, token, payload, heartbeat: null };
+    const lock = { folder: this.workbenchProjectPaths(folder).folder, queueLockPath, token, payload, heartbeat: null, lostError: null };
     lock.heartbeat = setInterval(() => {
       try { this.assertWorkbenchQueueLockOwned(lock); }
-      catch (_) { /* ownership is checked again before enqueue */ }
+      catch (error) { lock.lostError = error instanceof Error ? error : new Error(String(error)); }
     }, 15000);
     lock.heartbeat.unref?.();
     return lock;
@@ -544,6 +552,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
 
   assertWorkbenchQueueLockOwned(lock) {
     if (!lock?.queueLockPath || !lock?.token) throw new Error("生成队列锁无效，请重新操作。");
+    if (lock.lostError) throw lock.lostError;
     let current;
     try { current = this.readJson(lock.queueLockPath); }
     catch (_) { throw new Error("生成队列锁已丢失，请重新选择镜头生成。"); }
@@ -560,8 +569,21 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     return true;
   }
 
+  assertWorkbenchQueueRunnerLock(folder, queueId) {
+    const normalized = this.workbenchProjectPaths(folder).folder;
+    const normalizedQueueId = String(queueId || "");
+    if (!this.queueRunnerLockRequired.has(normalizedQueueId)) return true;
+    const lock = this.queueRunnerLocks.get(normalizedQueueId);
+    if (!lock || lock.folder !== normalized) throw new Error("生成队列运行锁已丢失，已停止后续付费任务。");
+    return this.assertWorkbenchQueueLockOwned(lock);
+  }
+
   releaseWorkbenchQueueLock(lock) {
     if (lock?.heartbeat) clearInterval(lock.heartbeat);
+    if (lock?.queueId && this.queueRunnerLocks.get(lock.queueId) === lock) {
+      this.queueRunnerLocks.delete(lock.queueId);
+      this.queueRunnerLockRequired.delete(lock.queueId);
+    }
     if (!lock?.queueLockPath || !lock?.token) return;
     try {
       const payload = this.readJson(lock.queueLockPath);
@@ -593,6 +615,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
   async startWorkbenchGeneration(folder, plan) {
     const paths = this.workbenchProjectPaths(folder, { createWorkDirectory: true });
     const lock = this.acquireWorkbenchQueueLock(paths.folder);
+    let lockTransferredToRun = false;
     try {
       const api = this.workbenchQueueApi(paths.folder);
       const assertNoActiveQueue = () => {
@@ -610,6 +633,9 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       const confirmedPlan = api.confirm(plan, this.readJson(paths.requestPath));
       this.assertWorkbenchQueueLockOwned(lock);
       const queue = await api.enqueue(confirmedPlan);
+      lock.queueId = String(queue.queueId);
+      this.queueRunnerLockRequired.add(lock.queueId);
+      this.queueRunnerLocks.set(lock.queueId, lock);
       this.activeQueueObjects.set(paths.folder, queue);
       const queuedSnapshot = JSON.parse(JSON.stringify(queue));
       const run = Promise.resolve()
@@ -618,13 +644,15 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         .catch((error) => {
           new Notice(`分镜队列运行失败：${String(error?.message || error)}`, 10000);
           throw error;
-        });
+        })
+        .finally(() => this.releaseWorkbenchQueueLock(lock));
+      lockTransferredToRun = true;
       this.queueRuns.set(paths.folder, run);
       run.catch(() => {});
       this.requestWorkbenchRefresh();
       return queuedSnapshot;
     } finally {
-      this.releaseWorkbenchQueueLock(lock);
+      if (!lockTransferredToRun) this.releaseWorkbenchQueueLock(lock);
     }
   }
 
@@ -652,57 +680,77 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
 
   async recoverWorkbenchQueue(folder) {
     const paths = this.workbenchProjectPaths(folder, { createWorkDirectory: true });
-    const queue = this.currentWorkbenchQueue(paths.folder);
-    if (!queue || !Array.isArray(queue.shots)) return false;
-    const locked = queue.shots.filter((shot) => shot.status === "queued" || shot.status === "processing");
-    if (!locked.length || !["idle", "processing"].includes(String(queue.status))) return false;
+    const candidate = this.currentWorkbenchQueue(paths.folder);
+    const candidateLocked = candidate?.shots?.some((shot) => shot.status === "queued" || shot.status === "processing");
+    if (!candidateLocked || !["idle", "processing"].includes(String(candidate?.status))) return false;
 
-    if (queue.status === "processing") {
-      const project = this.readJson(paths.projectPath);
-      let unsafeRecovery = false;
-      for (const shot of queue.shots) {
-        if (shot.status !== "processing") continue;
-        const projectShot = (project.shots || []).find((item) => String(item.id) === String(shot.id));
-        if (projectShot?.videoTaskId && projectShot.videoTaskPlanId === queue.planId) {
-          shot.status = "queued";
-          shot.error = "";
-        } else {
-          shot.status = "failed";
-          shot.error = "上次运行在平台任务编号写入前中断。为避免重复付费，已停止自动恢复，请人工确认后重试。";
-          unsafeRecovery = true;
+    let lock;
+    try { lock = this.acquireWorkbenchQueueLock(paths.folder); }
+    catch (error) {
+      if (/正在创建生成队列|请勿重复操作/.test(String(error?.message || error))) return false;
+      throw error;
+    }
+    let lockTransferredToRun = false;
+    try {
+      const queue = this.currentWorkbenchQueue(paths.folder);
+      const locked = queue?.shots?.filter((shot) => shot.status === "queued" || shot.status === "processing") || [];
+      if (!queue || !locked.length || !["idle", "processing"].includes(String(queue.status))) return false;
+      lock.queueId = String(queue.queueId);
+      this.queueRunnerLockRequired.add(lock.queueId);
+      this.queueRunnerLocks.set(lock.queueId, lock);
+
+      if (queue.status === "processing") {
+        const project = this.readJson(paths.projectPath);
+        let unsafeRecovery = false;
+        for (const shot of queue.shots) {
+          if (shot.status !== "processing") continue;
+          const projectShot = (project.shots || []).find((item) => String(item.id) === String(shot.id));
+          if (projectShot?.videoTaskId && projectShot.videoTaskPlanId === queue.planId) {
+            shot.status = "queued";
+            shot.error = "";
+          } else {
+            shot.status = "failed";
+            shot.error = "上次运行在平台任务编号写入前中断。为避免重复付费，已停止自动恢复，请人工确认后重试。";
+            unsafeRecovery = true;
+          }
         }
-      }
-      if (unsafeRecovery || queue.stopRequested === true) {
-        for (const shot of queue.shots) if (shot.status === "queued") shot.status = "stopped";
-        queue.status = unsafeRecovery ? "completed_with_errors" : "stopped";
+        if (unsafeRecovery || queue.stopRequested === true) {
+          for (const shot of queue.shots) if (shot.status === "queued") shot.status = "stopped";
+          queue.status = unsafeRecovery ? "completed_with_errors" : "stopped";
+          queue.updatedAt = new Date().toISOString();
+          writeJson(paths.queuePath, queue);
+          this.mutateProject(paths.folder, (project) => {
+            project.status = unsafeRecovery ? "completed_with_errors" : "analysis_ready";
+            project.statusText = unsafeRecovery
+              ? "检测到上次异常中断。为避免重复付费，未自动重提任务，请检查失败镜头后手动重试。"
+              : "已恢复停止请求；不会自动提交后续镜头。";
+          });
+          return false;
+        }
+        queue.status = "idle";
         queue.updatedAt = new Date().toISOString();
         writeJson(paths.queuePath, queue);
-        this.mutateProject(paths.folder, (project) => {
-          project.status = unsafeRecovery ? "completed_with_errors" : "analysis_ready";
-          project.statusText = unsafeRecovery
-            ? "检测到上次异常中断。为避免重复付费，未自动重提任务，请检查失败镜头后手动重试。"
-            : "已恢复停止请求；不会自动提交后续镜头。";
-        });
-        return false;
       }
-      queue.status = "idle";
-      queue.updatedAt = new Date().toISOString();
-      writeJson(paths.queuePath, queue);
-    }
 
-    this.queueApis.delete(paths.folder);
-    const api = this.workbenchQueueApi(paths.folder);
-    this.activeQueueObjects.set(paths.folder, queue);
-    const run = Promise.resolve()
-      .then(() => api.run(queue))
-      .then(() => this.finishWorkbenchQueue(paths.folder, queue))
-      .catch((error) => {
-        new Notice(`分镜队列恢复失败：${String(error?.message || error)}`, 10000);
-        throw error;
-      });
-    this.queueRuns.set(paths.folder, run);
-    run.catch(() => {});
-    return true;
+      this.assertWorkbenchQueueLockOwned(lock);
+      this.queueApis.delete(paths.folder);
+      const api = this.workbenchQueueApi(paths.folder, queue);
+      this.activeQueueObjects.set(paths.folder, queue);
+      const run = Promise.resolve()
+        .then(() => api.run(queue))
+        .then(() => this.finishWorkbenchQueue(paths.folder, queue))
+        .catch((error) => {
+          new Notice(`分镜队列恢复失败：${String(error?.message || error)}`, 10000);
+          throw error;
+        })
+        .finally(() => this.releaseWorkbenchQueueLock(lock));
+      lockTransferredToRun = true;
+      this.queueRuns.set(paths.folder, run);
+      run.catch(() => {});
+      return true;
+    } finally {
+      if (!lockTransferredToRun) this.releaseWorkbenchQueueLock(lock);
+    }
   }
 
   async recoverWorkbenchQueues() {
@@ -1577,6 +1625,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
 
   async runWorkbenchQueueShot(projectFolder, shot, context) {
     const paths = this.workbenchProjectPaths(projectFolder, { createWorkDirectory: true });
+    this.assertWorkbenchQueueRunnerLock(paths.folder, context.queueId);
     for (const directory of ["01-人物参考", "02-分镜脚本", "03-视频片段", "04-最终成片", ".work"]) {
       this.checkedProjectPath(paths.folder, directory, { createParents: true, directory: true });
     }
@@ -1623,6 +1672,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     }
     const { image, video, imageModel, model, resolution } = await this.resolveQueueGenerationRuntime(context.settings);
     const ensureAsset = async (kind, source) => {
+      this.assertWorkbenchQueueRunnerLock(paths.folder, context.queueId);
       const resolver = kind === "character"
         ? referenceAssets.resolveCharacterAsset
         : kind === "scene"
@@ -1724,6 +1774,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         ...productSources.map(({ asset }, index) => "参考图" + (index + 3) + "是产品设定板（" + asset.id + "）：产品外形、颜色、材质、比例、包装和标识位置必须严格一致。"),
       ].join("\n");
       if (!videoTaskId && !currentFirstImagePath) {
+        this.assertWorkbenchQueueRunnerLock(paths.folder, context.queueId);
         this.updateProjectShot(paths.folder, shot.id, { status: "正在生成首帧" });
         const candidate = await this.generateImageMulti(image, shot.imagePrompt + "\n" + continuity, referencePaths, imageModel);
         currentFirstImagePath = await this.saveImageCandidate(image, candidate, firstImagePath);
@@ -1734,6 +1785,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         });
       }
       if (!videoTaskId && lastImagePath && !currentLastImagePath) {
+        this.assertWorkbenchQueueRunnerLock(paths.folder, context.queueId);
         this.updateProjectShot(paths.folder, shot.id, { status: "正在生成尾帧" });
         const candidate = await this.generateImageMulti(image, shot.lastImagePrompt + "\n" + continuity, referencePaths, imageModel);
         currentLastImagePath = await this.saveImageCandidate(image, candidate, lastImagePath);
@@ -1741,6 +1793,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       }
 
       if (!videoTaskId) {
+        this.assertWorkbenchQueueRunnerLock(paths.folder, context.queueId);
         this.updateProjectShot(paths.folder, shot.id, { status: "正在提交视频任务" });
         let task;
         try {

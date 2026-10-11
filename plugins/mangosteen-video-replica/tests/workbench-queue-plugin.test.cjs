@@ -161,6 +161,44 @@ function request() {
     imageModels: ["gpt-image-2-w"],
     videoModels: ["MiniMax-H3"],
   });
+  const lostLockPlan = await plugin.previewWorkbenchGeneration(folder, ["001", "002"]);
+  let releaseLostLockShot;
+  let lostLockShotReached;
+  const lostLockShotGate = new Promise((resolve) => { releaseLostLockShot = resolve; });
+  const lostLockShotStarted = new Promise((resolve) => { lostLockShotReached = resolve; });
+  const lostLockSubmitted = [];
+  plugin.runWorkbenchQueueShot = async (_folder, shot) => {
+    lostLockSubmitted.push(shot.id);
+    if (shot.id === "001") {
+      lostLockShotReached();
+      await lostLockShotGate;
+    }
+    return { videoPath: `${folder}/03-视频片段/${shot.id}.mp4` };
+  };
+  await plugin.startWorkbenchGeneration(folder, lostLockPlan);
+  await lostLockShotStarted;
+  const lostLockPath = path.join(root, ".work/generation-queue.lock");
+  const lostLockStaleTime = new Date(Date.now() - 6 * 60 * 1000);
+  fs.utimesSync(lostLockPath, lostLockStaleTime, lostLockStaleTime);
+  await assert.rejects(
+    () => plugin.startWorkbenchGeneration(folder, lostLockPlan),
+    /已有生成队列/,
+    "a replacement start may take a stale file lock but must not detach the running queue from its own lock",
+  );
+  assert.strictEqual(plugin.queueRunnerLocks.size, 1, "the old run must retain its queue-specific lost-lock state");
+  releaseLostLockShot();
+  await assert.rejects(
+    plugin.queueRuns.get(folder),
+    /队列锁已丢失|锁已被其他实例接管/,
+    "a runner that loses its lock must stop before submitting the next paid shot",
+  );
+  assert.deepStrictEqual(lostLockSubmitted, ["001"], "lock loss must prevent every later shot submission");
+  assert.strictEqual(plugin.queueRunnerLocks.size, 0, "the stopped old run must clean up its queue-specific lock state");
+  assert.strictEqual(plugin.queueRunnerLockRequired.size, 0, "the stopped old run must clean up its lock requirement");
+  plugin.activeQueueObjects.delete(folder);
+  plugin.queueApis.delete(folder);
+  fs.writeFileSync(path.join(root, ".work/generation-queue.json"), JSON.stringify(persistedQueue));
+
   const stopPlan = await plugin.previewWorkbenchGeneration(folder, ["001", "002"]);
   let releaseFirstShot;
   let firstShotReached;
@@ -177,9 +215,12 @@ function request() {
   };
   await plugin.startWorkbenchGeneration(folder, stopPlan);
   await firstShotStarted;
+  const runnerLockPath = path.join(root, ".work/generation-queue.lock");
+  assert.strictEqual(fs.existsSync(runnerLockPath), true, "the queue runner must keep the renewable project lock until it finishes");
   await plugin.stopWorkbenchGeneration(folder);
   releaseFirstShot();
   await plugin.queueRuns.get(folder);
+  assert.strictEqual(fs.existsSync(runnerLockPath), false, "the queue runner must release its project lock after stopping");
   assert.deepStrictEqual(stopSubmitted, ["001"], "stop must update the exact queue object used by the runner");
   assert.strictEqual(JSON.parse(fs.readFileSync(path.join(root, ".work/generation-queue.json"))).status, "stopped");
 
@@ -280,14 +321,40 @@ function request() {
   fs.writeFileSync(path.join(root, ".work/generation-queue.json"), JSON.stringify(recoverQueue));
   plugin.queueApis.delete(folder);
   submittedVideoOptions.length = 0;
+  let releaseRecoveryWait;
+  let recoveryWaitReached;
+  const recoveryWaitGate = new Promise((resolve) => { releaseRecoveryWait = resolve; });
+  const recoveryWaitStarted = new Promise((resolve) => { recoveryWaitReached = resolve; });
   plugin.waitForVideo = async (_videoPlugin, taskId) => {
     assert.strictEqual(taskId, "video-task");
+    recoveryWaitReached();
+    await recoveryWaitGate;
     return { localPath: "山竹视频资产库/recovered.mp4" };
   };
-  await plugin.recoverWorkbenchQueue(folder);
+  assert.strictEqual(await plugin.recoverWorkbenchQueue(folder), true);
+  await recoveryWaitStarted;
+  assert.strictEqual(fs.existsSync(runnerLockPath), true, "recovery must hold the same renewable project lock as a new queue");
+  assert.strictEqual(
+    await plugin.recoverWorkbenchQueue(folder),
+    false,
+    "a second Obsidian instance must not recover the same paid queue while the runner lock is live",
+  );
+  releaseRecoveryWait();
   await plugin.queueRuns.get(folder);
+  assert.strictEqual(fs.existsSync(runnerLockPath), false, "recovery must release the project lock after completion");
   assert.strictEqual(submittedVideoOptions.length, 0, "restart recovery must poll the persisted task instead of resubmitting it");
   assert.strictEqual(JSON.parse(fs.readFileSync(path.join(root, ".work/generation-queue.json"))).status, "completed");
+
+  const repeatedAfterRecovery = [];
+  plugin.runWorkbenchQueueShot = async (_folder, shot) => {
+    repeatedAfterRecovery.push(shot.id);
+    return { videoPath: `${folder}/03-视频片段/${shot.id}-repeat.mp4` };
+  };
+  const repeatPlan = await plugin.previewWorkbenchGeneration(folder, ["002"]);
+  await plugin.startWorkbenchGeneration(folder, repeatPlan);
+  await plugin.queueRuns.get(folder);
+  assert.deepStrictEqual(repeatedAfterRecovery, ["002"], "a recovered queue must not leave a stale locked copy in the logic API");
+  plugin.runWorkbenchQueueShot = realRunWorkbenchQueueShot;
 
   const failedProject = JSON.parse(fs.readFileSync(path.join(root, "project.json")));
   const failedShot = failedProject.shots.find((shot) => shot.id === "002");
