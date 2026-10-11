@@ -57,6 +57,8 @@ function prepareGenerationPlan(request, selectedShotIds) {
   const shots = normalized.shots.filter((shot) => selectedSet.has(shot.id)).map((shot) => ({
     ...shot,
     effectiveVideoPrompt: resolveVideoPrompt({
+      timeline: shot.timeline,
+      duration: shot.duration,
       videoPrompt: shot.videoPrompt,
       videoPromptOverride: shot.videoPromptOverride,
       dialogue: shot.dialogue,

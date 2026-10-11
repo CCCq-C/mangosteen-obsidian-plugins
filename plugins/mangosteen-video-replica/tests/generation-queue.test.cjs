@@ -50,6 +50,23 @@ function draft() {
   };
 }
 
+function timelineDraft() {
+  const value = draft();
+  value.version = 4;
+  value.shots = [{
+    id: "001",
+    title: "时间轴开场",
+    sceneId: "room",
+    productIds: ["headphones"],
+    duration: 6,
+    timeline: [
+      { start: 0, end: 2.5, action: "女主走进客厅", dialogue: "", performance: "自然", camera: "远景跟拍", environment: "暖色客厅" },
+      { start: 2.5, end: 6, action: "女主举起耳机", dialogue: "就是这款。", performance: "惊喜，句尾上扬", camera: "中景推进到特写", environment: "同一客厅" },
+    ],
+  }];
+  return value;
+}
+
 assert.throws(() => prepareGenerationPlan(draft(), []), /至少选择一个镜头/);
 assert.throws(() => prepareGenerationPlan(draft(), ["999"]), /找不到镜头.*999/);
 assert.throws(() => prepareGenerationPlan(draft(), ["001", "001"]), /重复选择镜头.*001/);
@@ -82,6 +99,14 @@ const confirmed = confirmGenerationPlan(plan, draft());
 assert.strictEqual(confirmed.confirmed, true);
 assert.strictEqual(confirmed.planId, plan.planId);
 assert.strictEqual(Object.isFrozen(confirmed), true);
+
+const timelinePlan = prepareGenerationPlan(timelineDraft(), ["001"]);
+assert.match(timelinePlan.shots[0].effectiveVideoPrompt, /【0～2\.5 秒】/);
+assert.match(timelinePlan.shots[0].effectiveVideoPrompt, /人物台词：就是这款。/);
+assert.strictEqual((timelinePlan.shots[0].effectiveVideoPrompt.match(/年轻清亮的中文女声/g) || []).length, 1);
+const editedTimelineRequest = timelineDraft();
+editedTimelineRequest.shots[0].timeline[1].action = "女主放下耳机";
+assert.throws(() => confirmGenerationPlan(timelinePlan, editedTimelineRequest), /草案已变化.*重新确认/);
 
 const tamperedPlan = JSON.parse(JSON.stringify(plan));
 tamperedPlan.shots[0].effectiveVideoPrompt = "没有经过用户确认的替换提示词";

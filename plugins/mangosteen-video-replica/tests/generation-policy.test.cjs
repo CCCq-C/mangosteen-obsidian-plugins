@@ -25,6 +25,18 @@ assert.match(spokenPrompt, /口型同步/);
 assert.match(spokenPrompt, /不得添加.*改写台词/);
 assert.match(spokenPrompt, /对白语言和口音严格遵循固定声音设定/);
 assert.doesNotMatch(spokenPrompt, /对白使用中文/);
+const timeline = [
+  { start: 0, end: 2.5, action: "人物走入客厅", dialogue: "", performance: "放松", camera: "远景跟拍", environment: "暖色客厅" },
+  { start: 2.5, end: 6, action: "人物举起耳机", dialogue: "就是这款。", performance: "惊喜，句尾上扬", camera: "中景推进", environment: "同一客厅" },
+];
+const timelinePrompt = composeVideoPrompt({
+  timeline,
+  duration: 6,
+  voiceProfile: "年轻清亮的中文女声。",
+});
+assert(timelinePrompt.indexOf("【0～2.5 秒】") < timelinePrompt.indexOf("【2.5～6 秒】"));
+assert.match(timelinePrompt, /人物台词：就是这款。/);
+assert.strictEqual((timelinePrompt.match(/年轻清亮的中文女声/g) || []).length, 1);
 assert.strictEqual(composeVideoPrompt({
   videoPrompt: "港口空镜，海浪轻拍岸边。",
   dialogue: "",
@@ -142,6 +154,7 @@ const fingerprintInput = {
     lastImagePrompt: "人物转身看海",
     videoPrompt: "人物转身，镜头缓慢推进",
     duration: 4,
+    timeline: [{ start: 0, end: 4, action: "人物转身", dialogue: "你好", performance: "自然", camera: "推进", environment: "码头" }],
   },
   model: "seedance-2.5",
   ratio: "9:16",
@@ -159,8 +172,8 @@ for (const changed of [
   { products: [{ ...fingerprintInput.products[0], contentHash: "sha256:product-b" }] },
   { shot: { ...fingerprintInput.shot, imagePrompt: "人物坐在集装箱前" } },
   { shot: { ...fingerprintInput.shot, lastImagePrompt: "" } },
-  { shot: { ...fingerprintInput.shot, videoPrompt: "人物快步跑向镜头" } },
-  { shot: { ...fingerprintInput.shot, duration: 5 } },
+  { shot: { ...fingerprintInput.shot, duration: 5, timeline: [{ ...fingerprintInput.shot.timeline[0], end: 5 }] } },
+  { shot: { ...fingerprintInput.shot, timeline: [{ ...fingerprintInput.shot.timeline[0], action: "人物坐下" }] } },
   { model: "MiniMax-H3", resolution: "768p" },
   { ratio: "16:9" },
   { resolution: "1080p" },

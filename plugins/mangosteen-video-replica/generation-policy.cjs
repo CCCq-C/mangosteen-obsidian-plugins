@@ -1,4 +1,5 @@
 const crypto = require("crypto");
+const { compileTimelinePrompt } = require("./shot-timeline.cjs");
 
 const clean = (value) => String(value || "").trim();
 
@@ -32,7 +33,10 @@ function referenceRequirements(model, lastImagePrompt = "") {
   };
 }
 
-function composeVideoPrompt({ videoPrompt, dialogue, voiceProfile, voiceDirection } = {}) {
+function composeVideoPrompt({ timeline, duration, videoPrompt, dialogue, voiceProfile, voiceDirection } = {}) {
+  if (Array.isArray(timeline) && timeline.length) {
+    return compileTimelinePrompt(timeline, { duration, voiceProfile });
+  }
   const visualPrompt = clean(videoPrompt);
   const spokenText = clean(dialogue);
   if (!spokenText) return visualPrompt;
@@ -69,12 +73,23 @@ function createGenerationFingerprint({ character = {}, scene = {}, products = []
     imagePrompt: clean(shot.imagePrompt),
     lastImagePrompt: clean(shot.lastImagePrompt),
     effectiveVideoPrompt: resolveVideoPrompt({
+      timeline: shot.timeline,
+      duration: shot.duration,
       videoPrompt: shot.videoPrompt,
       videoPromptOverride: shot.videoPromptOverride,
       dialogue: shot.dialogue,
       voiceProfile: character.voiceProfile,
       voiceDirection: shot.voiceDirection,
     }),
+    timeline: (Array.isArray(shot.timeline) ? shot.timeline : []).map((segment) => ({
+      start: Number(segment?.start),
+      end: Number(segment?.end),
+      action: clean(segment?.action),
+      dialogue: clean(segment?.dialogue),
+      performance: clean(segment?.performance),
+      camera: clean(segment?.camera),
+      environment: clean(segment?.environment),
+    })),
     model: clean(model),
     duration: Number(shot.duration),
     ratio: requirements.mode === "frame-fields" ? "omitted-with-frames" : clean(ratio),
