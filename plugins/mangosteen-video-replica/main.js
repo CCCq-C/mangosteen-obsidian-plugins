@@ -7,11 +7,14 @@ let core;
 let generationPolicy;
 let referenceAssets;
 let replicaEditor;
+let replicaLogicApi;
 let workflow;
 
 const ROOT = "山竹视频复刻";
 const REQUEST_FILE = "generation-request.json";
 const STATE_FILE = ".work/generation-state.json";
+const QUEUE_FILE = ".work/generation-queue.json";
+const QUEUE_LOCK_FILE = ".work/generation-queue.lock";
 const STOP_FILE = ".work/stop-request.json";
 const GENERATION_STOPPED_CODE = "GENERATION_STOPPED";
 const PROCESSING_LEASE_MS = 2 * 60 * 1000;
@@ -30,6 +33,7 @@ const WORKBENCH_SHOT_FIELDS = [
   "imagePrompt",
   "lastImagePrompt",
   "videoPrompt",
+  "videoPromptOverride",
 ];
 
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
@@ -215,6 +219,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     generationPolicy = require(path.join(pluginRoot, "generation-policy.cjs"));
     referenceAssets = require(path.join(pluginRoot, "reference-assets.cjs"));
     replicaEditor = require(path.join(pluginRoot, "replica-editor.cjs"));
+    replicaLogicApi = require(path.join(pluginRoot, "replica-logic-api.cjs"));
     workflow = require(path.join(pluginRoot, "replica-cli.cjs"));
     const workbench = require(path.join(pluginRoot, "replica-workbench.cjs"));
     const VideoReplicaWorkbenchView = workbench.createVideoReplicaWorkbenchView(ItemView);
@@ -224,6 +229,9 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     this.processing = new Set();
     this.confirmingProjects = new Set();
     this.referenceAssetPromises = new Map();
+    this.queueApis = new Map();
+    this.queueRuns = new Map();
+    this.activeQueueObjects = new Map();
     const savedSettings = typeof this.loadData === "function" ? await this.loadData() : null;
     this.settings = Object.assign({}, DEFAULT_SETTINGS, savedSettings && typeof savedSettings === "object" ? savedSettings : {});
     this.registerView(this.workbenchViewType, (leaf) => new VideoReplicaWorkbenchView(leaf, this));
@@ -233,7 +241,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     this.addCommand({ id: "select-analysis-model", name: "选择视频分析语言模型", callback: () => this.openAnalysisModelModal() });
     this.addCommand({ id: "select-generation-models", name: "选择视频复刻的图片与视频模型", callback: () => this.openGenerationModelModal() });
     this.addCommand({ id: "analyze-latest-project", name: "分析最近的视频复刻项目", callback: () => void this.analyzeLatestProject() });
-    this.addCommand({ id: "confirm-latest-generation", name: "确认并开始付费生成最近项目", callback: () => void this.confirmLatestGeneration() });
+    this.addCommand({ id: "confirm-latest-generation", name: "选择分镜并开始生成", callback: () => void this.confirmLatestGeneration() });
     this.addCommand({ id: "concat-latest-project", name: "拼接最近已完成项目", callback: () => void this.concatLatestProject() });
     this.addCommand({ id: "stop-latest-generation", name: "停止最近的视频复刻任务", callback: () => void this.stopLatestGeneration() });
     this.addCommand({ id: "scan-generation-requests", name: "检查已确认的视频复刻任务", callback: () => void this.scanRequests(true) });
@@ -244,7 +252,9 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     };
     this.registerEvent(this.app.vault.on("create", handleProjectFileChange));
     this.registerEvent(this.app.vault.on("modify", handleProjectFileChange));
-    const startupTimeout = window.setTimeout(() => void this.scanRequests(false), 1500);
+    const startupTimeout = window.setTimeout(() => {
+      void this.recoverWorkbenchQueues().finally(() => this.scanRequests(false));
+    }, 1500);
     this.register(() => window.clearTimeout(startupTimeout));
   }
 
@@ -308,7 +318,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
   isWorkbenchDataFile(file) {
     const vaultPath = String(file?.path || "").replace(/\\/g, "/");
     return vaultPath.startsWith(`${ROOT}/`)
-      && ["project.json", REQUEST_FILE, path.basename(STATE_FILE)].includes(String(file?.name || path.basename(vaultPath)));
+      && ["project.json", REQUEST_FILE, path.basename(STATE_FILE), path.basename(QUEUE_FILE)].includes(String(file?.name || path.basename(vaultPath)));
   }
 
   requestWorkbenchRefresh() {
@@ -418,6 +428,8 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       requestPath: this.checkedProjectPath(checked.folder, REQUEST_FILE),
       statePath: this.checkedProjectPath(checked.folder, STATE_FILE, { createParents: createWorkDirectory }),
       stopPath: this.checkedProjectPath(checked.folder, STOP_FILE, { createParents: createWorkDirectory }),
+      queuePath: this.checkedProjectPath(checked.folder, QUEUE_FILE, { createParents: createWorkDirectory }),
+      queueLockPath: this.checkedProjectPath(checked.folder, QUEUE_LOCK_FILE, { createParents: createWorkDirectory }),
     };
   }
 
@@ -432,13 +444,15 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
 
   loadWorkbenchProject(folder) {
     const paths = this.workbenchProjectPaths(folder);
-    const output = { project: {}, request: {}, requestMtimeMs: null, generationState: {}, readErrors: {} };
+    const output = { project: {}, request: {}, requestMtimeMs: null, generationState: {}, generationQueue: {}, readErrors: {} };
     for (const [key, filePath] of [
       ["project", paths.projectPath],
       ["request", paths.requestPath],
       ["generationState", paths.statePath],
+      ["generationQueue", paths.queuePath],
     ]) {
       try {
+        if (key === "generationQueue" && !fs.existsSync(filePath)) continue;
         output[key] = this.readJson(filePath);
         if (key === "request") {
           output[key] = withWorkbenchShotIds(output[key]);
@@ -449,6 +463,253 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       }
     }
     return output;
+  }
+
+  currentWorkbenchQueue(folder) {
+    const { queuePath } = this.workbenchProjectPaths(folder);
+    if (!fs.existsSync(queuePath)) return null;
+    try {
+      const queue = this.readJson(queuePath);
+      return queue && typeof queue === "object" && !Array.isArray(queue) ? queue : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  workbenchQueueApi(folder) {
+    const paths = this.workbenchProjectPaths(folder, { createWorkDirectory: true });
+    const existing = this.queueApis.get(paths.folder);
+    if (existing) return existing;
+    const activeQueue = this.currentWorkbenchQueue(paths.folder);
+    const activeQueues = activeQueue && ["idle", "processing"].includes(String(activeQueue.status))
+      ? [activeQueue]
+      : [];
+    if (activeQueues.length) this.activeQueueObjects.set(paths.folder, activeQueue);
+    const api = replicaLogicApi.createReplicaLogicApi({
+      activeQueues,
+      saveQueue: async (queue) => {
+        const persisted = this.currentWorkbenchQueue(paths.folder);
+        if (persisted?.queueId === queue.queueId && persisted.stopRequested === true) queue.stopRequested = true;
+        const liveQueue = this.activeQueueObjects.get(paths.folder);
+        if (liveQueue?.queueId === queue.queueId) {
+          if (liveQueue.stopRequested === true) queue.stopRequested = true;
+          if (queue.stopRequested === true) liveQueue.stopRequested = true;
+        }
+        writeJson(paths.queuePath, queue);
+        if (api.lockedShotIds(queue).length && liveQueue?.queueId !== queue.queueId) this.activeQueueObjects.set(paths.folder, queue);
+        else if (!api.lockedShotIds(queue).length && liveQueue?.queueId === queue.queueId) this.activeQueueObjects.delete(paths.folder);
+        this.requestWorkbenchRefresh();
+      },
+      runShot: async (shot, context) => this.runWorkbenchQueueShot(paths.folder, shot, context),
+    });
+    this.queueApis.set(paths.folder, api);
+    return api;
+  }
+
+  acquireWorkbenchQueueLock(folder) {
+    const { queueLockPath } = this.workbenchProjectPaths(folder, { createWorkDirectory: true });
+    const token = `${this.instanceId || "instance"}:${crypto.randomUUID()}`;
+    const payload = {
+      token,
+      pid: process.pid,
+      instanceId: this.instanceId || "instance",
+      createdAt: new Date().toISOString(),
+      heartbeatAt: new Date().toISOString(),
+    };
+    const create = () => {
+      const descriptor = fs.openSync(queueLockPath, "wx");
+      try { fs.writeFileSync(descriptor, `${JSON.stringify(payload)}\n`); }
+      finally { fs.closeSync(descriptor); }
+    };
+    try {
+      create();
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      const ageMs = Date.now() - Number(fs.statSync(queueLockPath, { throwIfNoEntry: false })?.mtimeMs || Date.now());
+      if (ageMs > 5 * 60 * 1000) {
+        fs.rmSync(queueLockPath, { force: true });
+        create();
+      } else {
+        throw new Error("当前项目正在创建生成队列，请勿重复操作。");
+      }
+    }
+    const lock = { queueLockPath, token, payload, heartbeat: null };
+    lock.heartbeat = setInterval(() => {
+      try { this.assertWorkbenchQueueLockOwned(lock); }
+      catch (_) { /* ownership is checked again before enqueue */ }
+    }, 15000);
+    lock.heartbeat.unref?.();
+    return lock;
+  }
+
+  assertWorkbenchQueueLockOwned(lock) {
+    if (!lock?.queueLockPath || !lock?.token) throw new Error("生成队列锁无效，请重新操作。");
+    let current;
+    try { current = this.readJson(lock.queueLockPath); }
+    catch (_) { throw new Error("生成队列锁已丢失，请重新选择镜头生成。"); }
+    if (current?.token !== lock.token) throw new Error("生成队列锁已被其他实例接管，本次操作已取消以避免重复付费。");
+    const refreshed = {
+      ...current,
+      token: lock.token,
+      pid: Number(current.pid || lock.payload?.pid || process.pid),
+      instanceId: String(current.instanceId || lock.payload?.instanceId || this.instanceId || "instance"),
+      heartbeatAt: new Date().toISOString(),
+    };
+    fs.writeFileSync(lock.queueLockPath, `${JSON.stringify(refreshed)}\n`);
+    lock.payload = refreshed;
+    return true;
+  }
+
+  releaseWorkbenchQueueLock(lock) {
+    if (lock?.heartbeat) clearInterval(lock.heartbeat);
+    if (!lock?.queueLockPath || !lock?.token) return;
+    try {
+      const payload = this.readJson(lock.queueLockPath);
+      if (payload.token === lock.token) fs.rmSync(lock.queueLockPath, { force: true });
+    } catch (_) { /* another process owns or already released this lock */ }
+  }
+
+  async validatedProjectGenerationModels(request) {
+    const catalog = await this.refreshGenerationModelCatalog();
+    const exact = (models, requested) => models.find((model) => model === requested)
+      || models.find((model) => model.toLowerCase() === requested.toLowerCase());
+    const requestedImageModel = String(request?.settings?.imageModel || "").trim();
+    const requestedVideoModel = String(request?.settings?.videoModel || "").trim();
+    const imageModel = exact(Array.isArray(catalog?.imageModels) ? catalog.imageModels : [], requestedImageModel);
+    const videoModel = exact(Array.isArray(catalog?.videoModels) ? catalog.videoModels : [], requestedVideoModel);
+    if (!imageModel) throw this.unavailableGenerationModel("image", requestedImageModel, catalog?.imageModels || []);
+    if (!videoModel) throw this.unavailableGenerationModel("video", requestedVideoModel, catalog?.videoModels || []);
+    return { imageModel, videoModel };
+  }
+
+  async previewWorkbenchGeneration(folder, selectedShotIds) {
+    const paths = this.workbenchProjectPaths(folder);
+    const request = this.readJson(paths.requestPath);
+    if (request.confirmed === true) throw new Error("这是旧版整项目任务，不能加入分镜队列。请重新分析或复制为新草案。");
+    await this.validatedProjectGenerationModels(request);
+    return this.workbenchQueueApi(paths.folder).preview(request, selectedShotIds);
+  }
+
+  async startWorkbenchGeneration(folder, plan) {
+    const paths = this.workbenchProjectPaths(folder, { createWorkDirectory: true });
+    const lock = this.acquireWorkbenchQueueLock(paths.folder);
+    try {
+      const api = this.workbenchQueueApi(paths.folder);
+      const assertNoActiveQueue = () => {
+        const activeQueue = this.currentWorkbenchQueue(paths.folder);
+        if (activeQueue && api.lockedShotIds(activeQueue).length) {
+          throw new Error("当前项目已有生成队列，请先停止或等待完成后再生成其他镜头。");
+        }
+      };
+      assertNoActiveQueue();
+      const request = this.readJson(paths.requestPath);
+      if (request.confirmed === true) throw new Error("不能使用旧版 confirmed=true 整项目任务启动分镜队列。");
+      await this.validatedProjectGenerationModels(request);
+      assertNoActiveQueue();
+      this.assertWorkbenchQueueLockOwned(lock);
+      const confirmedPlan = api.confirm(plan, this.readJson(paths.requestPath));
+      this.assertWorkbenchQueueLockOwned(lock);
+      const queue = await api.enqueue(confirmedPlan);
+      this.activeQueueObjects.set(paths.folder, queue);
+      const queuedSnapshot = JSON.parse(JSON.stringify(queue));
+      const run = Promise.resolve()
+        .then(() => queue.status === "stopped" ? queue : api.run(queue))
+        .then(() => this.finishWorkbenchQueue(paths.folder, queue))
+        .catch((error) => {
+          new Notice(`分镜队列运行失败：${String(error?.message || error)}`, 10000);
+          throw error;
+        });
+      this.queueRuns.set(paths.folder, run);
+      run.catch(() => {});
+      this.requestWorkbenchRefresh();
+      return queuedSnapshot;
+    } finally {
+      this.releaseWorkbenchQueueLock(lock);
+    }
+  }
+
+  async finishWorkbenchQueue(folder, queue) {
+    if (this.activeQueueObjects.get(folder)?.queueId === queue.queueId) this.activeQueueObjects.delete(folder);
+    const { projectPath } = this.workbenchProjectPaths(folder);
+    const project = this.readJson(projectPath);
+    const failures = (queue.shots || []).filter((shot) => shot.status === "failed").length;
+    const allVideosReady = Array.isArray(project.shots)
+      && project.shots.length > 0
+      && project.shots.every((shot) => String(shot.videoPath || "").trim());
+    if (allVideosReady && queue.status === "completed") {
+      await this.finalizeProject(folder, project, 0);
+      return queue;
+    }
+    project.status = failures ? "completed_with_errors" : "analysis_ready";
+    project.statusText = queue.status === "stopped"
+      ? "生成队列已停止；已完成内容保留，可重新选择镜头。"
+      : failures
+        ? `本次队列完成，${failures} 个镜头失败，可修改后重试。`
+        : "本次镜头已生成，可继续选择其他镜头。";
+    this.saveProject(folder, project);
+    return queue;
+  }
+
+  async recoverWorkbenchQueue(folder) {
+    const paths = this.workbenchProjectPaths(folder, { createWorkDirectory: true });
+    const queue = this.currentWorkbenchQueue(paths.folder);
+    if (!queue || !Array.isArray(queue.shots)) return false;
+    const locked = queue.shots.filter((shot) => shot.status === "queued" || shot.status === "processing");
+    if (!locked.length || !["idle", "processing"].includes(String(queue.status))) return false;
+
+    if (queue.status === "processing") {
+      const project = this.readJson(paths.projectPath);
+      let unsafeRecovery = false;
+      for (const shot of queue.shots) {
+        if (shot.status !== "processing") continue;
+        const projectShot = (project.shots || []).find((item) => String(item.id) === String(shot.id));
+        if (projectShot?.videoTaskId && projectShot.videoTaskPlanId === queue.planId) {
+          shot.status = "queued";
+          shot.error = "";
+        } else {
+          shot.status = "failed";
+          shot.error = "上次运行在平台任务编号写入前中断。为避免重复付费，已停止自动恢复，请人工确认后重试。";
+          unsafeRecovery = true;
+        }
+      }
+      if (unsafeRecovery || queue.stopRequested === true) {
+        for (const shot of queue.shots) if (shot.status === "queued") shot.status = "stopped";
+        queue.status = unsafeRecovery ? "completed_with_errors" : "stopped";
+        queue.updatedAt = new Date().toISOString();
+        writeJson(paths.queuePath, queue);
+        this.mutateProject(paths.folder, (project) => {
+          project.status = unsafeRecovery ? "completed_with_errors" : "analysis_ready";
+          project.statusText = unsafeRecovery
+            ? "检测到上次异常中断。为避免重复付费，未自动重提任务，请检查失败镜头后手动重试。"
+            : "已恢复停止请求；不会自动提交后续镜头。";
+        });
+        return false;
+      }
+      queue.status = "idle";
+      queue.updatedAt = new Date().toISOString();
+      writeJson(paths.queuePath, queue);
+    }
+
+    this.queueApis.delete(paths.folder);
+    const api = this.workbenchQueueApi(paths.folder);
+    this.activeQueueObjects.set(paths.folder, queue);
+    const run = Promise.resolve()
+      .then(() => api.run(queue))
+      .then(() => this.finishWorkbenchQueue(paths.folder, queue))
+      .catch((error) => {
+        new Notice(`分镜队列恢复失败：${String(error?.message || error)}`, 10000);
+        throw error;
+      });
+    this.queueRuns.set(paths.folder, run);
+    run.catch(() => {});
+    return true;
+  }
+
+  async recoverWorkbenchQueues() {
+    for (const { project } of this.projectRecords()) {
+      try { await this.recoverWorkbenchQueue(project.folder); }
+      catch (_) { /* one damaged project must not block recovery of the others */ }
+    }
   }
 
   currentWorkbenchLock(paths) {
@@ -467,7 +728,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
   async saveWorkbenchDraft(folder, draft) {
     const paths = this.workbenchProjectPaths(folder);
     if (this.confirmingProjects?.has(paths.folder)) throw new Error("项目正在确认，不能编辑草案。");
-    this.currentWorkbenchLock(paths);
+    const { request: currentRequest } = this.currentWorkbenchLock(paths);
     const identifiedDraft = withWorkbenchShotIds(draft);
     const validation = replicaEditor.validateDraft(identifiedDraft, core.normalizeGenerationRequest);
     if (!validation.ok) {
@@ -481,6 +742,22 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         workbenchId: identifiedDraft.shots[index].workbenchId,
       })),
     };
+    const queue = this.currentWorkbenchQueue(paths.folder);
+    const api = this.workbenchQueueApi(paths.folder);
+    const lockedIds = new Set(api.lockedShotIds(queue));
+    if (lockedIds.size) {
+      const normalizedCurrent = core.normalizeGenerationRequest({ ...currentRequest, confirmed: true });
+      const currentById = new Map(normalizedCurrent.shots.map((shot) => [String(shot.id), shot]));
+      const nextById = new Map(savedRequest.shots.map((shot) => [String(shot.id), shot]));
+      for (const id of lockedIds) {
+        const currentShot = currentById.get(id);
+        const nextShot = nextById.get(id);
+        const snapshot = (shot) => Object.fromEntries(WORKBENCH_SHOT_FIELDS.map((field) => [field, shot?.[field]]));
+        if (!currentShot || !nextShot || JSON.stringify(snapshot(currentShot)) !== JSON.stringify(snapshot(nextShot))) {
+          throw new Error(`镜头 ${id} 正在队列中，完成或停止前不能修改。`);
+        }
+      }
+    }
     const project = this.readJson(paths.projectPath);
     const currentShots = Array.isArray(project.shots)
       ? withWorkbenchShotIds({ shots: project.shots }).shots
@@ -801,17 +1078,14 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
   }
 
   async confirmLatestGeneration() {
-    const record = this.projectRecords().find((item) => {
-      const candidate = this.workbenchProjectPaths(item.project.folder).requestPath;
-      if (!fs.existsSync(candidate)) return false;
-      try { return this.readJson(candidate).confirmed !== true; } catch (_) { return false; }
-    });
-    if (!record) { new Notice("没有找到等待确认的分镜草案。", 6000); return; }
-    try {
-      return await this.confirmWorkbenchDraft(record.project.folder);
-    } catch (error) {
-      new Notice(`确认失败：${String(error?.message || error)}`, 9000);
+    const leaf = await this.activateWorkbench();
+    if (leaf?.view) {
+      leaf.view.activeTab = "shots";
+      if (typeof leaf.view.refresh === "function") await leaf.view.refresh({ force: true });
+      else if (typeof leaf.view.render === "function") leaf.view.render();
     }
+    new Notice("请勾选要生成的分镜，并确认每个镜头的最终提示词。", 7000);
+    return leaf;
   }
 
   async concatProject(project) {
@@ -887,6 +1161,27 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     writeJson(this.checkedProjectPath(checkedFolder, "project.json"), project);
     atomicWrite(this.checkedProjectPath(checkedFolder, "00-项目总览.md", { createParents: true }), core.dashboardMarkdown(project));
     this.requestWorkbenchRefresh();
+  }
+
+  mutateProject(projectFolder, mutator) {
+    const { projectPath } = this.workbenchProjectPaths(projectFolder);
+    const project = this.readJson(projectPath);
+    mutator(project);
+    this.saveProject(projectFolder, project);
+    return project;
+  }
+
+  updateProjectShot(projectFolder, shotId, updates = {}, projectUpdates = {}) {
+    return this.mutateProject(projectFolder, (project) => {
+      project.shots = Array.isArray(project.shots) ? project.shots : [];
+      let shot = project.shots.find((item) => String(item.id) === String(shotId));
+      if (!shot) {
+        shot = { id: String(shotId) };
+        project.shots.push(shot);
+      }
+      Object.assign(shot, updates);
+      Object.assign(project, projectUpdates);
+    });
   }
 
   writeState(projectFolder, state) {
@@ -972,6 +1267,15 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
   }
 
   async stopWorkbenchGeneration(projectFolder) {
+    const queue = this.activeQueueObjects.get(projectFolder) || this.currentWorkbenchQueue(projectFolder);
+    if (queue) {
+      const api = this.workbenchQueueApi(projectFolder);
+      if (api.lockedShotIds(queue).length) {
+        await api.stop(queue);
+        new Notice("已请求停止；当前已提交的镜头结束后，不再提交后续镜头。", 8000);
+        return true;
+      }
+    }
     if (!this.requestGenerationStop(projectFolder)) throw new Error("当前项目没有正在运行的生成任务。");
     new Notice("已请求停止；当前已提交的任务结束后，不再生成后续内容。", 8000);
     return true;
@@ -980,6 +1284,8 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
   async stopLatestGeneration() {
     const record = this.projectRecords().find((item) => {
       try {
+        const queue = this.currentWorkbenchQueue(item.project.folder);
+        if (queue && this.workbenchQueueApi(item.project.folder).lockedShotIds(queue).length) return true;
         const { statePath } = this.workbenchProjectPaths(item.project.folder);
         return fs.existsSync(statePath) && this.readJson(statePath).status === "processing";
       } catch (_) { return false; }
@@ -1180,7 +1486,13 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       await videoPlugin.refreshVideoTasks();
       const task = (videoPlugin.settings.videoTasks || []).find((item) => item.id === taskId);
       if (task?.status === "completed" && task.localPath) return task;
-      if (task?.status === "failed") throw new Error(task.lastError || "视频生成失败。");
+      if (task?.status === "failed") {
+        const failure = new Error(task.lastError || "视频生成失败。");
+        failure.code = "VIDEO_TASK_FAILED";
+        failure.terminalTaskFailure = true;
+        failure.videoTaskId = String(taskId);
+        throw failure;
+      }
       await sleep(7000);
     }
     throw new Error("视频任务等待超过 45 分钟。任务仍保留在山竹视频中，可稍后继续查看。");
@@ -1194,23 +1506,311 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
   }
 
   async finalizeProject(projectFolder, project, failed) {
-    delete project.concatError;
-    project.finalVideoPath = "";
     if (failed) {
-      project.status = "completed_with_errors";
-      project.statusText = `已完成，${failed} 个镜头需要重试`;
+      delete project.concatError;
+      Object.assign(project, { finalVideoPath: "", status: "completed_with_errors", statusText: `已完成，${failed} 个镜头需要重试` });
+      this.mutateProject(projectFolder, (latest) => {
+        delete latest.concatError;
+        latest.finalVideoPath = "";
+        latest.status = "completed_with_errors";
+        latest.statusText = `已完成，${failed} 个镜头需要重试`;
+      });
     } else {
       try {
-        project.finalVideoPath = await this.concatProject(project);
-        project.status = "completed";
-        project.statusText = "全部镜头已生成并拼接为最终成片";
+        const finalVideoPath = await this.concatProject(project);
+        delete project.concatError;
+        Object.assign(project, { finalVideoPath, status: "completed", statusText: "全部镜头已生成并拼接为最终成片" });
+        this.mutateProject(projectFolder, (latest) => {
+          delete latest.concatError;
+          latest.finalVideoPath = finalVideoPath;
+          latest.status = "completed";
+          latest.statusText = "全部镜头已生成并拼接为最终成片";
+        });
       } catch (error) {
-        project.concatError = String(error?.message || error);
-        project.status = "completed_with_errors";
-        project.statusText = `视频片段已完成，但拼接失败：${project.concatError}`;
+        const concatError = String(error?.message || error);
+        Object.assign(project, {
+          finalVideoPath: "",
+          concatError,
+          status: "completed_with_errors",
+          statusText: `视频片段已完成，但拼接失败：${concatError}`,
+        });
+        this.mutateProject(projectFolder, (latest) => {
+          latest.finalVideoPath = "";
+          latest.concatError = concatError;
+          latest.status = "completed_with_errors";
+          latest.statusText = `视频片段已完成，但拼接失败：${concatError}`;
+        });
       }
     }
-    this.saveProject(projectFolder, project);
+  }
+
+  async resolveQueueGenerationRuntime(settings = {}) {
+    const { image, video } = this.getGenerationPlugins();
+    const [imageAccess, videoAccess] = await Promise.all([image.refreshAgentAccess(), video.refreshAgentAccess()]);
+    const exact = (models, requested) => models.find((candidate) => candidate === requested)
+      || models.find((candidate) => candidate.toLowerCase() === requested.toLowerCase());
+    const requestedImageModel = String(settings.imageModel || "").trim();
+    const requestedVideoModel = String(settings.videoModel || "").trim();
+    const imageModels = Object.keys(imageAccess?.imageModelKeys || {});
+    const videoModels = generationPolicy.eligibleModels(Object.keys(videoAccess?.videoModelKeys || {}));
+    const imageModel = exact(imageModels, requestedImageModel);
+    const model = exact(videoModels, requestedVideoModel);
+    if (!imageModel) throw this.unavailableGenerationModel("image", requestedImageModel, imageModels);
+    if (!model) throw this.unavailableGenerationModel("video", requestedVideoModel, videoModels);
+    return {
+      image,
+      video,
+      imageModel,
+      model,
+      resolution: String(settings.resolution || video.settings?.resolution || "").trim(),
+    };
+  }
+
+  projectFileExists(projectFolder, vaultPath) {
+    if (!String(vaultPath || "").trim()) return false;
+    try {
+      return Boolean(fs.statSync(this.checkedProjectPath(projectFolder, vaultPath), { throwIfNoEntry: false })?.isFile());
+    } catch (_) {
+      return false;
+    }
+  }
+
+  async runWorkbenchQueueShot(projectFolder, shot, context) {
+    const paths = this.workbenchProjectPaths(projectFolder, { createWorkDirectory: true });
+    for (const directory of ["01-人物参考", "02-分镜脚本", "03-视频片段", "04-最终成片", ".work"]) {
+      this.checkedProjectPath(paths.folder, directory, { createParents: true, directory: true });
+    }
+    const initialProject = this.readJson(paths.projectPath);
+    const submittedShot = (initialProject.shots || []).find((item) => String(item.id) === String(shot.id));
+    if (submittedShot?.videoTaskId && submittedShot.videoTaskPlanId === context.planId) {
+      const { video } = this.getGenerationPlugins();
+      const videoPath = paths.folder + "/03-视频片段/镜头-" + shot.id + "-" + core.safeSegment(shot.title) + ".mp4";
+      this.updateProjectShot(paths.folder, shot.id, { status: "正在恢复并查询已有视频任务", videoTaskStatus: "processing" });
+      try {
+        const completed = await this.waitForVideo(video, String(submittedShot.videoTaskId));
+        const savedVideoPath = this.copyVaultFile(completed.localPath, videoPath);
+        this.updateProjectShot(paths.folder, shot.id, {
+          videoPath: savedVideoPath,
+          status: "已完成",
+          error: "",
+          videoTaskStatus: "completed",
+          videoTaskCompletedAt: new Date().toISOString(),
+        });
+        return {
+          videoPath: savedVideoPath,
+          ...(submittedShot.firstImagePath ? { firstImagePath: submittedShot.firstImagePath } : {}),
+          ...(submittedShot.lastImagePath ? { lastImagePath: submittedShot.lastImagePath } : {}),
+        };
+      } catch (error) {
+        const message = String(error?.message || error);
+        const terminalTaskFailure = error?.terminalTaskFailure === true || error?.code === "VIDEO_TASK_FAILED";
+        this.updateProjectShot(paths.folder, shot.id, {
+          status: "失败",
+          error: message,
+          videoTaskStatus: terminalTaskFailure ? "failed" : "unknown",
+          ...(terminalTaskFailure ? {
+            failedVideoTaskId: String(submittedShot.videoTaskId),
+            failedVideoTaskPlanId: String(submittedShot.videoTaskPlanId || ""),
+            failedVideoTaskError: message,
+            failedVideoTaskAt: new Date().toISOString(),
+            videoTaskId: "",
+            videoTaskFingerprint: "",
+            videoTaskPlanId: "",
+          } : {}),
+        });
+        throw error;
+      }
+    }
+    const { image, video, imageModel, model, resolution } = await this.resolveQueueGenerationRuntime(context.settings);
+    const ensureAsset = async (kind, source) => {
+      const resolver = kind === "character"
+        ? referenceAssets.resolveCharacterAsset
+        : kind === "scene"
+          ? referenceAssets.resolveSceneAsset
+          : referenceAssets.resolveProductAsset;
+      const resolved = await this.ensureReferenceAsset(image, resolver(this.vaultPath(), source.id), source.prompt, imageModel);
+      return {
+        id: resolved.id,
+        imagePath: resolved.imagePath,
+        metadataPath: resolved.metadataPath,
+        contentHash: resolved.contentHash || referenceAssets.hashAssetImage(this.vaultPath(), resolved),
+        reused: resolved.reused,
+      };
+    };
+    const characterAsset = await ensureAsset("character", context.character);
+    const sceneAssets = [];
+    for (const scene of context.scenes || []) sceneAssets.push(await ensureAsset("scene", scene));
+    const productAssets = [];
+    for (const product of context.products || []) productAssets.push(await ensureAsset("product", product));
+    const mergeAssets = (current, updates) => {
+      const byId = new Map((Array.isArray(current) ? current : []).map((asset) => [String(asset.id), asset]));
+      for (const asset of updates) byId.set(String(asset.id), asset);
+      return [...byId.values()];
+    };
+    this.mutateProject(paths.folder, (project) => {
+      project.characterAsset = characterAsset;
+      project.sceneAssets = mergeAssets(project.sceneAssets, sceneAssets);
+      project.productAssets = mergeAssets(project.productAssets, productAssets);
+      project.imageModel = imageModel;
+      project.videoModel = model;
+      project.status = "generating";
+      project.statusText = "正在生成镜头 " + shot.id;
+    });
+
+    const sceneSource = (context.scenes || []).find((item) => String(item.id) === String(shot.sceneId));
+    const sceneAsset = sceneAssets.find((item) => String(item.id) === String(shot.sceneId));
+    if (!sceneSource || !sceneAsset) throw new Error("镜头 " + shot.id + " 找不到场景资产：" + shot.sceneId);
+    const productSources = (shot.productIds || []).map((id) => {
+      const source = (context.products || []).find((item) => String(item.id) === String(id));
+      const asset = productAssets.find((item) => String(item.id) === String(id));
+      if (!source || !asset) throw new Error("镜头 " + shot.id + " 找不到产品资产：" + id);
+      return { source, asset };
+    });
+    const fingerprint = generationPolicy.createGenerationFingerprint({
+      character: { ...context.character, contentHash: characterAsset.contentHash },
+      scene: { ...sceneSource, contentHash: sceneAsset.contentHash },
+      products: productSources.map(({ source, asset }) => ({ ...source, contentHash: asset.contentHash })),
+      shot,
+      model,
+      ratio: context.settings.ratio,
+      resolution,
+    });
+    const latestProject = this.readJson(paths.projectPath);
+    const existing = (latestProject.shots || []).find((item) => String(item.id) === String(shot.id)) || {};
+    const firstImagePath = paths.folder + "/02-分镜脚本/镜头-" + shot.id + "-" + core.safeSegment(shot.title) + "-首帧.png";
+    const lastImagePath = shot.lastImagePrompt
+      ? paths.folder + "/02-分镜脚本/镜头-" + shot.id + "-" + core.safeSegment(shot.title) + "-尾帧.png"
+      : "";
+    const videoPath = paths.folder + "/03-视频片段/镜头-" + shot.id + "-" + core.safeSegment(shot.title) + ".mp4";
+    const sameGeneration = existing.generationFingerprint === fingerprint;
+    const reusableFirst = sameGeneration && existing.firstImagePath === firstImagePath && this.projectFileExists(paths.folder, firstImagePath);
+    const reusableLast = !lastImagePath || (sameGeneration && existing.lastImagePath === lastImagePath && this.projectFileExists(paths.folder, lastImagePath));
+    const reusableVideo = sameGeneration && reusableFirst && reusableLast
+      && existing.videoPath === videoPath && this.projectFileExists(paths.folder, videoPath);
+    const resumableVideoTaskId = existing.videoTaskId
+      && existing.videoTaskPlanId === context.planId
+      ? String(existing.videoTaskId)
+      : "";
+    let currentFirstImagePath = resumableVideoTaskId ? String(existing.firstImagePath || existing.imagePath || "") : reusableFirst ? firstImagePath : "";
+    let currentLastImagePath = resumableVideoTaskId ? String(existing.lastImagePath || "") : reusableLast ? lastImagePath : "";
+    this.updateProjectShot(paths.folder, shot.id, {
+      ...shot,
+      generationFingerprint: fingerprint,
+      firstImagePath: currentFirstImagePath,
+      imagePath: currentFirstImagePath,
+      lastImagePath: currentLastImagePath,
+      videoPath: reusableVideo ? videoPath : "",
+      status: reusableVideo ? "已完成" : "正在准备参考图",
+      error: "",
+      ...(resumableVideoTaskId ? {} : {
+        videoTaskId: "",
+        videoTaskFingerprint: "",
+        videoTaskPlanId: "",
+        videoTaskStatus: "",
+      }),
+    }, { status: "generating", statusText: "正在生成镜头 " + shot.id });
+    if (reusableVideo) return { videoPath, firstImagePath, lastImagePath: lastImagePath || undefined };
+
+    let videoTaskId = resumableVideoTaskId;
+    try {
+      const referencePaths = [
+        characterAsset.imagePath,
+        sceneAsset.imagePath,
+        ...productSources.map(({ asset }) => asset.imagePath),
+      ];
+      const continuity = [
+        "参考图1是人物设定板：人物身份、脸部、发型、发色、年龄与服装必须严格一致。",
+        "参考图2是纯环境场景板：只参考空间、固定陈设、光线、天气与环境质感，不得从中创造人物或核心产品。",
+        ...productSources.map(({ asset }, index) => "参考图" + (index + 3) + "是产品设定板（" + asset.id + "）：产品外形、颜色、材质、比例、包装和标识位置必须严格一致。"),
+      ].join("\n");
+      if (!videoTaskId && !currentFirstImagePath) {
+        this.updateProjectShot(paths.folder, shot.id, { status: "正在生成首帧" });
+        const candidate = await this.generateImageMulti(image, shot.imagePrompt + "\n" + continuity, referencePaths, imageModel);
+        currentFirstImagePath = await this.saveImageCandidate(image, candidate, firstImagePath);
+        this.updateProjectShot(paths.folder, shot.id, {
+          firstImagePath: currentFirstImagePath,
+          imagePath: currentFirstImagePath,
+          status: "首帧已完成",
+        });
+      }
+      if (!videoTaskId && lastImagePath && !currentLastImagePath) {
+        this.updateProjectShot(paths.folder, shot.id, { status: "正在生成尾帧" });
+        const candidate = await this.generateImageMulti(image, shot.lastImagePrompt + "\n" + continuity, referencePaths, imageModel);
+        currentLastImagePath = await this.saveImageCandidate(image, candidate, lastImagePath);
+        this.updateProjectShot(paths.folder, shot.id, { lastImagePath: currentLastImagePath, status: "尾帧已完成" });
+      }
+
+      if (!videoTaskId) {
+        this.updateProjectShot(paths.folder, shot.id, { status: "正在提交视频任务" });
+        let task;
+        try {
+          task = await video.submitVideo(generationPolicy.buildVideoOptions({
+            model,
+            prompt: String(shot.effectiveVideoPrompt || ""),
+            duration: shot.duration,
+            ratio: context.settings.ratio,
+            resolution,
+            firstImageFile: this.localImage(currentFirstImagePath),
+            lastImageFile: currentLastImagePath ? this.localImage(currentLastImagePath) : null,
+          }));
+        } catch (error) {
+          throw this.generationModelError("video", model, error);
+        }
+        videoTaskId = String(task?.id || "").trim();
+        if (!videoTaskId) throw new Error("视频平台未返回任务编号，已停止等待以避免重复提交。");
+        this.updateProjectShot(paths.folder, shot.id, {
+          status: "正在生成视频",
+          videoTaskId,
+          videoTaskFingerprint: fingerprint,
+          videoTaskPlanId: context.planId,
+          videoTaskModel: model,
+          videoTaskSubmittedAt: new Date().toISOString(),
+          videoTaskStatus: "processing",
+        });
+      } else {
+        this.updateProjectShot(paths.folder, shot.id, { status: "正在恢复并查询已有视频任务", videoTaskStatus: "processing" });
+      }
+
+      let completed;
+      try {
+        completed = await this.waitForVideo(video, videoTaskId);
+      } catch (error) {
+        throw this.generationModelError("video", model, error);
+      }
+      const savedVideoPath = this.copyVaultFile(completed.localPath, videoPath);
+      this.updateProjectShot(paths.folder, shot.id, {
+        videoPath: savedVideoPath,
+        status: "已完成",
+        error: "",
+        videoTaskStatus: "completed",
+        videoTaskCompletedAt: new Date().toISOString(),
+      });
+      return {
+        videoPath: savedVideoPath,
+        firstImagePath: currentFirstImagePath,
+        ...(currentLastImagePath ? { lastImagePath: currentLastImagePath } : {}),
+      };
+    } catch (error) {
+      const message = String(error?.message || error);
+      const terminalTaskFailure = error?.terminalTaskFailure === true || error?.code === "VIDEO_TASK_FAILED";
+      this.updateProjectShot(paths.folder, shot.id, {
+        status: "失败",
+        error: message,
+        ...(videoTaskId ? {
+          videoTaskStatus: terminalTaskFailure ? "failed" : "unknown",
+          ...(terminalTaskFailure ? {
+            failedVideoTaskId: String(videoTaskId),
+            failedVideoTaskPlanId: String(context.planId || ""),
+            failedVideoTaskError: message,
+            failedVideoTaskAt: new Date().toISOString(),
+            videoTaskId: "",
+            videoTaskFingerprint: "",
+            videoTaskPlanId: "",
+          } : {}),
+        } : {}),
+      });
+      throw error;
+    }
   }
 
   async runAssetGeneration(projectFolder, request, requestMtimeMs, { image, video, imageModel, model }) {

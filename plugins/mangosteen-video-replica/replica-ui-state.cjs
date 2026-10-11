@@ -62,6 +62,7 @@ function deriveWorkbenchState(options = {}) {
   const project = plainObject(input.project);
   const request = plainObject(input.request);
   const loadedGenerationState = plainObject(input.generationState);
+  const generationQueue = plainObject(input.generationQueue);
   const requestMtimeMs = typeof input.requestMtimeMs === "number" ? input.requestMtimeMs : Number.NaN;
   const generationRequestMtimeMs = typeof loadedGenerationState.requestMtimeMs === "number"
     ? loadedGenerationState.requestMtimeMs
@@ -74,8 +75,15 @@ function deriveWorkbenchState(options = {}) {
   const empty = Object.keys(project).length === 0;
   const shots = records(project.shots);
   const processing = generationState.status === "processing";
+  const queueShots = records(generationQueue.shots);
+  const lockedShotIds = queueShots
+    .filter((shot) => shot.status === "queued" || shot.status === "processing")
+    .map((shot) => text(shot.id));
+  const queueActive = lockedShotIds.length > 0
+    && ["idle", "processing"].includes(text(generationQueue.status));
+  const queueKnown = Object.keys(generationQueue).length > 0;
   const locked = empty || request.confirmed === true || processing
-    || (!generationState.status && project.status === "generating");
+    || (!queueKnown && !generationState.status && project.status === "generating");
   const requestedSettings = plainObject(request.settings);
   const startedAtMs = Date.parse(text(generationState.startedAt));
   const currentNowMs = Number.isFinite(input.nowMs) ? input.nowMs : Date.now();
@@ -100,7 +108,15 @@ function deriveWorkbenchState(options = {}) {
     statusText: authoritativeStatusText || text(project.statusText),
     locked,
     canConfirm: !locked && project.status === "analysis_ready" && request.confirmed === false,
-    canStop: processing && !text(generationState.stopRequestedAt),
+    canGenerate: !locked
+      && !queueActive
+      && request.confirmed !== true
+      && ["analysis_ready", "generating", "completed", "completed_with_errors"].includes(text(project.status)),
+    canStop: (queueActive && generationQueue.stopRequested !== true)
+      || (processing && !text(generationState.stopRequestedAt)),
+    queueStatus: text(generationQueue.status),
+    queueShots,
+    lockedShotIds,
     progress: calculateStageProgress({ project: progressProject, request, generationState }),
     current: {
       step: text(generationState.currentStep),
@@ -131,7 +147,11 @@ function stateSignature(viewModel) {
     statusText: state.statusText,
     locked: state.locked,
     canConfirm: state.canConfirm,
+    canGenerate: state.canGenerate,
     canStop: state.canStop,
+    queueStatus: state.queueStatus,
+    queueShots: state.queueShots,
+    lockedShotIds: state.lockedShotIds,
     progress: state.progress,
     current: state.current,
     assets: state.assets,

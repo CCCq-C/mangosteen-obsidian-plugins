@@ -16,7 +16,11 @@ assert.deepStrictEqual(empty, {
   statusText: "",
   locked: true,
   canConfirm: false,
+  canGenerate: false,
   canStop: false,
+  queueStatus: "",
+  queueShots: [],
+  lockedShotIds: [],
   progress: { percent: 0, indeterminate: false, label: "等待开始" },
   current: { step: "", model: "", elapsedMs: 0 },
   assets: { character: null, products: [], scenes: [] },
@@ -41,7 +45,22 @@ assert.strictEqual(ready.empty, false);
 assert.strictEqual(ready.progress.percent, 30);
 assert.strictEqual(ready.locked, false);
 assert.strictEqual(ready.canConfirm, true);
+assert.strictEqual(ready.canGenerate, true);
 assert.strictEqual(ready.canStop, false);
+
+const queued = deriveWorkbenchState({
+  project: { folder: "山竹视频复刻/排队", status: "analysis_ready", shots: [{ id: "001" }, { id: "002" }] },
+  request: { confirmed: false, shots: [{ id: "001" }, { id: "002" }] },
+  generationQueue: {
+    status: "processing",
+    stopRequested: false,
+    shots: [{ id: "001", status: "processing" }, { id: "002", status: "completed" }],
+  },
+});
+assert.deepStrictEqual(queued.lockedShotIds, ["001"]);
+assert.strictEqual(queued.locked, false, "a queue must not lock the whole draft");
+assert.strictEqual(queued.canGenerate, false, "one project must run one persisted queue at a time");
+assert.strictEqual(queued.canStop, true);
 
 const assetsReady = deriveWorkbenchState({
   project: {

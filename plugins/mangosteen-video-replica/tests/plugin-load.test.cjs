@@ -730,25 +730,18 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   delete plugin.processRequest;
   plugin.settings = settingsBeforeProjectConfirmation;
 
-  const confirmLatestVault = fs.mkdtempSync(path.join(os.tmpdir(), "mangosteen-confirm-latest-"));
-  const pendingLatestFolder = "山竹视频复刻/等待确认";
-  const pendingLatestRoot = path.join(confirmLatestVault, ...pendingLatestFolder.split("/"));
-  fs.mkdirSync(pendingLatestRoot, { recursive: true });
-  fs.writeFileSync(path.join(pendingLatestRoot, "project.json"), JSON.stringify({
-    folder: pendingLatestFolder,
-    title: "等待确认",
-    status: "analysis_ready",
-    shots: [],
-  }));
-  fs.writeFileSync(path.join(pendingLatestRoot, "generation-request.json"), JSON.stringify({ confirmed: false, shots: [] }));
   const appBeforeConfirmLatest = plugin.app;
-  const routedConfirmFolders = [];
-  plugin.app = { vault: { adapter: { getBasePath: () => confirmLatestVault } }, workspace };
-  plugin.confirmWorkbenchDraft = async (folder) => { routedConfirmFolders.push(folder); };
+  const originalActivateWorkbench = plugin.activateWorkbench;
+  let workbenchActivations = 0;
+  plugin.activateWorkbench = async () => {
+    workbenchActivations += 1;
+    return { view: { activeTab: "overview", render() { this.rendered = true; } } };
+  };
+  plugin.confirmWorkbenchDraft = async () => { throw new Error("legacy whole-project confirmation must not run"); };
   await plugin.confirmLatestGeneration();
-  assert.deepStrictEqual(routedConfirmFolders, [pendingLatestFolder], "legacy confirm command must route the exact unconfirmed folder through the guarded workbench confirmation");
+  assert.strictEqual(workbenchActivations, 1, "the legacy command id must now open the per-shot queue UI");
   delete plugin.confirmWorkbenchDraft;
-  fs.rmSync(confirmLatestVault, { recursive: true, force: true });
+  plugin.activateWorkbench = originalActivateWorkbench;
 
   for (const terminalStatus of ["completed", "stopped", "failed"]) {
     const terminalVault = fs.mkdtempSync(path.join(os.tmpdir(), `mangosteen-confirm-${terminalStatus}-`));

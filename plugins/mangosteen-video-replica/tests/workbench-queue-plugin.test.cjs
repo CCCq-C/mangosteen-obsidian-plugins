@@ -1,0 +1,346 @@
+const assert = require("assert");
+const fs = require("fs");
+const Module = require("module");
+const os = require("os");
+const path = require("path");
+
+const originalLoad = Module._load;
+Module._load = function patchedLoad(request, parent, isMain) {
+  if (request === "obsidian") {
+    return {
+      ItemView: class ItemView {},
+      Modal: class Modal {},
+      Notice: class Notice {},
+      Plugin: class Plugin {},
+      requestUrl: async () => ({ status: 200, arrayBuffer: new ArrayBuffer(0) }),
+    };
+  }
+  return originalLoad.call(this, request, parent, isMain);
+};
+
+const ReplicaPlugin = require("../main.js");
+
+function request() {
+  return {
+    version: 3,
+    confirmed: false,
+    character: { id: "hero", prompt: "固定人物", voiceProfile: "固定女声" },
+    products: [{ id: "phone", prompt: "银色手机" }],
+    scenes: [{ id: "room", prompt: "明亮客厅" }],
+    settings: { imageModel: "gpt-image-2-w", videoModel: "MiniMax-H3", ratio: "9:16", resolution: "768p" },
+    shots: [
+      {
+        id: "001", title: "第一镜", sceneId: "room", productIds: ["phone"], duration: 4,
+        dialogue: "第一句", voiceDirection: "自然", plot: "举起手机", environment: "客厅", camera: "推进",
+        imagePrompt: "人物在客厅举起手机", lastImagePrompt: "", videoPrompt: "人物举起手机",
+      },
+      {
+        id: "002", title: "第二镜", sceneId: "room", productIds: [], duration: 5,
+        dialogue: "不应重新拼接", voiceDirection: "不应重新拼接", plot: "坐下", environment: "客厅", camera: "固定",
+        imagePrompt: "人物坐在沙发", lastImagePrompt: "人物看向镜头", videoPrompt: "基础动作",
+        videoPromptOverride: "用户确认后的完整视频提示词。",
+      },
+    ],
+  };
+}
+
+(async () => {
+  const sourceVault = path.resolve(__dirname, "../../..");
+  const plugin = new ReplicaPlugin();
+  plugin.app = {
+    vault: { adapter: { getBasePath: () => sourceVault }, on: () => ({}) },
+    workspace: { getLeavesOfType: () => [] },
+  };
+  plugin.manifest = { dir: "plugins/mangosteen-video-replica" };
+  plugin.addRibbonIcon = plugin.registerEvent = plugin.registerInterval = plugin.register = plugin.addCommand = plugin.registerView = () => {};
+  global.window = {
+    setInterval: () => 1,
+    setTimeout: () => 2,
+    clearTimeout: () => {},
+  };
+  await plugin.onload();
+
+  assert.strictEqual(typeof plugin.previewWorkbenchGeneration, "function");
+  assert.strictEqual(typeof plugin.startWorkbenchGeneration, "function");
+  assert.strictEqual(typeof plugin.runWorkbenchQueueShot, "function");
+  assert.strictEqual(typeof plugin.recoverWorkbenchQueue, "function");
+
+  const vault = fs.mkdtempSync(path.join(os.tmpdir(), "mangosteen-shot-queue-"));
+  const folder = "山竹视频复刻/队列项目";
+  const root = path.join(vault, ...folder.split("/"));
+  fs.mkdirSync(path.join(root, ".work"), { recursive: true });
+  fs.writeFileSync(path.join(root, "project.json"), JSON.stringify({
+    folder,
+    title: "队列项目",
+    status: "analysis_ready",
+    statusText: "等待选择镜头",
+    shots: request().shots.map((shot) => ({ ...shot, status: "等待生成" })),
+  }));
+  fs.writeFileSync(path.join(root, "generation-request.json"), JSON.stringify(request()));
+  plugin.app = {
+    vault: { adapter: { getBasePath: () => vault }, on: () => ({}) },
+    workspace: { getLeavesOfType: () => [] },
+    plugins: { getPlugin: () => null },
+  };
+  plugin.refreshGenerationModelCatalog = async () => ({
+    imageModels: ["gpt-image-2-w"],
+    videoModels: ["MiniMax-H3"],
+  });
+
+  const plan = await plugin.previewWorkbenchGeneration(folder, ["002", "001"]);
+  assert.deepStrictEqual(plan.selectedShotIds, ["001", "002"], "preview must preserve draft order");
+  assert.strictEqual(plan.shots[1].effectiveVideoPrompt, "用户确认后的完整视频提示词。");
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(root, "generation-request.json"))).confirmed, false);
+
+  const submitted = [];
+  const realRunWorkbenchQueueShot = plugin.runWorkbenchQueueShot.bind(plugin);
+  plugin.runWorkbenchQueueShot = async (_folder, shot) => {
+    submitted.push({ id: shot.id, prompt: shot.effectiveVideoPrompt });
+    return { videoPath: `${folder}/03-视频片段/${shot.id}.mp4` };
+  };
+  let releaseStartValidation;
+  let startValidationReached;
+  const startValidationGate = new Promise((resolve) => { releaseStartValidation = resolve; });
+  const startValidationStarted = new Promise((resolve) => { startValidationReached = resolve; });
+  plugin.refreshGenerationModelCatalog = async () => {
+    startValidationReached();
+    await startValidationGate;
+    return { imageModels: ["gpt-image-2-w"], videoModels: ["MiniMax-H3"] };
+  };
+  const firstStart = plugin.startWorkbenchGeneration(folder, plan);
+  await startValidationStarted;
+  await assert.rejects(
+    () => plugin.startWorkbenchGeneration(folder, plan),
+    /正在创建|队列锁/,
+    "concurrent callers must not both pass the project-level queue reservation",
+  );
+  releaseStartValidation();
+  const queued = await firstStart;
+  assert.strictEqual(queued.status, "idle", "enqueue must return before long-running generation completes");
+  await plugin.queueRuns.get(folder);
+  assert.deepStrictEqual(submitted.map((item) => item.id), ["001", "002"]);
+  assert.strictEqual(submitted[1].prompt, "用户确认后的完整视频提示词。");
+  const persistedQueue = JSON.parse(fs.readFileSync(path.join(root, ".work/generation-queue.json")));
+  assert.strictEqual(persistedQueue.status, "completed");
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(root, "generation-request.json"))).confirmed, false, "queue generation must never set confirmed=true");
+  assert.strictEqual(plugin.loadWorkbenchProject(folder).generationQueue.status, "completed");
+
+  const stalePlan = await plugin.previewWorkbenchGeneration(folder, ["001"]);
+  let releaseStaleValidation;
+  let staleValidationReached;
+  const staleValidationGate = new Promise((resolve) => { releaseStaleValidation = resolve; });
+  const staleValidationStarted = new Promise((resolve) => { staleValidationReached = resolve; });
+  let staleCatalogCalls = 0;
+  plugin.refreshGenerationModelCatalog = async () => {
+    staleCatalogCalls += 1;
+    if (staleCatalogCalls === 1) {
+      staleValidationReached();
+      await staleValidationGate;
+    }
+    return { imageModels: ["gpt-image-2-w"], videoModels: ["MiniMax-H3"] };
+  };
+  const submissionsBeforeStaleRace = submitted.length;
+  const staleFirstStart = plugin.startWorkbenchGeneration(folder, stalePlan);
+  const staleFirstRejected = assert.rejects(
+    staleFirstStart,
+    /锁已被其他实例接管|队列锁已丢失/,
+    "a stale lock holder must revalidate ownership before enqueueing",
+  );
+  await staleValidationStarted;
+  const staleLockPath = path.join(root, ".work/generation-queue.lock");
+  const staleTime = new Date(Date.now() - 6 * 60 * 1000);
+  fs.utimesSync(staleLockPath, staleTime, staleTime);
+  await plugin.startWorkbenchGeneration(folder, stalePlan);
+  await plugin.queueRuns.get(folder);
+  releaseStaleValidation();
+  await staleFirstRejected;
+  assert.strictEqual(submitted.length, submissionsBeforeStaleRace + 1, "only the replacement lock owner may enqueue paid work");
+  assert.strictEqual(fs.existsSync(staleLockPath), false, "the replacement owner must release its lock cleanly");
+
+  plugin.refreshGenerationModelCatalog = async () => ({
+    imageModels: ["gpt-image-2-w"],
+    videoModels: ["MiniMax-H3"],
+  });
+  const stopPlan = await plugin.previewWorkbenchGeneration(folder, ["001", "002"]);
+  let releaseFirstShot;
+  let firstShotReached;
+  const firstShotGate = new Promise((resolve) => { releaseFirstShot = resolve; });
+  const firstShotStarted = new Promise((resolve) => { firstShotReached = resolve; });
+  const stopSubmitted = [];
+  plugin.runWorkbenchQueueShot = async (_folder, shot) => {
+    stopSubmitted.push(shot.id);
+    if (shot.id === "001") {
+      firstShotReached();
+      await firstShotGate;
+    }
+    return { videoPath: `${folder}/03-视频片段/${shot.id}.mp4` };
+  };
+  await plugin.startWorkbenchGeneration(folder, stopPlan);
+  await firstShotStarted;
+  await plugin.stopWorkbenchGeneration(folder);
+  releaseFirstShot();
+  await plugin.queueRuns.get(folder);
+  assert.deepStrictEqual(stopSubmitted, ["001"], "stop must update the exact queue object used by the runner");
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(root, ".work/generation-queue.json"))).status, "stopped");
+
+  const activeQueue = {
+    ...persistedQueue,
+    queueId: "active-queue",
+    status: "processing",
+    stopRequested: false,
+    shots: [{ ...persistedQueue.shots[0], id: "001", status: "processing" }],
+  };
+  fs.writeFileSync(path.join(root, ".work/generation-queue.json"), JSON.stringify(activeQueue));
+  plugin.queueApis.delete(folder);
+  const otherPlan = await plugin.previewWorkbenchGeneration(folder, ["002"]);
+  await assert.rejects(
+    () => plugin.startWorkbenchGeneration(folder, otherPlan),
+    /已有生成队列.*停止.*完成/,
+    "one project queue file must not be overwritten by a concurrent queue",
+  );
+
+  const submittedVideoOptions = [];
+  plugin.runWorkbenchQueueShot = realRunWorkbenchQueueShot;
+  plugin.getGenerationPlugins = () => ({
+    image: {},
+    video: {
+      settings: { resolution: "768p" },
+      submitVideo: async (options) => { submittedVideoOptions.push(options); return { id: "video-task" }; },
+    },
+  });
+  plugin.resolveQueueGenerationRuntime = async () => ({
+    image: {}, video: plugin.getGenerationPlugins().video, imageModel: "gpt-image-2-w", model: "MiniMax-H3", resolution: "768p",
+  });
+  plugin.ensureReferenceAsset = async (_image, asset) => ({
+    ...asset,
+    imagePath: `山竹视频资产库/${asset.kind}/${asset.id}.png`,
+    metadataPath: `山竹视频资产库/${asset.kind}/${asset.id}.json`,
+    contentHash: `${asset.kind}-${asset.id}-hash`,
+    reused: true,
+  });
+  plugin.generateImageMulti = async () => ({ kind: "base64", value: "eA==" });
+  plugin.saveImageCandidate = async (_image, _candidate, target) => target;
+  plugin.localImage = (vaultPath) => ({ name: path.basename(vaultPath), buffer: Buffer.from("x") });
+  let releaseVideoWait;
+  let videoWaitReached;
+  const videoWaitGate = new Promise((resolve) => { releaseVideoWait = resolve; });
+  const videoWaitStarted = new Promise((resolve) => { videoWaitReached = resolve; });
+  plugin.waitForVideo = async (videoPlugin, taskId) => {
+    assert.strictEqual(taskId, "video-task");
+    videoWaitReached();
+    await videoWaitGate;
+    return { localPath: "山竹视频资产库/generated.mp4" };
+  };
+  plugin.copyVaultFile = (_source, target) => target;
+  fs.writeFileSync(path.join(root, ".work/generation-queue.json"), JSON.stringify({}));
+  const directPlan = await plugin.previewWorkbenchGeneration(folder, ["002"]);
+  const directRun = plugin.runWorkbenchQueueShot(folder, directPlan.shots[0], {
+    queueId: "direct",
+    planId: directPlan.planId,
+    character: directPlan.character,
+    products: directPlan.products,
+    scenes: directPlan.scenes,
+    settings: directPlan.settings,
+  });
+  await videoWaitStarted;
+  const duringVideo = JSON.parse(fs.readFileSync(path.join(root, "project.json")));
+  const runningShot = duringVideo.shots.find((shot) => shot.id === "002");
+  assert.strictEqual(runningShot.videoTaskId, "video-task", "provider task ID must be persisted before polling begins");
+  duringVideo.shots.find((shot) => shot.id === "001").title = "用户生成期间修改的第一镜";
+  fs.writeFileSync(path.join(root, "project.json"), JSON.stringify(duringVideo));
+  releaseVideoWait();
+  const directResult = await directRun;
+  assert.strictEqual(submittedVideoOptions[0].prompt, "用户确认后的完整视频提示词。");
+  assert.match(directResult.videoPath, /镜头-002/);
+  assert.strictEqual(
+    JSON.parse(fs.readFileSync(path.join(root, "project.json"))).shots.find((shot) => shot.id === "001").title,
+    "用户生成期间修改的第一镜",
+    "shot generation must merge into the latest project instead of overwriting unrelated edits",
+  );
+
+  const recoverProject = JSON.parse(fs.readFileSync(path.join(root, "project.json")));
+  const recoverShot = recoverProject.shots.find((shot) => shot.id === "002");
+  recoverShot.videoPath = "";
+  recoverShot.status = "正在生成视频";
+  recoverShot.videoTaskId = "video-task";
+  fs.writeFileSync(path.join(root, "project.json"), JSON.stringify(recoverProject));
+  const recoverQueue = {
+    ...JSON.parse(JSON.stringify(persistedQueue)),
+    queueId: "recover-queue",
+    planId: directPlan.planId,
+    status: "processing",
+    stopRequested: false,
+    character: directPlan.character,
+    products: directPlan.products,
+    scenes: directPlan.scenes,
+    settings: directPlan.settings,
+    selectedShotIds: ["002"],
+    shots: [{ ...directPlan.shots[0], status: "processing", error: "", result: null }],
+  };
+  fs.writeFileSync(path.join(root, ".work/generation-queue.json"), JSON.stringify(recoverQueue));
+  plugin.queueApis.delete(folder);
+  submittedVideoOptions.length = 0;
+  plugin.waitForVideo = async (_videoPlugin, taskId) => {
+    assert.strictEqual(taskId, "video-task");
+    return { localPath: "山竹视频资产库/recovered.mp4" };
+  };
+  await plugin.recoverWorkbenchQueue(folder);
+  await plugin.queueRuns.get(folder);
+  assert.strictEqual(submittedVideoOptions.length, 0, "restart recovery must poll the persisted task instead of resubmitting it");
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(root, ".work/generation-queue.json"))).status, "completed");
+
+  const failedProject = JSON.parse(fs.readFileSync(path.join(root, "project.json")));
+  const failedShot = failedProject.shots.find((shot) => shot.id === "002");
+  failedShot.videoPath = "";
+  failedShot.status = "正在恢复并查询已有视频任务";
+  failedShot.videoTaskId = "failed-video-task";
+  failedShot.videoTaskPlanId = directPlan.planId;
+  failedShot.videoTaskFingerprint = "old-fingerprint";
+  fs.writeFileSync(path.join(root, "project.json"), JSON.stringify(failedProject));
+  plugin.waitForVideo = async () => {
+    const failure = new Error("视频描述或参考材料未通过平台审核，请调整内容后重试。");
+    failure.code = "VIDEO_TASK_FAILED";
+    failure.terminalTaskFailure = true;
+    throw failure;
+  };
+  await assert.rejects(
+    () => plugin.runWorkbenchQueueShot(folder, directPlan.shots[0], {
+      queueId: "failed-recovery",
+      planId: directPlan.planId,
+      character: directPlan.character,
+      products: directPlan.products,
+      scenes: directPlan.scenes,
+      settings: directPlan.settings,
+    }),
+    /未通过平台审核/,
+  );
+  const failedPersistedShot = JSON.parse(fs.readFileSync(path.join(root, "project.json"))).shots.find((shot) => shot.id === "002");
+  assert.strictEqual(failedPersistedShot.videoTaskId, "", "terminal provider failures must release the task ID for a real retry");
+  assert.strictEqual(failedPersistedShot.failedVideoTaskId, "failed-video-task", "the failed provider task must remain auditable");
+
+  submittedVideoOptions.length = 0;
+  plugin.waitForVideo = async () => ({ localPath: "山竹视频资产库/retry.mp4" });
+  await plugin.runWorkbenchQueueShot(folder, directPlan.shots[0], {
+    queueId: "retry-after-terminal-failure",
+    planId: directPlan.planId,
+    character: directPlan.character,
+    products: directPlan.products,
+    scenes: directPlan.scenes,
+    settings: directPlan.settings,
+  });
+  assert.strictEqual(submittedVideoOptions.length, 1, "retry after a terminal failure must submit a new provider task");
+
+  const syncScriptPath = path.resolve(__dirname, "../../../scripts/sync-plugin-code-to-vault.sh");
+  if (fs.existsSync(syncScriptPath)) {
+    const syncScript = fs.readFileSync(syncScriptPath, "utf8");
+    assert.match(syncScript, /generation-queue\.cjs/, "live-vault sync must include the queue engine");
+    assert.match(syncScript, /replica-logic-api\.cjs/, "live-vault sync must include the queue facade");
+    assert.match(syncScript, /workbench-queue-plugin\.test\.cjs/, "live-vault sync must include its queue regression test");
+  }
+
+  fs.rmSync(vault, { recursive: true, force: true });
+  console.log("workbench-queue-plugin: ok");
+})().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

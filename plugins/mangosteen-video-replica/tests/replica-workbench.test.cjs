@@ -95,6 +95,7 @@ Module._load = function patchedLoad(request, parent, isMain) {
 const timerCalls = [];
 const clearedTimers = [];
 const resizeObservers = [];
+const confirmMessages = [];
 global.window = {
   setInterval(callback, delay) {
     const id = timerCalls.length + 1;
@@ -102,7 +103,7 @@ global.window = {
     return id;
   },
   clearInterval(id) { clearedTimers.push(id); },
-  confirm() { return true; },
+  confirm(message) { confirmMessages.push(String(message)); return true; },
 };
 global.ResizeObserver = class FakeResizeObserver {
   constructor(callback) { this.callback = callback; this.disconnected = false; resizeObservers.push(this); }
@@ -157,6 +158,7 @@ const readySnapshot = {
   request,
   requestMtimeMs: 100,
   generationState: {},
+  generationQueue: {},
 };
 
 function clone(value) { return JSON.parse(JSON.stringify(value)); }
@@ -167,7 +169,8 @@ function createPlugin(snapshot = readySnapshot, projects = [{ folder: readySnaps
     projects: clone(projects),
     loadCalls: 0,
     saveCalls: [],
-    confirmCalls: [],
+    previewCalls: [],
+    queueCalls: [],
     stopCalls: [],
     generationCatalogCalls: 0,
     generationSelectionCalls: [],
@@ -182,7 +185,22 @@ function createPlugin(snapshot = readySnapshot, projects = [{ folder: readySnaps
       this.saveCalls.push({ folder, request: clone(nextRequest) });
       this.snapshot.request = clone(nextRequest);
     },
-    async confirmWorkbenchDraft(folder) { this.confirmCalls.push(folder); },
+    async previewWorkbenchGeneration(folder, shotIds) {
+      this.previewCalls.push({ folder, shotIds: [...shotIds] });
+      const selected = new Set(shotIds);
+      return {
+        warning: "点击生成后，所选镜头的提示词将无法修改，请确认生成。",
+        selectedShotIds: this.snapshot.request.shots.filter((shot) => selected.has(shot.id)).map((shot) => shot.id),
+        shots: this.snapshot.request.shots.filter((shot) => selected.has(shot.id)).map((shot) => ({
+          ...clone(shot),
+          effectiveVideoPrompt: shot.videoPromptOverride || `最终提示词：${shot.videoPrompt}`,
+        })),
+      };
+    },
+    async startWorkbenchGeneration(folder, plan) {
+      this.queueCalls.push({ folder, plan: clone(plan) });
+      return { queueId: "queue-1", status: "processing" };
+    },
     async stopWorkbenchGeneration(folder) { this.stopCalls.push(folder); },
     async refreshGenerationModelCatalog() {
       this.generationCatalogCalls += 1;
@@ -245,6 +263,22 @@ function createView(plugin) {
     view.draft.shots.length,
     "each storyboard shot must have one compact summary row",
   );
+  assert(view.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "生成所选（0）"));
+  assert(view.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "生成此镜头"));
+  const firstShotCheckbox = view.contentEl.find((element) => (
+    element.tagName === "INPUT" && element.attributes.type === "checkbox" && element.dataset.shotId === "001"
+  ));
+  assert(firstShotCheckbox, "each shot must expose a selection checkbox");
+  firstShotCheckbox.checked = true;
+  await firstShotCheckbox.dispatch("change");
+  const selectedGenerateButton = view.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "生成所选（1）");
+  assert(selectedGenerateButton, "batch generation must reflect the selected shot count");
+  await selectedGenerateButton.dispatch("click");
+  assert.deepStrictEqual(plugin.previewCalls.at(-1).shotIds, ["001"]);
+  assert.strictEqual(plugin.queueCalls.length, 1);
+  assert.match(confirmMessages.at(-1), /点击生成后，所选镜头的提示词将无法修改，请确认生成。/);
+  assert.match(confirmMessages.at(-1), /最终提示词：人物举起手机，镜头推进/);
+  assert.strictEqual(plugin.snapshot.request.confirmed, false, "the UI must not revive the legacy confirmed=true workflow");
 
   const titleInput = view.contentEl.find((element) => (
     element.tagName === "INPUT"
@@ -501,44 +535,88 @@ function createView(plugin) {
   ineligibleInput.value = "未完成分析的本地修改";
   await ineligibleInput.dispatch("input");
   await ineligibleView.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "总览").dispatch("click");
-  const ineligibleConfirm = ineligibleView.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "确认并生成");
-  assert.strictEqual(ineligibleConfirm.disabled, true, "dirty state must not bypass confirmation eligibility");
-  await ineligibleView.confirmDraft();
-  assert.strictEqual(ineligiblePlugin.confirmCalls.length, 0, "confirmDraft must enforce eligibility before the plugin call");
+  assert.strictEqual(
+    ineligibleView.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "确认并生成"),
+    null,
+    "the overview must not expose the legacy whole-project confirmation flow",
+  );
+  await ineligibleView.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "选择分镜生成").dispatch("click");
+  const ineligibleGenerate = ineligibleView.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "生成此镜头");
+  assert.strictEqual(ineligibleGenerate.disabled, true, "unfinished analysis must not allow a paid shot queue");
+  assert.strictEqual(ineligiblePlugin.queueCalls.length, 0);
   await ineligibleView.onClose();
 
   const concurrentPlugin = createPlugin();
-  let releaseConfirm;
-  let confirmStarted;
-  const confirmBlocker = new Promise((resolve) => { releaseConfirm = resolve; });
-  const started = new Promise((resolve) => { confirmStarted = resolve; });
-  concurrentPlugin.confirmWorkbenchDraft = async function confirmWorkbenchDraft(folder) {
-    this.confirmCalls.push(folder);
-    confirmStarted();
-    await confirmBlocker;
+  let releaseQueue;
+  let queueStarted;
+  const queueBlocker = new Promise((resolve) => { releaseQueue = resolve; });
+  const started = new Promise((resolve) => { queueStarted = resolve; });
+  concurrentPlugin.startWorkbenchGeneration = async function startWorkbenchGeneration(folder, plan) {
+    this.queueCalls.push({ folder, plan: clone(plan) });
+    queueStarted();
+    await queueBlocker;
   };
   const concurrentView = createView(concurrentPlugin);
   await concurrentView.onOpen();
-  const firstConfirm = concurrentView.confirmDraft();
+  const firstConfirm = concurrentView.generateShots(["001"]);
   await started;
-  const pendingConfirmButton = concurrentView.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "确认并生成");
-  assert.strictEqual(pendingConfirmButton.disabled, true, "confirm must disable synchronously while pending");
-  const secondConfirm = concurrentView.confirmDraft();
-  assert.strictEqual(concurrentPlugin.confirmCalls.length, 1, "concurrent confirmation must call the plugin once");
-  releaseConfirm();
+  const secondConfirm = concurrentView.generateShots(["001"]);
+  assert.strictEqual(concurrentPlugin.queueCalls.length, 1, "concurrent generation confirmation must enqueue once");
+  releaseQueue();
   await Promise.all([firstConfirm, secondConfirm]);
   assert.strictEqual(concurrentView.confirmPending, false);
-  assert.strictEqual(concurrentView.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "确认并生成").disabled, false);
   await concurrentView.onClose();
 
   const failedConfirmPlugin = createPlugin();
-  failedConfirmPlugin.confirmWorkbenchDraft = async () => { throw new Error("确认调用失败"); };
+  failedConfirmPlugin.startWorkbenchGeneration = async () => { throw new Error("确认调用失败"); };
   const failedConfirmView = createView(failedConfirmPlugin);
   await failedConfirmView.onOpen();
-  await assert.rejects(() => failedConfirmView.confirmDraft(), /确认调用失败/);
+  await assert.rejects(() => failedConfirmView.generateShots(["001"]), /确认调用失败/);
   assert.strictEqual(failedConfirmView.confirmPending, false, "failed confirmation must release the pending guard");
-  assert.strictEqual(failedConfirmView.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "确认并生成").disabled, false);
   await failedConfirmView.onClose();
+
+  const partialLockRequest = {
+    ...clone(request),
+    shots: [
+      clone(request.shots[0]),
+      { ...clone(request.shots[0]), id: "002", title: "第二镜", videoPrompt: "第二镜动作" },
+    ],
+  };
+  const partialLockView = createView(createPlugin({
+    ...clone(readySnapshot),
+    request: partialLockRequest,
+    project: {
+      ...clone(readySnapshot.project),
+      status: "generating",
+      shots: [
+        { id: "001", title: "开场", status: "正在生成视频" },
+        { id: "002", title: "第二镜", status: "等待生成" },
+      ],
+    },
+    generationQueue: {
+      status: "processing",
+      stopRequested: false,
+      shots: [
+        { id: "001", status: "processing" },
+      ],
+    },
+  }));
+  await partialLockView.onOpen();
+  await partialLockView.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "分镜").dispatch("click");
+  const lockedPrompt = partialLockView.contentEl.find((element) => (
+    element.tagName === "TEXTAREA" && element.dataset.index === "0" && element.dataset.field === "videoPrompt"
+  ));
+  const editablePrompt = partialLockView.contentEl.find((element) => (
+    element.tagName === "TEXTAREA" && element.dataset.index === "1" && element.dataset.field === "videoPrompt"
+  ));
+  assert.strictEqual(lockedPrompt.disabled, true, "queued or processing shots must be locked");
+  assert.strictEqual(editablePrompt.disabled, false, "unselected shots must remain editable");
+  assert.strictEqual(
+    partialLockView.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "生成此镜头").disabled,
+    true,
+    "a project must not start a second queue while its current queue is active",
+  );
+  await partialLockView.onClose();
 
   const emptyView = createView(createPlugin({ project: {}, request: {}, generationState: {} }, []));
   await assert.doesNotReject(() => emptyView.onOpen());
