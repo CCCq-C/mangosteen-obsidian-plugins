@@ -90,6 +90,40 @@ function withWorkbenchShotIds(request) {
   return { ...request, shots };
 }
 
+function versionSixProjectView(project, draft = {}) {
+  if (Number(project?.schemaVersion) < 6) return project;
+  const status = String(draft?.analysisStatus || project?.status || (Array.isArray(draft?.shots) && draft.shots.length ? "analysis_ready" : "prepared"));
+  const statusText = String(draft?.analysisStatusText || project?.statusText || "");
+  return { ...project, status, ...(statusText ? { statusText } : {}) };
+}
+
+function stableVersionSixProject(project = {}) {
+  const allowedProjectFields = [
+    "schemaVersion", "layoutVersion", "projectId", "id", "folder", "title",
+    "source", "sourcePath", "sourceName", "createdAt", "updatedAt", "duration",
+    "width", "height", "frames", "transcriptPath", "shots", "finalVideoPath",
+    "characterAsset", "sceneAssets", "productAssets", "analysis", "concatError",
+  ];
+  const stable = {};
+  for (const field of allowedProjectFields) {
+    if (Object.prototype.hasOwnProperty.call(project, field)) stable[field] = project[field];
+  }
+  stable.schemaVersion = 6;
+  stable.layoutVersion = 6;
+  stable.updatedAt = String(project.updatedAt || new Date().toISOString());
+  stable.shots = (Array.isArray(project.shots) ? project.shots : []).map((shot) => {
+    const output = { id: String(shot?.id || "") };
+    for (const field of [
+      "title", "currentArtifacts", "generationFingerprint", "firstImagePath", "imagePath",
+      "lastImagePath", "videoPath", "videoTaskCompletedAt",
+    ]) {
+      if (Object.prototype.hasOwnProperty.call(shot || {}, field)) output[field] = shot[field];
+    }
+    return output;
+  });
+  return stable;
+}
+
 class PrepareModal extends Modal {
   constructor(plugin) { super(plugin.app); this.plugin = plugin; this.sourcePath = ""; }
 
@@ -339,7 +373,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
   isWorkbenchDataFile(file) {
     const vaultPath = String(file?.path || "").replace(/\\/g, "/");
     return vaultPath.startsWith(`${ROOT}/`)
-      && ["project.json", REQUEST_FILE, path.basename(STATE_FILE), path.basename(QUEUE_FILE)].includes(String(file?.name || path.basename(vaultPath)));
+      && ["project.json", "draft.json", "active-run.json", REQUEST_FILE, path.basename(STATE_FILE), path.basename(QUEUE_FILE)].includes(String(file?.name || path.basename(vaultPath)));
   }
 
   requestWorkbenchRefresh() {
@@ -475,6 +509,28 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
 
   projectStorageResolver(folder) {
     return (relativePath, options = {}) => this.checkedProjectPath(folder, relativePath, options);
+  }
+
+  readProjectDocuments(folder) {
+    const checkedFolder = this.checkedWorkbenchProjectFolder(folder).folder;
+    const paths = projectStorage.projectRelativePaths(checkedFolder);
+    const legacyPaths = {
+      project: `${checkedFolder}/project.json`,
+      draft: `${checkedFolder}/${REQUEST_FILE}`,
+    };
+    const readRelativeJson = (relativePath) => this.readJson(this.checkedProjectPath(checkedFolder, relativePath));
+    try {
+      return projectStorage.readProjectDocument({ readJson: readRelativeJson, paths, legacyPaths });
+    } catch (error) {
+      const legacyProjectPath = this.checkedProjectPath(checkedFolder, legacyPaths.project);
+      if (error?.code !== "ENOENT" || !fs.statSync(legacyProjectPath, { throwIfNoEntry: false })?.isFile()) throw error;
+      const legacyDraftPath = this.checkedProjectPath(checkedFolder, legacyPaths.draft);
+      return {
+        project: this.readJson(legacyProjectPath),
+        draft: fs.statSync(legacyDraftPath, { throwIfNoEntry: false })?.isFile() ? this.readJson(legacyDraftPath) : {},
+        legacy: true,
+      };
+    }
   }
 
   replicaOutputTarget(projectFolder, shotId, assetType, destinationPath) {
@@ -642,19 +698,24 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       project: {}, request: {}, requestMtimeMs: null, currentRun: null,
       generationState: {}, generationQueue: {}, readErrors: {},
     };
-    for (const [key, filePath] of [
-      ["project", paths.projectPath],
-      ["request", paths.requestPath],
-    ]) {
-      try {
-        output[key] = this.readJson(filePath);
-        if (key === "request") {
-          output[key] = withWorkbenchShotIds(output[key]);
-          output.requestMtimeMs = fs.statSync(filePath).mtimeMs;
+    try {
+      const documents = this.readProjectDocuments(paths.folder);
+      output.request = withWorkbenchShotIds(documents.draft);
+      output.project = versionSixProjectView(documents.project, output.request);
+      output.requestMtimeMs = fs.statSync(paths.requestPath).mtimeMs;
+    } catch (_) {
+      for (const [key, filePath] of [["project", paths.projectPath], ["request", paths.requestPath]]) {
+        try {
+          output[key] = this.readJson(filePath);
+          if (key === "request") {
+            output[key] = withWorkbenchShotIds(output[key]);
+            output.requestMtimeMs = fs.statSync(filePath).mtimeMs;
+          }
+        } catch (error) {
+          output.readErrors[key] = String(error?.message || error);
         }
-      } catch (error) {
-        output.readErrors[key] = String(error?.message || error);
       }
+      output.project = versionSixProjectView(output.project, output.request);
     }
     output.currentRun = runState.selectCurrentRun(this.currentRunInputs(paths, output.requestMtimeMs, output.readErrors));
     output.generationQueue = this.currentRunQueueView(output.currentRun);
@@ -1468,7 +1529,8 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         const folder = `${ROOT}/${entry.name}`;
         const { projectPath } = this.workbenchProjectPaths(folder);
         if (!fs.existsSync(projectPath)) continue;
-        const project = this.readJson(projectPath);
+        const documents = this.readProjectDocuments(folder);
+        const project = versionSixProjectView(documents.project, documents.draft);
         if (String(project?.folder || "").replace(/\\/g, "/") !== folder) continue;
         records.push({ project, projectPath, mtimeMs: fs.statSync(projectPath).mtimeMs });
       } catch (_) { /* skip incomplete folders */ }
@@ -1626,9 +1688,14 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
 
   async analyzeProject(projectFolder) {
     const checkedFolder = this.checkedWorkbenchProjectFolder(projectFolder).folder;
-    const projectPath = this.checkedProjectPath(checkedFolder, "project.json");
-    if (!fs.existsSync(projectPath)) throw new Error("找不到视频复刻项目的 project.json。");
-    const project = this.readJson(projectPath);
+    const paths = this.workbenchProjectPaths(checkedFolder);
+    let documents;
+    try { documents = this.readProjectDocuments(checkedFolder); }
+    catch (error) {
+      if (error?.code === "ENOENT") throw new Error("找不到视频复刻项目的 project.json。");
+      throw error;
+    }
+    const project = documents.project;
     if (String(project.folder || "").replace(/\\/g, "/") !== checkedFolder) throw new Error("project.json 的项目目录与当前项目范围不一致，已拒绝访问。");
     const frames = workflow.sampleFrames(project.frames, 8);
     if (!frames.length) throw new Error("项目还没有提取画面，请先完成本地拆解。");
@@ -1639,14 +1706,10 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     if (!selection.group || !selection.model) throw new Error("没有读取到可用的语言分析模型，请先登录山竹账号并选择模型。");
     const schemaPath = path.join(this.pluginRoot, "video-analysis-schema.json");
     if (!fs.existsSync(schemaPath)) throw new Error("缺少视频分析规则文件，请重新安装山竹视频复刻插件。");
-    const analysisOutputPaths = [
-      "project.json",
-      REQUEST_FILE,
-      ".work/ai-analysis.json",
-      ".work/last-agent-response.json",
-      "02-分镜脚本/分镜脚本.md",
-      "00-项目总览.md",
-    ];
+    const versionSixPaths = projectStorage.projectRelativePaths(checkedFolder);
+    const analysisOutputPaths = paths.isV6
+      ? [versionSixPaths.project, versionSixPaths.draft, versionSixPaths.referenceIndex, versionSixPaths.overview]
+      : ["project.json", REQUEST_FILE, ".work/ai-analysis.json", ".work/last-agent-response.json", "02-分镜脚本/分镜脚本.md", "00-项目总览.md"];
     for (const outputPath of analysisOutputPaths) this.checkedProjectPath(checkedFolder, outputPath, { createParents: true });
     const transcriptPath = project.transcriptPath ? this.checkedProjectPath(checkedFolder, project.transcriptPath) : "";
     const transcriptText = transcriptPath && fs.existsSync(transcriptPath) ? fs.readFileSync(transcriptPath, "utf8") : "";
@@ -1655,15 +1718,34 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       if (!fs.statSync(framePath, { throwIfNoEntry: false })?.isFile()) throw new Error(`原片画面丢失：${path.basename(framePath)}`);
       return { name: path.basename(framePath), type: "image/jpeg", bytes: fs.readFileSync(framePath) };
     });
-    project.status = "analyzing";
-    project.statusText = "山竹智能体正在分析人物、场景和分镜";
-    project.analysisProvider = "mangosteen-agent";
-    project.analysisGroup = selection.group;
-    project.analysisModel = selection.model;
-    delete project.analysisErrorCode;
-    delete project.analysisErrorStatus;
-    delete project.analysisErrorAt;
-    this.saveProject(projectFolder, project);
+    if (paths.isV6) {
+      const draft = {
+        ...documents.draft,
+        analysisStatus: "analyzing",
+        analysisStatusText: "山竹智能体正在分析人物、场景和分镜",
+        analysis: { provider: "mangosteen-agent", group: selection.group, model: selection.model, updatedAt: new Date().toISOString() },
+      };
+      delete draft.analysisErrorCode;
+      delete draft.analysisErrorStatus;
+      delete draft.analysisErrorAt;
+      projectStorage.atomicWriteJson({
+        resolveSafe: this.projectStorageResolver(checkedFolder),
+        relativePath: versionSixPaths.draft,
+        value: draft,
+      });
+      documents.draft = draft;
+      this.saveProject(projectFolder, project);
+    } else {
+      project.status = "analyzing";
+      project.statusText = "山竹智能体正在分析人物、场景和分镜";
+      project.analysisProvider = "mangosteen-agent";
+      project.analysisGroup = selection.group;
+      project.analysisModel = selection.model;
+      delete project.analysisErrorCode;
+      delete project.analysisErrorStatus;
+      delete project.analysisErrorAt;
+      this.saveProject(projectFolder, project);
+    }
     try {
       const response = await agent.analyzeStructured({
         group: selection.group,
@@ -1674,8 +1756,10 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         schemaName: "video_replica_analysis",
       });
       const analysis = response?.data ?? response;
-      const diagnosticPath = this.checkedProjectPath(checkedFolder, ".work/last-agent-response.json", { createParents: true });
-      writeJson(diagnosticPath, analysis);
+      if (!paths.isV6) {
+        const diagnosticPath = this.checkedProjectPath(checkedFolder, ".work/last-agent-response.json", { createParents: true });
+        writeJson(diagnosticPath, analysis);
+      }
       const result = workflow.applyAnalysis({
         projectFolder: checkedFolder,
         vaultPath: this.vaultPath(),
@@ -1690,6 +1774,31 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       return result;
     } catch (error) {
       const message = String(error?.message || error);
+      if (paths.isV6) {
+        const modelError = this.isAnalysisModelError(error);
+        const draft = {
+          ...this.readJson(paths.requestPath),
+          analysisStatus: modelError ? "analysis_model_error" : "analysis_failed",
+          analysisStatusText: modelError
+            ? `分析模型 ${selection.model} 返回错误：${message}。请更换分析模型后重试。`
+            : `山竹智能体分析失败：${message}`,
+          analysisErrorCode: modelError ? String(error?.code || "MODEL_UNAVAILABLE") : undefined,
+          analysisErrorStatus: modelError ? Number(error?.status || 0) || undefined : undefined,
+          analysisErrorAt: new Date().toISOString(),
+        };
+        projectStorage.atomicWriteJson({
+          resolveSafe: this.projectStorageResolver(checkedFolder),
+          relativePath: versionSixPaths.draft,
+          value: draft,
+        });
+        this.saveProject(checkedFolder, project);
+        if (!modelError) throw error;
+        const surfaced = new Error(draft.analysisStatusText);
+        surfaced.code = draft.analysisErrorCode;
+        surfaced.status = draft.analysisErrorStatus;
+        surfaced.changeModel = true;
+        throw surfaced;
+      }
       if (this.isAnalysisModelError(error)) {
         project.status = "analysis_model_error";
         project.analysisErrorCode = String(error?.code || "MODEL_UNAVAILABLE");
@@ -1805,13 +1914,19 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     if (String(project?.folder || "").replace(/\\/g, "/") !== checkedFolder) throw new Error("project.json 的项目目录与当前项目范围不一致，已拒绝写入。");
     const paths = this.workbenchProjectPaths(checkedFolder);
     if (paths.isV6) {
+      project = stableVersionSixProject(project);
       projectStorage.atomicWriteJson({
         resolveSafe: this.projectStorageResolver(checkedFolder),
         relativePath: projectStorage.projectRelativePaths(checkedFolder).project,
         value: project,
       });
     } else writeJson(paths.projectPath, project);
-    atomicWrite(this.checkedProjectPath(checkedFolder, "00-项目总览.md", { createParents: true }), core.dashboardMarkdown(project));
+    const draft = paths.isV6 ? this.readOptionalJson(paths.requestPath) || {} : {};
+    atomicWrite(this.checkedProjectPath(checkedFolder, "00-项目总览.md", { createParents: true }), core.dashboardMarkdown(project, draft));
+    if (paths.isV6) {
+      const referenceIndex = projectStorage.projectRelativePaths(checkedFolder).referenceIndex;
+      atomicWrite(this.checkedProjectPath(checkedFolder, referenceIndex, { createParents: true }), core.referenceAssetsMarkdown(project, draft));
+    }
     this.requestWorkbenchRefresh();
   }
 
@@ -1909,8 +2024,11 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       const project = this.readJson(paths.projectPath);
       if (project.statusText !== stoppedStatusText) {
         project.statusText = stoppedStatusText;
-        writeJson(paths.projectPath, project);
-        atomicWrite(this.checkedProjectPath(paths.folder, "00-项目总览.md", { createParents: true }), core.dashboardMarkdown(project));
+        if (paths.isV6) this.saveProject(paths.folder, project);
+        else {
+          writeJson(paths.projectPath, project);
+          atomicWrite(this.checkedProjectPath(paths.folder, "00-项目总览.md", { createParents: true }), core.dashboardMarkdown(project));
+        }
         repaired = true;
       }
     } catch (_) { /* stop marker remains authoritative */ }

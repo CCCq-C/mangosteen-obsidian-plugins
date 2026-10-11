@@ -333,7 +333,125 @@ function analysisStoryboardMarkdown(project, request) {
   return lines.join("\n");
 }
 
-function dashboardMarkdown(project) {
+function currentShotArtifacts(shot = {}) {
+  return shot.currentArtifacts && typeof shot.currentArtifacts === "object" && !Array.isArray(shot.currentArtifacts)
+    ? { ...shot.currentArtifacts, ...shot }
+    : shot;
+}
+
+function expectedReferenceAssetPath(kind, id) {
+  const safeId = cleanText(id);
+  if (!safeId) return "";
+  if (kind === "character") return `山竹视频资产库/人物/${safeId}/人物参考板.png`;
+  if (kind === "scene") return `山竹视频资产库/场景/${safeId}/场景参考图.png`;
+  if (kind === "product") return `山竹视频资产库/产品/${safeId}/产品参考板.png`;
+  return "";
+}
+
+function referenceAssetsMarkdown(project = {}, draft = {}) {
+  const characterAssets = [project.characterAsset].filter(Boolean);
+  const sceneAssets = Array.isArray(project.sceneAssets) ? project.sceneAssets : [];
+  const productAssets = Array.isArray(project.productAssets) ? project.productAssets : [];
+  const byId = (assets) => new Map(assets.map((asset) => [cleanText(asset?.id), asset]));
+  const characterById = byId(characterAssets);
+  const scenesById = byId(sceneAssets);
+  const productsById = byId(productAssets);
+  const lines = [
+    `# 参考资产｜${safeSegment(project.title || project.sourceName || "视频复刻项目")}`,
+    "",
+    "> 人物、场景和产品原图保存在山竹视频资产库；本页只使用 Obsidian 嵌入，不复制资产。",
+    "",
+    "## 人物",
+    "",
+  ];
+  const characterId = cleanText(draft.character?.id || project.characterAsset?.id);
+  if (characterId) {
+    const imagePath = cleanText(characterById.get(characterId)?.imagePath) || expectedReferenceAssetPath("character", characterId);
+    lines.push(`### ${safeSegment(characterId, "人物")}`, "", `![[${imagePath}]]`, "");
+  } else lines.push("等待分镜分析确定人物资产。", "");
+
+  lines.push("## 场景", "");
+  const scenes = Array.isArray(draft.scenes) ? draft.scenes : [];
+  if (!scenes.length) lines.push("等待分镜分析确定场景资产。", "");
+  for (const scene of scenes) {
+    const id = cleanText(scene?.id);
+    const imagePath = cleanText(scenesById.get(id)?.imagePath) || expectedReferenceAssetPath("scene", id);
+    lines.push(`### ${safeSegment(id, "场景")}`, "", `![[${imagePath}]]`, "");
+  }
+
+  lines.push("## 产品", "");
+  const products = Array.isArray(draft.products) ? draft.products : [];
+  if (!products.length) lines.push("本项目没有需要固定外观的核心产品。", "");
+  for (const product of products) {
+    const id = cleanText(product?.id);
+    const imagePath = cleanText(productsById.get(id)?.imagePath) || expectedReferenceAssetPath("product", id);
+    lines.push(`### ${safeSegment(id, "产品")}`, "", `![[${imagePath}]]`, "");
+  }
+  return lines.join("\n");
+}
+
+function versionSixDashboardMarkdown(project, draft = {}) {
+  const folder = normalizeVaultPath(project.folder);
+  const title = safeSegment(project.title || project.sourceName || "视频复刻项目");
+  const sourcePath = cleanText(project.source?.videoPath || project.sourcePath);
+  const duration = Number(project.source?.duration ?? project.duration ?? 0);
+  const frames = Array.isArray(project.frames) ? project.frames : [];
+  const draftShots = Array.isArray(draft.shots) ? draft.shots : [];
+  const artifactsById = new Map((Array.isArray(project.shots) ? project.shots : []).map((shot) => [String(shot.id), currentShotArtifacts(shot)]));
+  const status = cleanText(draft.analysisStatusText || draft.analysisStatus || "本地素材已准备");
+  const lines = [
+    "---",
+    `title: "${title.replace(/"/g, "\\\"")}"`,
+    "type: video-replica",
+    "schemaVersion: 6",
+    `created: "${cleanText(project.createdAt)}"`,
+    "---",
+    "",
+    `# ${title}`,
+    "",
+    `> [!info] 当前阶段：${status}`,
+    "",
+    "## 原始素材",
+    "",
+    sourcePath ? `![[${sourcePath}]]` : "等待保存原视频。",
+    "",
+    `- 时长：${duration.toFixed(1)} 秒`,
+    "",
+    "### 台词转写",
+    "",
+    project.transcriptPath ? `![[${project.transcriptPath}]]` : "等待本地 Whisper 转写。",
+    "",
+    "### 抽帧",
+    "",
+  ];
+  if (!frames.length) lines.push("等待抽取关键画面。", "");
+  for (const frame of frames) lines.push(`#### ${String(frame.index).padStart(3, "0")} · ${formatTime(frame.timestamp)}`, "", `![[${frame.path}]]`, "");
+  lines.push("## 参考资产", "", `![[${folder}/02-参考资产/参考资产.md]]`, "", "## 分镜", "");
+  if (!draftShots.length) lines.push("等待山竹完成分镜分析。", "");
+  for (const shot of draftShots) {
+    const id = String(shot.id || "").padStart(3, "0");
+    const artifacts = artifactsById.get(String(shot.id)) || {};
+    const shotFolder = `${folder}/03-分镜/${id}`;
+    lines.push(`### ${id}｜${safeSegment(shot.title, `镜头-${id}`)}`, "");
+    const firstImagePath = cleanText(artifacts.firstImagePath || artifacts.imagePath);
+    if (firstImagePath) lines.push("**首帧**", "", `![[${firstImagePath}]]`, "");
+    else lines.push(`[[${shotFolder}/首帧.png|首帧]]`, "");
+    if (artifacts.lastImagePath) lines.push("**尾帧**", "", `![[${artifacts.lastImagePath}]]`, "");
+    else lines.push(`[[${shotFolder}/尾帧.png|尾帧]]`, "");
+    if (artifacts.videoPath) lines.push(`![[${artifacts.videoPath}]]`, "");
+    else lines.push(`[[${shotFolder}/视频.mp4|视频]]`, "");
+  }
+  lines.push("## 最终成片", "");
+  if (project.finalVideoPath) lines.push(`![[${project.finalVideoPath}]]`, "");
+  else lines.push(`[[${folder}/04-最终成片/最终成片.mp4|最终成片（生成后可用）]]`, "");
+  lines.push(`<!-- project-folder: ${folder} -->`, "");
+  return lines.join("\n");
+}
+
+function dashboardMarkdown(project, draft = {}) {
+  if (Number(project?.schemaVersion) >= 6 || Number(project?.layoutVersion) >= 6) {
+    return versionSixDashboardMarkdown(project, draft);
+  }
   const folder = normalizeVaultPath(project.folder);
   const status = cleanText(project.statusText || project.status || "准备中");
   const frames = Array.isArray(project.frames) ? project.frames : [];
@@ -424,6 +542,7 @@ module.exports = {
   formatTime,
   normalizeGenerationRequest,
   normalizeVaultPath,
+  referenceAssetsMarkdown,
   safeSegment,
   validateSourceVideo,
 };

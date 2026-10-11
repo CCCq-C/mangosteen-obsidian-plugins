@@ -7,6 +7,7 @@ const {
   applyAnalysis,
   concatProjectVideos,
   hasFrameCoverage,
+  prepareProject,
   resolveRuntimes,
   sampleFrames,
   transcriptSegments,
@@ -74,6 +75,89 @@ assert.deepStrictEqual(sampleFrames([], 12), []);
 assert.strictEqual(Object.hasOwn(resolveRuntimes(path.resolve(__dirname, "..")), "codex"), false, "video replica must not launch Codex CLI as an analysis fallback");
 
 (async () => {
+  const creationVault = fs.mkdtempSync(path.join(os.tmpdir(), "mangosteen-replica-create-v6-"));
+  const sourceVideo = path.join(creationVault, "CLI 输入视频.MOV");
+  const fakeFfprobe = path.join(creationVault, "fake-ffprobe");
+  const fakePrepareFfmpeg = path.join(creationVault, "fake-prepare-ffmpeg");
+  fs.writeFileSync(sourceVideo, "source-video");
+  fs.writeFileSync(fakeFfprobe, `#!/usr/bin/env node
+process.stdout.write(JSON.stringify({
+  format: { duration: "8", size: "12" },
+  streams: [{ index: 0, codec_type: "video", width: 720, height: 1280, r_frame_rate: "30/1" }],
+}));
+`);
+  fs.writeFileSync(fakePrepareFfmpeg, `#!/usr/bin/env node
+const fs = require("fs");
+const output = process.argv.at(-1);
+if (output.includes("%03d")) {
+  fs.writeFileSync(output.replace("%03d", "001"), "frame-1");
+  fs.writeFileSync(output.replace("%03d", "002"), "frame-2");
+  process.stderr.write("showinfo pts_time:0\\nshowinfo pts_time:4\\n");
+} else {
+  fs.writeFileSync(output, "media");
+}
+`);
+  fs.chmodSync(fakeFfprobe, 0o755);
+  fs.chmodSync(fakePrepareFfmpeg, 0o755);
+
+  const oldPrepareFfmpeg = process.env.MANGOSTEEN_FFMPEG;
+  const oldPrepareFfprobe = process.env.MANGOSTEEN_FFPROBE;
+  process.env.MANGOSTEEN_FFMPEG = fakePrepareFfmpeg;
+  process.env.MANGOSTEEN_FFPROBE = fakeFfprobe;
+  let created;
+  try {
+    created = await prepareProject({
+      sourcePath: sourceVideo,
+      vaultPath: creationVault,
+      projectFolder: "山竹视频复刻/project-stable",
+      pluginRoot: path.resolve(__dirname, ".."),
+    });
+  } finally {
+    if (oldPrepareFfmpeg === undefined) delete process.env.MANGOSTEEN_FFMPEG; else process.env.MANGOSTEEN_FFMPEG = oldPrepareFfmpeg;
+    if (oldPrepareFfprobe === undefined) delete process.env.MANGOSTEEN_FFPROBE; else process.env.MANGOSTEEN_FFPROBE = oldPrepareFfprobe;
+  }
+
+  const createdRoot = path.join(creationVault, "山竹视频复刻/project-stable");
+  const createdProjectPath = path.join(createdRoot, ".mangosteen/project.json");
+  const createdDraftPath = path.join(createdRoot, ".mangosteen/draft.json");
+  assert.strictEqual(created.schemaVersion, 6);
+  assert.strictEqual(created.layoutVersion, 6);
+  assert.strictEqual(created.projectId, "project-stable");
+  assert.strictEqual(created.id, "project-stable", "the compatibility ID must remain stable");
+  assert.strictEqual(created.sourcePath, "山竹视频复刻/project-stable/01-原始素材/原视频.mov");
+  assert.strictEqual(fs.readFileSync(path.join(createdRoot, "01-原始素材/原视频.mov"), "utf8"), "source-video");
+  assert(fs.existsSync(path.join(createdRoot, "01-原始素材/台词转写.md")));
+  assert(fs.existsSync(path.join(createdRoot, "01-原始素材/抽帧/原片画面-001.jpg")));
+  assert(fs.existsSync(path.join(createdRoot, "02-参考资产/参考资产.md")));
+  assert(fs.existsSync(path.join(createdRoot, "03-分镜")));
+  assert(fs.existsSync(path.join(createdRoot, "04-最终成片")));
+  assert(fs.existsSync(createdProjectPath));
+  assert(fs.existsSync(createdDraftPath));
+  assert.strictEqual(fs.existsSync(path.join(createdRoot, "02-分镜脚本")), false, "v6 must not recreate the mixed legacy storyboard folder");
+  assert.strictEqual(fs.existsSync(path.join(createdRoot, "project.json")), false);
+  assert.strictEqual(fs.existsSync(path.join(createdRoot, "generation-request.json")), false);
+
+  const createdProject = JSON.parse(fs.readFileSync(createdProjectPath, "utf8"));
+  const createdDraft = JSON.parse(fs.readFileSync(createdDraftPath, "utf8"));
+  assert.strictEqual(createdProject.schemaVersion, 6);
+  assert.strictEqual(createdDraft.schemaVersion, 6);
+  assert.strictEqual(createdDraft.confirmed, false);
+  assert.strictEqual(createdDraft.transcriptSegments.length, 0);
+  for (const volatileField of ["status", "statusText", "runtime", "generationQueue", "activeRun"]) {
+    assert.strictEqual(Object.hasOwn(createdProject, volatileField), false, `project.json must not persist volatile ${volatileField}`);
+  }
+  assert.deepStrictEqual(
+    createdProject.frames.map((frame) => frame.path),
+    [
+      "山竹视频复刻/project-stable/01-原始素材/抽帧/原片画面-001.jpg",
+      "山竹视频复刻/project-stable/01-原始素材/抽帧/原片画面-002.jpg",
+    ],
+  );
+  const createdOverview = fs.readFileSync(path.join(createdRoot, "00-项目总览.md"), "utf8");
+  assert.match(createdOverview, /!\[\[山竹视频复刻\/project-stable\/01-原始素材\/原视频\.mov\]\]/);
+  assert.match(createdOverview, /!\[\[山竹视频复刻\/project-stable\/01-原始素材\/台词转写\.md\]\]/);
+  assert.match(createdOverview, /!\[\[山竹视频复刻\/project-stable\/02-参考资产\/参考资产\.md\]\]/);
+
   const vault = fs.mkdtempSync(path.join(os.tmpdir(), "mangosteen-replica-cli-"));
   const projectFolder = "山竹视频复刻/AI分析";
   const projectRoot = path.join(vault, ...projectFolder.split("/"));
@@ -107,6 +191,31 @@ assert.strictEqual(Object.hasOwn(resolveRuntimes(path.resolve(__dirname, "..")),
     timeline: [{ start: 0, end: 4, action: "人物抬手打招呼", dialogue: "你好", performance: "亲切，语速中等，句尾上扬。", camera: "中景固定", environment: "摄影棚" }],
   }],
   };
+
+  const analyzedV6 = applyAnalysis({
+    projectFolder: created.folder,
+    vaultPath: creationVault,
+    analysis,
+    settings: { imageModel: "gpt-image-2-w", videoModel: "MiniMax-H3", resolution: "768p" },
+  });
+  const analyzedV6Project = JSON.parse(fs.readFileSync(createdProjectPath, "utf8"));
+  const analyzedV6Draft = JSON.parse(fs.readFileSync(createdDraftPath, "utf8"));
+  assert.strictEqual(analyzedV6.request.schemaVersion, 6);
+  assert.strictEqual(analyzedV6Project.schemaVersion, 6);
+  assert.strictEqual(analyzedV6Draft.schemaVersion, 6);
+  assert.strictEqual(analyzedV6Draft.version, 5);
+  assert.strictEqual(analyzedV6Draft.shots[0].id, "001");
+  assert.strictEqual(analyzedV6Draft.shots[0].timeline[0].performance, "亲切，语速中等，句尾上扬。");
+  assert.deepStrictEqual(analyzedV6Project.shots, [{ id: "001", currentArtifacts: {} }]);
+  assert.strictEqual(Object.hasOwn(analyzedV6Project, "status"), false);
+  assert.strictEqual(fs.existsSync(path.join(createdRoot, "02-分镜脚本/分镜脚本.md")), false);
+  const referenceIndex = fs.readFileSync(path.join(createdRoot, "02-参考资产/参考资产.md"), "utf8");
+  assert.match(referenceIndex, /!\[\[山竹视频资产库\/人物\/hero\/人物参考板\.png\]\]/);
+  assert.match(referenceIndex, /!\[\[山竹视频资产库\/场景\/studio\/场景参考图\.png\]\]/);
+  assert.match(referenceIndex, /本项目没有需要固定外观的核心产品/);
+  const analyzedOverview = fs.readFileSync(path.join(createdRoot, "00-项目总览.md"), "utf8");
+  assert.match(analyzedOverview, /\[\[山竹视频复刻\/project-stable\/03-分镜\/001\/首帧\.png\|首帧\]\]/);
+  assert.match(analyzedOverview, /\[\[山竹视频复刻\/project-stable\/03-分镜\/001\/视频\.mp4\|视频\]\]/);
 
   const fakeFfmpeg = path.join(vault, "fake-ffmpeg");
   fs.writeFileSync(fakeFfmpeg, `#!/usr/bin/env node
@@ -145,6 +254,7 @@ fs.writeFileSync(output, "joined-video");
   } finally {
     if (oldFfmpeg === undefined) delete process.env.MANGOSTEEN_FFMPEG; else process.env.MANGOSTEEN_FFMPEG = oldFfmpeg;
     fs.rmSync(vault, { recursive: true, force: true });
+    fs.rmSync(creationVault, { recursive: true, force: true });
   }
   console.log("replica-cli: ok");
 })().catch((error) => {

@@ -134,6 +134,8 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   const refreshCallsBeforeModify = workbenchView.refreshCalls;
   vaultEvents.modify({ name: "project.json", path: "山竹视频复刻/事件刷新/project.json" });
   assert.strictEqual(workbenchView.refreshCalls, refreshCallsBeforeModify + 1);
+  vaultEvents.modify({ name: "draft.json", path: "山竹视频复刻/事件刷新/.mangosteen/draft.json" });
+  assert.strictEqual(workbenchView.refreshCalls, refreshCallsBeforeModify + 2, "v6 draft changes must refresh the workbench");
   plugin.app.plugins = { getPlugin: (id) => id === "mangosteen-image"
     ? { settings: { model: "gpt-image-2-w" } }
     : { settings: { model: "MiniMax-H3", resolution: "720p" } } };
@@ -240,6 +242,66 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
     ["001", "001~2"],
     "duplicate legacy request IDs must become deterministic per-occurrence workbench identities",
   );
+
+  const versionSixFolder = "山竹视频复刻/驾驶舱版本六";
+  const versionSixRoot = path.join(vault, ...versionSixFolder.split("/"));
+  const versionSixMetadata = path.join(versionSixRoot, ".mangosteen");
+  fs.mkdirSync(path.join(versionSixMetadata, "runs"), { recursive: true });
+  const versionSixProject = {
+    schemaVersion: 6,
+    projectId: "驾驶舱版本六",
+    folder: versionSixFolder,
+    title: "驾驶舱版本六",
+    shots: [{ id: "001", currentArtifacts: {} }],
+  };
+  const versionSixDraft = {
+    schemaVersion: 6,
+    version: 5,
+    confirmed: false,
+    analysisStatus: "analysis_ready",
+    analysisStatusText: "等待选择镜头",
+    character: workbenchDraft.character,
+    products: workbenchDraft.products,
+    scenes: workbenchDraft.scenes,
+    settings: workbenchDraft.settings,
+    shots: [{ ...workbenchDraft.shots[0], id: "001" }],
+  };
+  fs.writeFileSync(path.join(versionSixMetadata, "project.json"), JSON.stringify(versionSixProject));
+  fs.writeFileSync(path.join(versionSixMetadata, "draft.json"), JSON.stringify(versionSixDraft));
+  const versionSixBeforeOpen = fs.readdirSync(versionSixRoot).sort();
+  const listedVersionSix = plugin.listWorkbenchProjects().find((item) => item.folder === versionSixFolder);
+  assert.deepStrictEqual(
+    { folder: listedVersionSix.folder, title: listedVersionSix.title, status: listedVersionSix.status },
+    { folder: versionSixFolder, title: "驾驶舱版本六", status: "analysis_ready" },
+  );
+  const loadedVersionSix = await plugin.loadWorkbenchProject(versionSixFolder);
+  assert.strictEqual(loadedVersionSix.project.schemaVersion, 6);
+  assert.strictEqual(loadedVersionSix.request.schemaVersion, 6);
+  assert.strictEqual(loadedVersionSix.request.shots[0].id, "001");
+  assert.deepStrictEqual(fs.readdirSync(versionSixRoot).sort(), versionSixBeforeOpen, "opening v6 must not create or move files");
+  assert.strictEqual(fs.existsSync(path.join(versionSixRoot, "project.json")), false);
+  assert.strictEqual(fs.existsSync(path.join(versionSixRoot, "generation-request.json")), false);
+  plugin.saveProject(versionSixFolder, {
+    ...versionSixProject,
+    status: "generating",
+    statusText: "volatile queue state",
+    runtime: { ffmpeg: "/tmp/ffmpeg" },
+    shots: [{
+      id: "001",
+      title: "可编辑标题",
+      status: "正在生成视频",
+      error: "transient error",
+      videoTaskId: "task-volatile",
+      currentArtifacts: {},
+    }],
+  });
+  const stableVersionSixProject = JSON.parse(fs.readFileSync(path.join(versionSixMetadata, "project.json"), "utf8"));
+  assert.strictEqual(Object.hasOwn(stableVersionSixProject, "status"), false);
+  assert.strictEqual(Object.hasOwn(stableVersionSixProject, "statusText"), false);
+  assert.strictEqual(Object.hasOwn(stableVersionSixProject, "runtime"), false);
+  assert.strictEqual(Object.hasOwn(stableVersionSixProject.shots[0], "status"), false);
+  assert.strictEqual(Object.hasOwn(stableVersionSixProject.shots[0], "error"), false);
+  assert.strictEqual(Object.hasOwn(stableVersionSixProject.shots[0], "videoTaskId"), false);
 
   const malformedFolder = "山竹视频复刻/损坏项目";
   const malformedRoot = path.join(vault, ...malformedFolder.split("/"));

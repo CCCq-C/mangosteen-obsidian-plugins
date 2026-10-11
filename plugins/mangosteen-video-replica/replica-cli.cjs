@@ -3,6 +3,7 @@ const os = require("os");
 const path = require("path");
 const { spawn, spawnSync } = require("child_process");
 const core = require("./replica-core.cjs");
+const projectStorage = require("./project-storage.cjs");
 
 function executable(value) {
   if (!value) return "";
@@ -91,6 +92,80 @@ function uniqueProjectFolder(vaultPath, preferred) {
   let suffix = 2;
   while (fs.existsSync(path.join(vaultPath, folder))) folder = `${preferred}-${suffix++}`;
   return folder;
+}
+
+function isInside(root, target) {
+  const relative = path.relative(root, target);
+  return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+}
+
+function createProjectResolver(vaultPath, projectFolder) {
+  const vault = path.resolve(String(vaultPath || ""));
+  const vaultStat = fs.lstatSync(vault, { throwIfNoEntry: false });
+  if (!vaultStat?.isDirectory() || vaultStat.isSymbolicLink()) throw new Error("知识库目录不安全，已拒绝创建项目。");
+  const folder = projectStorage.projectRelativePaths(projectFolder).overview.split("/00-项目总览.md")[0];
+  const projectRoot = path.resolve(vault, ...folder.split("/"));
+  if (!isInside(vault, projectRoot)) throw new Error("项目目录超出知识库范围，已拒绝创建。");
+
+  return (relativePath, { createParents = false, directory = false } = {}) => {
+    const normalized = core.normalizeVaultPath(relativePath);
+    if (normalized !== folder && !normalized.startsWith(`${folder}/`)) {
+      throw new Error("项目文件超出当前项目范围，已拒绝访问。");
+    }
+    const target = path.resolve(vault, ...normalized.split("/"));
+    if (!isInside(projectRoot, target)) throw new Error("项目文件路径不安全，已拒绝访问。");
+    const targetDirectory = directory ? target : path.dirname(target);
+    const relativeDirectory = path.relative(vault, targetDirectory);
+    let current = vault;
+    for (const segment of relativeDirectory.split(path.sep).filter(Boolean)) {
+      current = path.join(current, segment);
+      let stat = fs.lstatSync(current, { throwIfNoEntry: false });
+      if (!stat && createParents) {
+        fs.mkdirSync(current);
+        stat = fs.lstatSync(current, { throwIfNoEntry: false });
+      }
+      if (!stat) break;
+      if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error("项目路径包含符号链接或非目录节点，已拒绝访问。");
+    }
+    const targetStat = fs.lstatSync(target, { throwIfNoEntry: false });
+    if (targetStat?.isSymbolicLink()) throw new Error("项目文件不能是符号链接，已拒绝访问。");
+    if (directory && targetStat && !targetStat.isDirectory()) throw new Error("项目目录无效，已拒绝访问。");
+    return target;
+  };
+}
+
+function copyFileAtomic(sourcePath, targetPath) {
+  const temporary = `${targetPath}.tmp-${process.pid}-${Date.now()}`;
+  try {
+    fs.copyFileSync(sourcePath, temporary, fs.constants.COPYFILE_EXCL);
+    fs.renameSync(temporary, targetPath);
+  } finally {
+    fs.rmSync(temporary, { force: true });
+  }
+}
+
+function initialVersionSixDraft() {
+  return {
+    schemaVersion: 6,
+    version: 5,
+    confirmed: false,
+    analysisStatus: "preparing",
+    analysisStatusText: "正在提取画面和台词",
+    transcriptSegments: [],
+    visualStyle: { category: "", prompt: "" },
+    character: { id: "main-character", prompt: "", voiceProfile: "" },
+    products: [],
+    scenes: [],
+    settings: { imageModel: "", videoModel: "", ratio: "", resolution: "" },
+    shots: [],
+  };
+}
+
+function writeVersionSixDocuments({ resolveSafe, paths, project, draft }) {
+  projectStorage.atomicWriteJson({ resolveSafe, relativePath: paths.project, value: project });
+  projectStorage.atomicWriteJson({ resolveSafe, relativePath: paths.draft, value: draft });
+  atomicWrite(resolveSafe(paths.referenceIndex, { createParents: true }), core.referenceAssetsMarkdown(project, draft));
+  atomicWrite(resolveSafe(paths.overview, { createParents: true }), core.dashboardMarkdown(project, draft));
 }
 
 async function probeVideo(ffprobe, sourcePath) {
@@ -234,62 +309,70 @@ async function prepareProject({ sourcePath, vaultPath, projectFolder = "", plugi
   core.validateSourceVideo(source.absolute, { duration: metadata.duration });
   const preferred = projectFolder ? core.normalizeVaultPath(projectFolder) : core.createProjectFolder(source.absolute);
   const folder = uniqueProjectFolder(vault, preferred);
-  const absoluteFolder = path.join(vault, ...folder.split("/"));
-  const peopleFolder = path.join(absoluteFolder, "01-人物参考");
-  const storyboardFolder = path.join(absoluteFolder, "02-分镜脚本");
-  const clipsFolder = path.join(absoluteFolder, "03-视频片段");
-  const workFolder = path.join(absoluteFolder, ".work");
-  for (const directory of [peopleFolder, storyboardFolder, clipsFolder, workFolder]) fs.mkdirSync(directory, { recursive: true });
+  const resolveSafe = createProjectResolver(vault, folder);
+  const paths = projectStorage.createProjectLayout({ resolveSafe, folder });
+  const sourceVideoPath = `${paths.sourceRoot}/原视频${source.extension}`;
+  const transcriptPath = `${paths.sourceRoot}/台词转写.md`;
+  const frameFolderPath = `${paths.sourceRoot}/抽帧`;
+  const sourceVideoAbsolute = resolveSafe(sourceVideoPath, { createParents: true });
+  copyFileAtomic(source.absolute, sourceVideoAbsolute);
+  const now = new Date().toISOString();
 
   const project = {
-    version: 1,
+    schemaVersion: 6,
+    layoutVersion: 6,
+    projectId: path.basename(folder),
     id: path.basename(folder),
     folder,
     title: path.basename(source.absolute, path.extname(source.absolute)),
-    sourcePath: source.absolute,
+    source: {
+      videoPath: sourceVideoPath,
+      originalPath: source.absolute,
+      originalName: path.basename(source.absolute),
+      extension: source.extension,
+      duration: metadata.duration,
+      width: metadata.width,
+      height: metadata.height,
+    },
+    sourcePath: sourceVideoPath,
     sourceName: path.basename(source.absolute),
-    createdAt: new Date().toISOString(),
+    createdAt: now,
+    updatedAt: now,
     duration: metadata.duration,
     width: metadata.width,
     height: metadata.height,
-    status: "preparing",
-    statusText: "正在提取画面和台词",
     frames: [],
     shots: [],
-    transcriptPath: `${folder}/02-分镜脚本/台词转写.md`,
-    storyboardPath: `${folder}/02-分镜脚本/分镜脚本.md`,
-    characterImagePath: "",
-    runtime: {
-      ffmpeg: runtime.ffmpeg,
-      ffprobe: runtime.ffprobe,
-      whisper: runtime.whisper,
-      whisperModel: runtime.whisperModel,
-    },
+    transcriptPath,
+    finalVideoPath: "",
   };
-  const saveProject = () => {
-    writeJson(path.join(absoluteFolder, "project.json"), project);
-    atomicWrite(path.join(absoluteFolder, "00-项目总览.md"), core.dashboardMarkdown(project));
-  };
+  const draft = initialVersionSixDraft();
+  const saveProject = () => writeVersionSixDocuments({ resolveSafe, paths, project, draft });
   saveProject();
+  const workFolder = fs.mkdtempSync(path.join(os.tmpdir(), "mangosteen-video-replica-"));
 
   try {
-    const extracted = await extractFrames(runtime.ffmpeg, source.absolute, storyboardFolder, metadata.duration);
-    project.frames = extracted.map((frame, index) => ({ index: index + 1, timestamp: frame.timestamp, path: `${folder}/02-分镜脚本/${frame.name}` }));
+    const extracted = await extractFrames(runtime.ffmpeg, sourceVideoAbsolute, resolveSafe(frameFolderPath, { directory: true }), metadata.duration);
+    project.frames = extracted.map((frame, index) => ({ index: index + 1, timestamp: frame.timestamp, path: `${frameFolderPath}/${frame.name}` }));
     const audioPath = path.join(workFolder, "原片音频.wav");
-    const hasAudio = metadata.hasAudio && await extractAudio(runtime.ffmpeg, source.absolute, audioPath);
+    const hasAudio = metadata.hasAudio && await extractAudio(runtime.ffmpeg, sourceVideoAbsolute, audioPath);
     const transcript = hasAudio ? await transcribeAudio(runtime, audioPath, workFolder, project.title) : { segments: [], markdown: transcriptMarkdown([], project.title) };
-    project.transcriptSegments = transcript.segments;
-    atomicWrite(path.join(storyboardFolder, "台词转写.md"), transcript.markdown);
-    atomicWrite(path.join(storyboardFolder, "分镜脚本.md"), initialStoryboard(project));
-    project.status = "prepared";
-    project.statusText = "本地拆解完成，等待山竹分析分镜";
+    draft.transcriptSegments = transcript.segments;
+    draft.analysisStatus = "prepared";
+    draft.analysisStatusText = "本地拆解完成，等待山竹分析分镜";
+    atomicWrite(resolveSafe(transcriptPath, { createParents: true }), transcript.markdown);
+    project.updatedAt = new Date().toISOString();
     saveProject();
     return project;
   } catch (error) {
-    project.status = "failed";
-    project.statusText = `本地拆解失败：${String(error?.message || error)}`;
+    draft.analysisStatus = "failed";
+    draft.analysisStatusText = `本地拆解失败：${String(error?.message || error)}`;
+    draft.analysisError = String(error?.message || error);
+    project.updatedAt = new Date().toISOString();
     saveProject();
     throw error;
+  } finally {
+    fs.rmSync(workFolder, { recursive: true, force: true });
   }
 }
 
@@ -329,14 +412,74 @@ function applyAnalysis({ projectFolder, vaultPath, analysis, settings = {}, anal
   const vault = path.resolve(String(vaultPath || ""));
   if (!fs.statSync(vault, { throwIfNoEntry: false })?.isDirectory()) throw new Error("找不到 Obsidian 知识库目录。");
   const folder = core.normalizeVaultPath(projectFolder);
-  const absoluteFolder = path.join(vault, ...folder.split("/"));
-  const projectPath = path.join(absoluteFolder, "project.json");
-  if (!fs.statSync(projectPath, { throwIfNoEntry: false })?.isFile()) throw new Error("找不到视频复刻项目的 project.json。");
-  const project = JSON.parse(fs.readFileSync(projectPath, "utf8"));
-  const workFolder = path.join(absoluteFolder, ".work");
+  const resolveSafe = createProjectResolver(vault, folder);
+  const paths = projectStorage.projectRelativePaths(folder);
+  const legacyPaths = { project: `${folder}/project.json`, draft: `${folder}/generation-request.json` };
+  let documents;
+  try {
+    documents = projectStorage.readProjectDocument({
+      readJson: (relativePath) => JSON.parse(fs.readFileSync(resolveSafe(relativePath), "utf8")),
+      paths,
+      legacyPaths,
+    });
+  } catch (error) {
+    if (error?.code === "ENOENT" && fs.statSync(resolveSafe(legacyPaths.project), { throwIfNoEntry: false })?.isFile()) {
+      documents = {
+        project: JSON.parse(fs.readFileSync(resolveSafe(legacyPaths.project), "utf8")),
+        draft: fs.statSync(resolveSafe(legacyPaths.draft), { throwIfNoEntry: false })?.isFile()
+          ? JSON.parse(fs.readFileSync(resolveSafe(legacyPaths.draft), "utf8"))
+          : {},
+        legacy: true,
+      };
+    } else if (error?.code === "ENOENT") throw new Error("找不到视频复刻项目的 project.json。");
+    else throw error;
+  }
+  const project = documents.project;
+  const request = core.buildGenerationDraft(project, analysis, settings);
+  if (!documents.legacy) {
+    const updatedAt = new Date().toISOString();
+    const previousShots = new Map((Array.isArray(project.shots) ? project.shots : []).map((shot) => [String(shot.id), shot]));
+    project.schemaVersion = 6;
+    project.layoutVersion = 6;
+    project.projectId ||= project.id || path.basename(folder);
+    project.id ||= project.projectId;
+    project.analysis = {
+      provider: analysisProvider,
+      group: String(analysisGroup || ""),
+      model: String(analysisModel || ""),
+      updatedAt,
+    };
+    project.shots = request.shots.map((shot) => {
+      const previous = previousShots.get(String(shot.id)) || {};
+      return {
+        id: shot.id,
+        currentArtifacts: previous.currentArtifacts && typeof previous.currentArtifacts === "object"
+          ? previous.currentArtifacts
+          : {},
+      };
+    });
+    project.updatedAt = updatedAt;
+    const draft = {
+      ...request,
+      schemaVersion: 6,
+      analysisStatus: "analysis_ready",
+      analysisStatusText: "山竹智能体分析完成，等待确认生成",
+      analysis: { ...project.analysis },
+      transcriptSegments: Array.isArray(documents.draft?.transcriptSegments) ? documents.draft.transcriptSegments : [],
+    };
+    for (const shot of request.shots) {
+      const shotFolder = projectStorage.shotArtifactPaths(folder, shot.id).folder;
+      fs.mkdirSync(resolveSafe(shotFolder, { createParents: true, directory: true }), { recursive: true });
+    }
+    writeVersionSixDocuments({ resolveSafe, paths, project, draft });
+    return { project, request: draft, outputPath: resolveSafe(paths.draft) };
+  }
+
+  const absoluteFolder = resolveSafe(folder, { directory: true });
+  const projectPath = resolveSafe(legacyPaths.project);
+  const workFolder = resolveSafe(`${folder}/.work`, { createParents: true, directory: true });
   const outputPath = path.join(workFolder, "ai-analysis.json");
   fs.mkdirSync(workFolder, { recursive: true });
-  const request = core.buildGenerationDraft(project, analysis, settings);
   project.status = "analysis_ready";
   project.statusText = "山竹智能体分析完成，等待确认生成";
   project.imageModel = request.settings.imageModel;

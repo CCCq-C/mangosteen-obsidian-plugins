@@ -220,5 +220,39 @@ assert.match(markdown, /!\[\[山竹视频复刻\/测试项目\/02-分镜脚本\/
 assert.match(markdown, /当前状态/);
 assert.match(markdown, /山竹视频资产库\/产品\/headphones\/产品参考板\.png/);
 
+const versionSixProject = {
+  schemaVersion: 6,
+  layoutVersion: 6,
+  projectId: "project-stable",
+  folder: "山竹视频复刻/project-stable",
+  title: "版本六项目",
+  createdAt: "2026-10-12T00:00:00.000Z",
+  source: { videoPath: "山竹视频复刻/project-stable/01-原始素材/原视频.mov", duration: 8 },
+  sourcePath: "山竹视频复刻/project-stable/01-原始素材/原视频.mov",
+  transcriptPath: "山竹视频复刻/project-stable/01-原始素材/台词转写.md",
+  frames: [{ index: 1, timestamp: 0, path: "山竹视频复刻/project-stable/01-原始素材/抽帧/原片画面-001.jpg" }],
+  shots: [{ id: "001", currentArtifacts: {} }],
+};
+const versionSixDraft = {
+  schemaVersion: 6,
+  version: 5,
+  confirmed: false,
+  analysisStatus: "analysis_ready",
+  analysisStatusText: "山竹智能体分析完成，等待确认生成",
+  character: { id: "hero", prompt: "固定人物三视图" },
+  scenes: [{ id: "studio", prompt: "纯环境摄影棚" }],
+  products: [{ id: "headphones", prompt: "白色头戴耳机" }],
+  shots: [{ id: "001", title: "打招呼", sceneId: "studio", productIds: ["headphones"], duration: 4, timeline: [] }],
+};
+const versionSixMarkdown = core.dashboardMarkdown(versionSixProject, versionSixDraft);
+assert.match(versionSixMarkdown, /!\[\[山竹视频复刻\/project-stable\/01-原始素材\/原视频\.mov\]\]/);
+assert.match(versionSixMarkdown, /!\[\[山竹视频复刻\/project-stable\/02-参考资产\/参考资产\.md\]\]/);
+assert.match(versionSixMarkdown, /\[\[山竹视频复刻\/project-stable\/03-分镜\/001\/首帧\.png\|首帧\]\]/);
+assert.match(versionSixMarkdown, /\[\[山竹视频复刻\/project-stable\/03-分镜\/001\/视频\.mp4\|视频\]\]/);
+const versionSixAssets = core.referenceAssetsMarkdown(versionSixProject, versionSixDraft);
+assert.match(versionSixAssets, /!\[\[山竹视频资产库\/人物\/hero\/人物参考板\.png\]\]/);
+assert.match(versionSixAssets, /!\[\[山竹视频资产库\/场景\/studio\/场景参考图\.png\]\]/);
+assert.match(versionSixAssets, /!\[\[山竹视频资产库\/产品\/headphones\/产品参考板\.png\]\]/);
+
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log("replica-core: ok");
