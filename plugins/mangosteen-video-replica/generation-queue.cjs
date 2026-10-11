@@ -1,6 +1,11 @@
 const crypto = require("crypto");
 const { resolveVideoPrompt } = require("./generation-policy.cjs");
 const { normalizeGenerationRequest } = require("./replica-core.cjs");
+const {
+  createActiveRun,
+  normalizeGenerationError,
+  updateShotState,
+} = require("./run-state.cjs");
 
 const CONFIRMATION_WARNING = "确认后，所选分镜在本次生成期间将无法更改。";
 
@@ -101,10 +106,17 @@ function confirmGenerationPlan(plan, currentRequest) {
 }
 
 function lockedShotIds(queue) {
-  if (!queue || !Array.isArray(queue.shots)) return [];
-  return queue.shots
-    .filter((shot) => shot?.status === "queued" || shot?.status === "processing")
-    .map((shot) => String(shot.id));
+  if (!queue || typeof queue !== "object") return [];
+  if (Array.isArray(queue.shots)) {
+    return queue.shots
+      .filter((shot) => shot?.status === "queued" || shot?.status === "processing")
+      .map((shot) => String(shot.id));
+  }
+  const ids = Array.isArray(queue.queue) ? queue.queue : Object.keys(queue.shots || {});
+  return ids.filter((id) => {
+    const status = String(queue.shots?.[id]?.status || "");
+    return !["completed", "failed", "stopped"].includes(status);
+  }).map(String);
 }
 
 function generationContext(plan) {
@@ -119,19 +131,24 @@ function generationContext(plan) {
   };
 }
 
-function queuedShots(plan) {
+function queuedShot(plan, shot) {
   const context = generationContext(plan);
-  return clone(plan.shots).map((shot) => {
-    const generationContextSnapshot = clone(context);
-    return {
-      ...shot,
-      generationContext: generationContextSnapshot,
-      confirmedPayloadSignature: sha256({ shot, context: generationContextSnapshot }),
-      status: "queued",
-      error: "",
-      result: null,
-    };
-  });
+  const confirmedPayload = clone(shot);
+  const generationContextSnapshot = clone(context);
+  return {
+    id: String(shot.id),
+    status: "queued",
+    stage: "queued",
+    taskId: null,
+    progress: null,
+    elapsedMs: 0,
+    error: null,
+    paidTaskSubmitted: false,
+    result: null,
+    confirmedPayload,
+    generationContext: generationContextSnapshot,
+    confirmedPayloadSignature: sha256({ shot: confirmedPayload, context: generationContextSnapshot }),
+  };
 }
 
 function verifyQueuedShot(shot) {
@@ -139,13 +156,21 @@ function verifyQueuedShot(shot) {
   if (!signature) {
     throw new Error("队列缺少确认签名；系统不会提交付费任务，请重新预览并确认。");
   }
-  const payload = clone(shot);
-  const context = clone(payload.generationContext);
-  delete payload.generationContext;
-  delete payload.confirmedPayloadSignature;
-  delete payload.status;
-  delete payload.error;
-  delete payload.result;
+  const payload = clone(shot.confirmedPayload || shot);
+  const context = clone(shot.generationContext);
+  if (!shot.confirmedPayload) {
+    delete payload.generationContext;
+    delete payload.confirmedPayloadSignature;
+    delete payload.status;
+    delete payload.stage;
+    delete payload.taskId;
+    delete payload.progress;
+    delete payload.elapsedMs;
+    delete payload.error;
+    delete payload.paidTaskSubmitted;
+    delete payload.result;
+    delete payload.updatedAt;
+  }
   if (sha256({ shot: payload, context }) !== signature) {
     throw new Error("队列内容已变化，与确认内容不一致；系统不会提交付费任务，请重新预览并确认。");
   }
@@ -160,39 +185,36 @@ function createGenerationQueue(confirmedPlan, { activeQueues = [], now = new Dat
     if (conflict) throw new Error(`镜头 ${conflict} 已经在生成队列中，请等待完成或停止后再试。`);
   }
   const createdAt = String(now || new Date().toISOString());
-  const queue = {
-    version: 2,
-    queueId: sha256({ planId: confirmedPlan.planId, createdAt }),
-    planId: confirmedPlan.planId,
-    createdAt,
-    updatedAt: createdAt,
-    status: "idle",
-    stopRequested: false,
+  const runId = `run_${sha256({ planId: confirmedPlan.planId, createdAt }).slice("sha256:".length)}`;
+  const queue = createActiveRun({ runId, plan: confirmedPlan, now: createdAt });
+  Object.assign(queue, {
     character: clone(confirmedPlan.character),
     visualStyle: clone(confirmedPlan.visualStyle),
     products: clone(confirmedPlan.products || []),
     scenes: clone(confirmedPlan.scenes || []),
     settings: clone(confirmedPlan.settings),
-    selectedShotIds: clone(confirmedPlan.selectedShotIds),
-    shots: queuedShots(confirmedPlan),
-  };
+  });
+  for (const shot of confirmedPlan.shots) queue.shots[String(shot.id)] = queuedShot(confirmedPlan, shot);
   return queue;
 }
 
 function appendGenerationPlan(queue, confirmedPlan) {
-  if (!queue || !Array.isArray(queue.shots)) throw new Error("生成队列格式错误。");
-  if (!["idle", "processing"].includes(String(queue.status)) || queue.stopRequested === true) {
+  if (!queue || !Array.isArray(queue.queue) || !queue.shots || Array.isArray(queue.shots)) throw new Error("生成队列格式错误。");
+  if (!["queued", "processing"].includes(String(queue.status)) || queue.stopRequested === true) {
     throw new Error(`生成队列当前状态不能追加镜头：${String(queue.status)}`);
   }
   if (!confirmedPlan || confirmedPlan.confirmed !== true) throw new Error("生成计划尚未确认，不能加入队列。");
   if (sha256(planSnapshot(confirmedPlan)) !== confirmedPlan.planId) throw new Error("生成计划内容已变化，请重新预览并确认生成。");
-  const existingIds = new Set(queue.shots.map((shot) => String(shot.id)));
+  const existingIds = new Set(queue.queue.map(String));
   for (const id of confirmedPlan.selectedShotIds || []) {
     if (existingIds.has(String(id))) throw new Error(`镜头 ${id} 已经在当前队列中，请勿重复提交。`);
   }
-  const additions = queuedShots(confirmedPlan);
-  queue.shots.push(...additions);
-  queue.selectedShotIds = [...(queue.selectedShotIds || []), ...additions.map((shot) => String(shot.id))];
+  const additions = confirmedPlan.shots.map((shot) => queuedShot(confirmedPlan, shot));
+  for (const shot of additions) {
+    queue.queue.push(shot.id);
+    queue.shots[shot.id] = shot;
+  }
+  queue.selectedShotIds = [...(queue.selectedShotIds || []), ...additions.map((shot) => shot.id)];
   queue.updatedAt = new Date().toISOString();
   return queue;
 }
@@ -201,19 +223,33 @@ function requestQueueStop(queue) {
   if (!queue || typeof queue !== "object") throw new Error("生成队列格式错误。");
   queue.stopRequested = true;
   queue.updatedAt = new Date().toISOString();
-  if (queue.status === "idle") {
-    for (const shot of queue.shots || []) {
-      if (shot.status === "queued") shot.status = "stopped";
+  if (queue.status === "queued") {
+    for (const id of queue.queue || []) {
+      if (queue.shots?.[id]?.status === "queued") replaceRun(queue, updateShotState(queue, id, {
+        status: "stopped",
+        stage: "stopped",
+        now: queue.updatedAt,
+      }));
     }
     queue.status = "stopped";
+    queue.activeShotId = null;
+    queue.completedAt ||= queue.updatedAt;
+  } else if (queue.status === "processing") {
+    queue.status = "stopping";
   }
   return queue;
 }
 
+function replaceRun(target, replacement) {
+  for (const key of Object.keys(target)) delete target[key];
+  Object.assign(target, replacement);
+  return target;
+}
+
 async function runGenerationQueue(queue, runShot, { onUpdate = null } = {}) {
-  if (!queue || !Array.isArray(queue.shots)) throw new Error("生成队列格式错误。");
+  if (!queue || !Array.isArray(queue.queue) || !queue.shots || Array.isArray(queue.shots)) throw new Error("生成队列格式错误。");
   if (typeof runShot !== "function") throw new Error("缺少单镜头运行器。");
-  if (queue.status !== "idle") throw new Error(`生成队列当前状态不能运行：${String(queue.status)}`);
+  if (queue.status !== "queued") throw new Error(`生成队列当前状态不能运行：${String(queue.status)}`);
 
   const notify = async () => {
     queue.updatedAt = new Date().toISOString();
@@ -222,15 +258,25 @@ async function runGenerationQueue(queue, runShot, { onUpdate = null } = {}) {
   queue.status = "processing";
   queue.startedAt = new Date().toISOString();
   await notify();
-  for (const shot of queue.shots) {
+  for (let index = 0; index < queue.queue.length; index += 1) {
+    const shotId = String(queue.queue[index]);
+    let shot = queue.shots[shotId];
+    if (!shot) continue;
     if (shot.status !== "queued") continue;
-    if (queue.stopRequested) {
-      shot.status = "stopped";
+    if (queue.stopRequested && shot.paidTaskSubmitted !== true && !String(shot.taskId || "").trim()) {
+      replaceRun(queue, updateShotState(queue, shotId, { status: "stopped", stage: "stopped", now: new Date().toISOString() }));
       continue;
     }
-    shot.status = "processing";
+    replaceRun(queue, updateShotState(queue, shotId, {
+      status: "processing",
+      stage: "preflight",
+      progress: null,
+      error: null,
+      now: new Date().toISOString(),
+    }));
     await notify();
     try {
+      shot = queue.shots[shotId];
       verifyQueuedShot(shot);
       const shotContext = shot.generationContext || {
         planId: queue.planId,
@@ -240,30 +286,76 @@ async function runGenerationQueue(queue, runShot, { onUpdate = null } = {}) {
         scenes: queue.scenes || [],
         settings: queue.settings,
       };
-      const context = deepFreeze({ queueId: queue.queueId, ...clone(shotContext) });
-      const runnableShot = clone(shot);
-      delete runnableShot.generationContext;
+      const updateState = async (patch = {}) => {
+        replaceRun(queue, updateShotState(queue, shotId, { ...patch, now: patch.now || new Date().toISOString() }));
+        await notify();
+        return clone(queue.shots[shotId]);
+      };
+      const assertPaidSubmissionAllowed = () => {
+        if (queue.stopRequested !== true) return true;
+        const stopped = new Error("用户已停止生成；不会再提交新的付费任务。");
+        stopped.code = "GENERATION_STOPPED";
+        throw stopped;
+      };
+      const context = deepFreeze({
+        queueId: queue.queueId,
+        runId: queue.runId,
+        ...clone(shotContext),
+        updateState,
+        assertPaidSubmissionAllowed,
+      });
+      const runnableShot = clone(shot.confirmedPayload || shot);
       const result = await runShot(deepFreeze(runnableShot), context);
-      shot.result = clone(result ?? null);
-      shot.status = "completed";
-      shot.error = "";
+      replaceRun(queue, updateShotState(queue, shotId, {
+        status: "completed",
+        stage: "completed",
+        result: clone(result ?? null),
+        error: null,
+        now: new Date().toISOString(),
+      }));
     } catch (error) {
-      shot.result = null;
-      shot.status = "failed";
-      shot.error = String(error?.message || error);
+      shot = queue.shots[shotId];
+      if (error?.code === "GENERATION_STOPPED" && queue.stopRequested === true) {
+        replaceRun(queue, updateShotState(queue, shotId, {
+          status: "stopped",
+          stage: "stopped",
+          result: null,
+          error: null,
+          now: new Date().toISOString(),
+        }));
+      } else {
+        const errorTaskId = String(error?.taskId || error?.videoTaskId || "").trim();
+        replaceRun(queue, updateShotState(queue, shotId, {
+          status: "failed",
+          result: null,
+          ...(errorTaskId ? { taskId: errorTaskId } : {}),
+          ...(error?.paidTaskSubmitted === true ? { paidTaskSubmitted: true } : {}),
+          error: normalizeGenerationError(error, {
+            source: error?.source || "video-replica",
+            stage: shot?.stage || "preflight",
+            taskId: shot?.taskId,
+            paidTaskSubmitted: shot?.paidTaskSubmitted === true,
+            retryable: error?.retryable === true,
+            now: new Date().toISOString(),
+          }),
+          now: new Date().toISOString(),
+        }));
+      }
     }
     await notify();
   }
 
   if (queue.stopRequested) {
-    for (const shot of queue.shots) {
-      if (shot.status === "queued") shot.status = "stopped";
+    for (const id of queue.queue) {
+      if (queue.shots[id]?.status === "queued") replaceRun(queue, updateShotState(queue, id, {
+        status: "stopped",
+        stage: "stopped",
+        now: new Date().toISOString(),
+      }));
     }
-    queue.status = "stopped";
-  } else {
-    queue.status = queue.shots.some((shot) => shot.status === "failed") ? "completed_with_errors" : "completed";
   }
   queue.completedAt = new Date().toISOString();
+  queue.activeShotId = null;
   await notify();
   return queue;
 }

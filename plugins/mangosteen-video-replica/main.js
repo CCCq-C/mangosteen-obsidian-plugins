@@ -5,9 +5,11 @@ const crypto = require("crypto");
 
 let core;
 let generationPolicy;
+let projectStorage;
 let referenceAssets;
 let replicaEditor;
 let replicaLogicApi;
+let runState;
 let shotTimeline;
 let visualStyle;
 let workflow;
@@ -221,11 +223,13 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     const pluginRoot = path.join(this.vaultPath(), ...String(this.manifest.dir || "").split(/[\\/]/).filter(Boolean));
     core = require(path.join(pluginRoot, "replica-core.cjs"));
     generationPolicy = require(path.join(pluginRoot, "generation-policy.cjs"));
+    projectStorage = require(path.join(pluginRoot, "project-storage.cjs"));
     shotTimeline = require(path.join(pluginRoot, "shot-timeline.cjs"));
     visualStyle = require(path.join(pluginRoot, "visual-style.cjs"));
     referenceAssets = require(path.join(pluginRoot, "reference-assets.cjs"));
     replicaEditor = require(path.join(pluginRoot, "replica-editor.cjs"));
     replicaLogicApi = require(path.join(pluginRoot, "replica-logic-api.cjs"));
+    runState = require(path.join(pluginRoot, "run-state.cjs"));
     workflow = require(path.join(pluginRoot, "replica-cli.cjs"));
     const workbench = require(path.join(pluginRoot, "replica-workbench.cjs"));
     const VideoReplicaWorkbenchView = workbench.createVideoReplicaWorkbenchView(ItemView);
@@ -430,15 +434,77 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
   workbenchProjectPaths(folder, { createWorkDirectory = false } = {}) {
     const checked = this.checkedWorkbenchProjectFolder(folder);
     if (checked.folder === ROOT) throw new Error(`请选择 ${ROOT}/ 下的具体项目。`);
+    const versionSix = projectStorage.projectRelativePaths(checked.folder);
+    const versionSixProjectPath = this.checkedProjectPath(checked.folder, versionSix.project);
+    const isV6 = fs.existsSync(versionSixProjectPath);
+    const queueLockRelativePath = isV6 ? `${versionSix.metadataRoot}/active-run.lock` : QUEUE_LOCK_FILE;
     return {
       folder: checked.folder,
-      projectPath: this.checkedProjectPath(checked.folder, "project.json"),
-      requestPath: this.checkedProjectPath(checked.folder, REQUEST_FILE),
-      statePath: this.checkedProjectPath(checked.folder, STATE_FILE, { createParents: createWorkDirectory }),
-      stopPath: this.checkedProjectPath(checked.folder, STOP_FILE, { createParents: createWorkDirectory }),
-      queuePath: this.checkedProjectPath(checked.folder, QUEUE_FILE, { createParents: createWorkDirectory }),
-      queueLockPath: this.checkedProjectPath(checked.folder, QUEUE_LOCK_FILE, { createParents: createWorkDirectory }),
+      isV6,
+      projectPath: isV6 ? versionSixProjectPath : this.checkedProjectPath(checked.folder, "project.json"),
+      requestPath: isV6
+        ? this.checkedProjectPath(checked.folder, versionSix.draft)
+        : this.checkedProjectPath(checked.folder, REQUEST_FILE),
+      statePath: this.checkedProjectPath(checked.folder, STATE_FILE),
+      stopPath: this.checkedProjectPath(checked.folder, STOP_FILE, { createParents: createWorkDirectory && !isV6 }),
+      queuePath: this.checkedProjectPath(checked.folder, QUEUE_FILE),
+      activeRunPath: this.checkedProjectPath(checked.folder, versionSix.activeRun, { createParents: createWorkDirectory && isV6 }),
+      activeRunRelativePath: versionSix.activeRun,
+      runsRelativePath: versionSix.runs,
+      queueLockPath: this.checkedProjectPath(checked.folder, queueLockRelativePath, { createParents: createWorkDirectory }),
     };
+  }
+
+  projectStorageResolver(folder) {
+    return (relativePath, options = {}) => this.checkedProjectPath(folder, relativePath, options);
+  }
+
+  readOptionalJson(filePath, readErrors = null, key = "") {
+    if (!filePath || !fs.existsSync(filePath)) return null;
+    try { return this.readJson(filePath); }
+    catch (error) {
+      if (readErrors && key) readErrors[key] = String(error?.message || error);
+      return null;
+    }
+  }
+
+  currentRunInputs(paths, requestMtimeMs = null, readErrors = null) {
+    return {
+      activeRun: this.readOptionalJson(paths.activeRunPath, readErrors, "activeRun"),
+      legacyQueue: paths.isV6 ? null : this.readOptionalJson(paths.queuePath, readErrors, "generationQueue"),
+      legacyState: paths.isV6 ? null : this.readOptionalJson(paths.statePath, readErrors, "generationState"),
+      requestMtimeMs,
+    };
+  }
+
+  currentRunQueueView(currentRun) {
+    if (!currentRun || !Array.isArray(currentRun.queue) || !currentRun.shots || Array.isArray(currentRun.shots)) return {};
+    const status = currentRun.status === "queued" ? "idle"
+      : currentRun.status === "stopping" ? "processing"
+      : currentRun.status === "partial-failure" ? "completed_with_errors"
+        : currentRun.status;
+    return {
+      ...JSON.parse(JSON.stringify(currentRun)),
+      status,
+      shots: currentRun.queue.map((id) => {
+        const shot = currentRun.shots[id] || {};
+        const shotStatus = ["queued", "completed", "failed", "stopped"].includes(String(shot.status))
+          ? shot.status
+          : "processing";
+        return {
+          ...(shot.confirmedPayload || {}),
+          ...shot,
+          status: shotStatus,
+          error: typeof shot.error === "object" && shot.error ? shot.error.message : shot.error || "",
+        };
+      }),
+    };
+  }
+
+  currentRunStateView(currentRun) {
+    return currentRun?.compatibilitySource === "legacy-state" && currentRun.legacyState
+      ? JSON.parse(JSON.stringify(currentRun.legacyState))
+      : {};
   }
 
   listWorkbenchProjects() {
@@ -452,15 +518,15 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
 
   loadWorkbenchProject(folder) {
     const paths = this.workbenchProjectPaths(folder);
-    const output = { project: {}, request: {}, requestMtimeMs: null, generationState: {}, generationQueue: {}, readErrors: {} };
+    const output = {
+      project: {}, request: {}, requestMtimeMs: null, currentRun: null,
+      generationState: {}, generationQueue: {}, readErrors: {},
+    };
     for (const [key, filePath] of [
       ["project", paths.projectPath],
       ["request", paths.requestPath],
-      ["generationState", paths.statePath],
-      ["generationQueue", paths.queuePath],
     ]) {
       try {
-        if (key === "generationQueue" && !fs.existsSync(filePath)) continue;
         output[key] = this.readJson(filePath);
         if (key === "request") {
           output[key] = withWorkbenchShotIds(output[key]);
@@ -470,18 +536,60 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         output.readErrors[key] = String(error?.message || error);
       }
     }
+    output.currentRun = runState.selectCurrentRun(this.currentRunInputs(paths, output.requestMtimeMs, output.readErrors));
+    output.generationQueue = this.currentRunQueueView(output.currentRun);
+    output.generationState = this.currentRunStateView(output.currentRun);
     return output;
   }
 
   currentWorkbenchQueue(folder) {
-    const { queuePath } = this.workbenchProjectPaths(folder);
-    if (!fs.existsSync(queuePath)) return null;
+    const paths = this.workbenchProjectPaths(folder);
     try {
-      const queue = this.readJson(queuePath);
-      return queue && typeof queue === "object" && !Array.isArray(queue) ? queue : null;
+      const requestMtimeMs = fs.statSync(paths.requestPath, { throwIfNoEntry: false })?.mtimeMs ?? null;
+      return runState.selectCurrentRun(this.currentRunInputs(paths, requestMtimeMs));
     } catch (_) {
       return null;
     }
+  }
+
+  persistWorkbenchRun(paths, queue) {
+    if (!paths.isV6) {
+      writeJson(paths.queuePath, queue);
+      return paths.queuePath;
+    }
+    const existing = this.readOptionalJson(paths.activeRunPath);
+    if (existing?.runId && existing.runId !== queue.runId) {
+      throw new Error("上一次活动运行尚未归档，已拒绝覆盖恢复信息。");
+    }
+    projectStorage.atomicWriteJson({
+      resolveSafe: this.projectStorageResolver(paths.folder),
+      relativePath: paths.activeRunRelativePath,
+      value: queue,
+    });
+    return paths.activeRunPath;
+  }
+
+  archiveWorkbenchRun(paths, queue, now = new Date().toISOString()) {
+    if (!paths.isV6) return null;
+    const archived = runState.archiveRun(queue, queue.archivedAt || queue.completedAt || now);
+    const runId = String(archived.runId || "");
+    if (!/^[A-Za-z0-9_-]+$/.test(runId)) throw new Error("运行 ID 不安全，无法归档。");
+    const relativePath = `${paths.runsRelativePath}/${runId}.json`;
+    const absolutePath = this.checkedProjectPath(paths.folder, relativePath, { createParents: true });
+    if (fs.existsSync(absolutePath)) {
+      const existing = this.readJson(absolutePath);
+      if (JSON.stringify(existing) !== JSON.stringify(archived)) {
+        throw new Error("运行归档已存在且内容不同，已保留 active-run.json。");
+      }
+    } else {
+      projectStorage.atomicWriteJson({
+        resolveSafe: this.projectStorageResolver(paths.folder),
+        relativePath,
+        value: archived,
+      });
+    }
+    fs.rmSync(paths.activeRunPath);
+    return relativePath;
   }
 
   workbenchQueueApi(folder, activeQueueOverride = null) {
@@ -489,7 +597,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     const existing = this.queueApis.get(paths.folder);
     if (existing) return existing;
     const activeQueue = activeQueueOverride || this.currentWorkbenchQueue(paths.folder);
-    const activeQueues = activeQueue && ["idle", "processing"].includes(String(activeQueue.status))
+    const activeQueues = runState.isRunActive(activeQueue)
       ? [activeQueue]
       : [];
     if (activeQueues.length) this.activeQueueObjects.set(paths.folder, activeQueue);
@@ -509,7 +617,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
           if (liveQueue.stopRequested === true) queue.stopRequested = true;
           if (queue.stopRequested === true) liveQueue.stopRequested = true;
         }
-        writeJson(paths.queuePath, queue);
+        this.persistWorkbenchRun(paths, queue);
         if (api.lockedShotIds(queue).length && liveQueue?.queueId !== queue.queueId) this.activeQueueObjects.set(paths.folder, queue);
         else if (!api.lockedShotIds(queue).length && liveQueue?.queueId === queue.queueId) this.activeQueueObjects.delete(paths.folder);
         this.requestWorkbenchRefresh();
@@ -631,7 +739,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     await this.validatedProjectGenerationModels(request);
     this.assertWorkbenchQueueLockOwned(lock);
     const latestQueue = this.currentWorkbenchQueue(paths.folder);
-    if (latestQueue?.queueId !== queueId || !["idle", "processing"].includes(String(latestQueue.status))) {
+    if (latestQueue?.queueId !== queueId || !["queued", "processing"].includes(String(latestQueue.status))) {
       throw new Error("当前生成队列状态已变化，请刷新后重新选择镜头。");
     }
     const api = this.workbenchQueueApi(paths.folder);
@@ -646,7 +754,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     const activeQueue = this.currentWorkbenchQueue(paths.folder);
     const api = this.workbenchQueueApi(paths.folder);
     if (activeQueue && api.lockedShotIds(activeQueue).length
-      && ["idle", "processing"].includes(String(activeQueue.status))) {
+      && ["queued", "processing"].includes(String(activeQueue.status))) {
       return this.appendWorkbenchGeneration(paths, plan, activeQueue);
     }
     const lock = this.acquireWorkbenchQueueLock(paths.folder);
@@ -691,15 +799,18 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
   }
 
   async finishWorkbenchQueue(folder, queue) {
-    if (this.activeQueueObjects.get(folder)?.queueId === queue.queueId) this.activeQueueObjects.delete(folder);
-    const { projectPath } = this.workbenchProjectPaths(folder);
+    const paths = this.workbenchProjectPaths(folder);
+    const { projectPath } = paths;
     const project = this.readJson(projectPath);
-    const failures = (queue.shots || []).filter((shot) => shot.status === "failed").length;
+    const queueShots = (queue.queue || []).map((id) => queue.shots?.[id]).filter(Boolean);
+    const failures = queueShots.filter((shot) => shot.status === "failed").length;
     const allVideosReady = Array.isArray(project.shots)
       && project.shots.length > 0
       && project.shots.every((shot) => String(shot.videoPath || "").trim());
     if (allVideosReady && queue.status === "completed") {
       await this.finalizeProject(folder, project, 0);
+      this.archiveWorkbenchRun(paths, queue);
+      if (this.activeQueueObjects.get(folder)?.queueId === queue.queueId) this.activeQueueObjects.delete(folder);
       return queue;
     }
     project.status = failures ? "completed_with_errors" : "analysis_ready";
@@ -709,14 +820,24 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         ? `本次队列完成，${failures} 个镜头失败，可修改后重试。`
         : "本次镜头已生成，可继续选择其他镜头。";
     this.saveProject(folder, project);
+    this.archiveWorkbenchRun(paths, queue);
+    if (this.activeQueueObjects.get(folder)?.queueId === queue.queueId) this.activeQueueObjects.delete(folder);
     return queue;
   }
 
   async recoverWorkbenchQueue(folder) {
     const paths = this.workbenchProjectPaths(folder, { createWorkDirectory: true });
     const candidate = this.currentWorkbenchQueue(paths.folder);
-    const candidateLocked = candidate?.shots?.some((shot) => shot.status === "queued" || shot.status === "processing");
-    if (!candidateLocked || !["idle", "processing"].includes(String(candidate?.status))) return false;
+    if (candidate && paths.isV6 && !runState.isRunActive(candidate) && fs.existsSync(paths.activeRunPath)) {
+      this.archiveWorkbenchRun(paths, candidate);
+      if (this.activeQueueObjects.get(paths.folder)?.queueId === candidate.queueId) this.activeQueueObjects.delete(paths.folder);
+      return false;
+    }
+    const candidateLocked = (candidate?.queue || []).some((id) => {
+      const status = String(candidate?.shots?.[id]?.status || "");
+      return !["completed", "failed", "stopped"].includes(status);
+    });
+    if (!candidateLocked || !["queued", "processing", "stopping"].includes(String(candidate?.status))) return false;
 
     let lock;
     try { lock = this.acquireWorkbenchQueueLock(paths.folder); }
@@ -727,44 +848,56 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     let lockTransferredToRun = false;
     try {
       const queue = this.currentWorkbenchQueue(paths.folder);
-      const locked = queue?.shots?.filter((shot) => shot.status === "queued" || shot.status === "processing") || [];
-      if (!queue || !locked.length || !["idle", "processing"].includes(String(queue.status))) return false;
+      const locked = (queue?.queue || []).map((id) => queue?.shots?.[id]).filter((shot) => {
+        const status = String(shot?.status || "");
+        return shot && !["completed", "failed", "stopped"].includes(status);
+      });
+      if (!queue || !locked.length || !["queued", "processing", "stopping"].includes(String(queue.status))) return false;
       lock.queueId = String(queue.queueId);
       this.queueRunnerLockRequired.add(lock.queueId);
       this.queueRunnerLocks.set(lock.queueId, lock);
 
-      if (queue.status === "processing") {
+      if (["processing", "stopping"].includes(queue.status)) {
         const project = this.readJson(paths.projectPath);
         let unsafeRecovery = false;
-        for (const shot of queue.shots) {
-          if (shot.status !== "processing") continue;
+        for (const id of queue.queue) {
+          const shot = queue.shots[id];
+          if (!shot || ["queued", "completed", "failed", "stopped"].includes(String(shot.status))) continue;
           const projectShot = (project.shots || []).find((item) => String(item.id) === String(shot.id));
           const shotPlanId = String(shot.generationContext?.planId || queue.planId || "");
           if (projectShot?.videoTaskId && projectShot.videoTaskPlanId === shotPlanId) {
             shot.status = "queued";
-            shot.error = "";
+            shot.stage = "provider-generation";
+            shot.taskId = String(projectShot.videoTaskId);
+            shot.paidTaskSubmitted = true;
+            shot.error = null;
           } else {
             shot.status = "failed";
-            shot.error = "上次运行在平台任务编号写入前中断。为避免重复付费，已停止自动恢复，请人工确认后重试。";
+            shot.error = runState.normalizeGenerationError(
+              new Error("上次运行在平台任务编号写入前中断。为避免重复付费，已停止自动恢复，请人工确认后重试。"),
+              { code: "UNSAFE_PAID_TASK_RECOVERY", stage: shot.stage || "provider-submission", retryable: false, now: new Date().toISOString() },
+            );
             unsafeRecovery = true;
           }
         }
-        if (unsafeRecovery || queue.stopRequested === true) {
-          for (const shot of queue.shots) if (shot.status === "queued") shot.status = "stopped";
-          queue.status = unsafeRecovery ? "completed_with_errors" : "stopped";
+        if (unsafeRecovery) {
+          for (const id of queue.queue) if (queue.shots[id]?.status === "queued") queue.shots[id].status = "stopped";
+          queue.status = queue.queue.some((id) => queue.shots[id]?.status === "failed") ? "partial-failure" : "stopped";
+          queue.activeShotId = null;
+          queue.completedAt = new Date().toISOString();
           queue.updatedAt = new Date().toISOString();
-          writeJson(paths.queuePath, queue);
+          this.persistWorkbenchRun(paths, queue);
           this.mutateProject(paths.folder, (project) => {
-            project.status = unsafeRecovery ? "completed_with_errors" : "analysis_ready";
-            project.statusText = unsafeRecovery
-              ? "检测到上次异常中断。为避免重复付费，未自动重提任务，请检查失败镜头后手动重试。"
-              : "已恢复停止请求；不会自动提交后续镜头。";
+            project.status = "completed_with_errors";
+            project.statusText = "检测到上次异常中断。为避免重复付费，未自动重提任务，请检查失败镜头后手动重试。";
           });
+          this.archiveWorkbenchRun(paths, queue);
           return false;
         }
-        queue.status = "idle";
+        queue.status = "queued";
+        queue.activeShotId = null;
         queue.updatedAt = new Date().toISOString();
-        writeJson(paths.queuePath, queue);
+        this.persistWorkbenchRun(paths, queue);
       }
 
       this.assertWorkbenchQueueLockOwned(lock);
@@ -798,14 +931,13 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
   currentWorkbenchLock(paths) {
     const request = this.readJson(paths.requestPath);
     const requestMtimeMs = fs.statSync(paths.requestPath).mtimeMs;
-    let generationState = {};
-    if (fs.existsSync(paths.statePath)) generationState = this.readJson(paths.statePath);
+    const currentRun = runState.selectCurrentRun(this.currentRunInputs(paths, requestMtimeMs));
+    const generationState = this.currentRunStateView(currentRun);
     if (request.confirmed === true) throw new Error("草案已确认，不能再编辑或重复确认。");
-    if (generationState?.status === "processing"
-      && Number(generationState.requestMtimeMs) === Number(requestMtimeMs)) {
+    if (runState.isRunActive(currentRun) && currentRun?.compatibilitySource === "legacy-state") {
       throw new Error("项目正在生成中，不能编辑或重复确认。");
     }
-    return { request, requestMtimeMs, generationState };
+    return { request, requestMtimeMs, generationState, currentRun };
   }
 
   async saveWorkbenchDraft(folder, draft) {
@@ -868,7 +1000,13 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       }
       return next;
     });
-    writeJson(paths.requestPath, savedRequest);
+    if (paths.isV6) {
+      projectStorage.atomicWriteJson({
+        resolveSafe: this.projectStorageResolver(paths.folder),
+        relativePath: projectStorage.projectRelativePaths(paths.folder).draft,
+        value: savedRequest,
+      });
+    } else writeJson(paths.requestPath, savedRequest);
     this.saveProject(paths.folder, project);
     this.requestWorkbenchRefresh();
     return savedRequest;
@@ -1250,7 +1388,14 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
   saveProject(projectFolder, project) {
     const checkedFolder = this.checkedWorkbenchProjectFolder(projectFolder).folder;
     if (String(project?.folder || "").replace(/\\/g, "/") !== checkedFolder) throw new Error("project.json 的项目目录与当前项目范围不一致，已拒绝写入。");
-    writeJson(this.checkedProjectPath(checkedFolder, "project.json"), project);
+    const paths = this.workbenchProjectPaths(checkedFolder);
+    if (paths.isV6) {
+      projectStorage.atomicWriteJson({
+        resolveSafe: this.projectStorageResolver(checkedFolder),
+        relativePath: projectStorage.projectRelativePaths(checkedFolder).project,
+        value: project,
+      });
+    } else writeJson(paths.projectPath, project);
     atomicWrite(this.checkedProjectPath(checkedFolder, "00-项目总览.md", { createParents: true }), core.dashboardMarkdown(project));
     this.requestWorkbenchRefresh();
   }
@@ -1376,10 +1521,8 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
   async stopLatestGeneration() {
     const record = this.projectRecords().find((item) => {
       try {
-        const queue = this.currentWorkbenchQueue(item.project.folder);
-        if (queue && this.workbenchQueueApi(item.project.folder).lockedShotIds(queue).length) return true;
-        const { statePath } = this.workbenchProjectPaths(item.project.folder);
-        return fs.existsSync(statePath) && this.readJson(statePath).status === "processing";
+        const currentRun = this.currentWorkbenchQueue(item.project.folder);
+        return runState.isRunActive(currentRun);
       } catch (_) { return false; }
     });
     if (!record) { new Notice("当前没有正在运行的视频复刻任务。", 6000); return false; }
@@ -1572,11 +1715,23 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     }
   }
 
-  async waitForVideo(videoPlugin, taskId, timeoutMs = 45 * 60 * 1000) {
+  async waitForVideo(videoPlugin, taskId, timeoutMs = 45 * 60 * 1000, onProgress = null) {
+    const startedAtMs = Date.now();
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       await videoPlugin.refreshVideoTasks();
       const task = (videoPlugin.settings.videoTasks || []).find((item) => item.id === taskId);
+      if (typeof onProgress === "function" && task) {
+        const suppliedProgress = typeof task.progress === "number" && Number.isFinite(task.progress)
+          ? task.progress
+          : typeof task.progressPercent === "number" && Number.isFinite(task.progressPercent)
+            ? task.progressPercent
+            : null;
+        await onProgress({
+          progress: suppliedProgress !== null && suppliedProgress >= 0 && suppliedProgress <= 100 ? suppliedProgress : null,
+          elapsedMs: Math.max(0, Date.now() - startedAtMs),
+        });
+      }
       if (task?.status === "completed" && task.localPath) return task;
       if (task?.status === "failed") {
         const failure = new Error(task.lastError || "视频生成失败。");
@@ -1669,6 +1824,17 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
 
   async runWorkbenchQueueShot(projectFolder, shot, context) {
     const paths = this.workbenchProjectPaths(projectFolder, { createWorkDirectory: true });
+    const runStartedAtMs = Date.now();
+    const report = async (patch) => {
+      if (typeof context?.updateState !== "function") return null;
+      return context.updateState({
+        progress: null,
+        elapsedMs: Math.max(0, Date.now() - runStartedAtMs),
+        ...patch,
+      });
+    };
+    const assertPaidSubmissionAllowed = () => context?.assertPaidSubmissionAllowed?.();
+    await report({ status: "preparing", stage: "preflight", error: null });
     this.assertWorkbenchQueueRunnerLock(paths.folder, context.queueId);
     for (const directory of ["01-人物参考", "02-分镜脚本", "03-视频片段", "04-最终成片", ".work"]) {
       this.checkedProjectPath(paths.folder, directory, { createParents: true, directory: true });
@@ -1679,8 +1845,26 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       const { video } = this.getGenerationPlugins();
       const videoPath = paths.folder + "/03-视频片段/镜头-" + shot.id + "-" + core.safeSegment(shot.title) + ".mp4";
       this.updateProjectShot(paths.folder, shot.id, { status: "正在恢复并查询已有视频任务", videoTaskStatus: "processing" });
+      await report({
+        status: "video-processing",
+        stage: "provider-generation",
+        taskId: String(submittedShot.videoTaskId),
+        paidTaskSubmitted: true,
+      });
       try {
-        const completed = await this.waitForVideo(video, String(submittedShot.videoTaskId));
+        const completed = await this.waitForVideo(video, String(submittedShot.videoTaskId), 45 * 60 * 1000, (progress) => report({
+          status: "video-processing",
+          stage: "provider-generation",
+          taskId: String(submittedShot.videoTaskId),
+          paidTaskSubmitted: true,
+          ...progress,
+        }));
+        await report({
+          status: "saving",
+          stage: "saving",
+          taskId: String(submittedShot.videoTaskId),
+          paidTaskSubmitted: true,
+        });
         const savedVideoPath = this.copyVaultFile(completed.localPath, videoPath);
         this.updateProjectShot(paths.folder, shot.id, {
           videoPath: savedVideoPath,
@@ -1732,6 +1916,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     const ensureAsset = async (kind, source) => {
       this.assertWorkbenchQueueRunnerLock(paths.folder, context.queueId);
       const label = kind === "character" ? "人物" : kind === "scene" ? "场景" : "产品";
+      await report({ status: "reference-processing", stage: "reference-assets" });
       this.updateProjectShot(paths.folder, shot.id, {
         status: `正在准备${label}参考图 · ${String(source.id || "")}`,
       }, {
@@ -1743,7 +1928,9 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         : kind === "scene"
           ? referenceAssets.resolveSceneAsset
           : referenceAssets.resolveProductAsset;
+      assertPaidSubmissionAllowed();
       const resolved = await this.ensureReferenceAsset(image, resolver(this.vaultPath(), source.id), source.prompt, imageModel, context.visualStyle);
+      if (resolved.reused !== true) await report({ status: "reference-processing", stage: "reference-assets", paidTaskSubmitted: true });
       this.updateProjectShot(paths.folder, shot.id, { status: `${label}参考图已就绪 · ${String(source.id || "")}` });
       return {
         id: resolved.id,
@@ -1851,9 +2038,12 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       ].join("\n");
       if (!videoTaskId && needsFirstFrame && !currentFirstImagePath) {
         this.assertWorkbenchQueueRunnerLock(paths.folder, context.queueId);
+        await report({ status: "image-processing", stage: "first-frame" });
         this.updateProjectShot(paths.folder, shot.id, { status: "正在生成首帧" });
         const framePrompt = structuredTimeline ? shotTimeline.firstFramePrompt(shot.timeline) : String(shot.imagePrompt || "");
+        assertPaidSubmissionAllowed();
         const candidate = await this.generateImageMulti(image, visualStyle.applyVisualStyle(framePrompt + "\n" + continuity, context.visualStyle), referencePaths, imageModel);
+        await report({ status: "image-processing", stage: "first-frame", paidTaskSubmitted: true });
         currentFirstImagePath = await this.saveImageCandidate(image, candidate, firstImagePath);
         this.updateProjectShot(paths.folder, shot.id, {
           firstImagePath: currentFirstImagePath,
@@ -1863,17 +2053,22 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       }
       if (!videoTaskId && needsLastFrame && !currentLastImagePath) {
         this.assertWorkbenchQueueRunnerLock(paths.folder, context.queueId);
+        await report({ status: "image-processing", stage: "last-frame" });
         this.updateProjectShot(paths.folder, shot.id, { status: "正在生成尾帧" });
+        assertPaidSubmissionAllowed();
         const candidate = await this.generateImageMulti(image, visualStyle.applyVisualStyle(shot.lastImagePrompt + "\n" + continuity, context.visualStyle), referencePaths, imageModel);
+        await report({ status: "image-processing", stage: "last-frame", paidTaskSubmitted: true });
         currentLastImagePath = await this.saveImageCandidate(image, candidate, lastImagePath);
         this.updateProjectShot(paths.folder, shot.id, { lastImagePath: currentLastImagePath, status: "尾帧已完成" });
       }
 
       if (!videoTaskId) {
         this.assertWorkbenchQueueRunnerLock(paths.folder, context.queueId);
+        await report({ status: "video-submitting", stage: "provider-submission", paidTaskSubmitted: false });
         this.updateProjectShot(paths.folder, shot.id, { status: "正在提交视频任务" });
         let task;
         try {
+          assertPaidSubmissionAllowed();
           task = await video.submitVideo(generationPolicy.buildVideoOptions({
             model,
             prompt: visualStyle.applyVisualStyle(String(shot.effectiveVideoPrompt || ""), context.visualStyle),
@@ -1889,25 +2084,55 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         }
         videoTaskId = String(task?.id || "").trim();
         if (!videoTaskId) throw new Error("视频平台未返回任务编号，已停止等待以避免重复提交。");
-        this.updateProjectShot(paths.folder, shot.id, {
-          status: "正在生成视频",
-          videoTaskId,
-          videoTaskFingerprint: fingerprint,
-          videoTaskPlanId: context.planId,
-          videoTaskModel: model,
-          videoTaskSubmittedAt: new Date().toISOString(),
-          videoTaskStatus: "processing",
+        let projectTaskWriteError = null;
+        try {
+          this.updateProjectShot(paths.folder, shot.id, {
+            status: "正在生成视频",
+            videoTaskId,
+            videoTaskFingerprint: fingerprint,
+            videoTaskPlanId: context.planId,
+            videoTaskModel: model,
+            videoTaskSubmittedAt: new Date().toISOString(),
+            videoTaskStatus: "processing",
+          });
+        } catch (error) {
+          projectTaskWriteError = error;
+        }
+        await report({
+          status: "video-processing",
+          stage: "provider-generation",
+          taskId: videoTaskId,
+          paidTaskSubmitted: true,
         });
+        if (projectTaskWriteError) throw projectTaskWriteError;
       } else {
         this.updateProjectShot(paths.folder, shot.id, { status: "正在恢复并查询已有视频任务", videoTaskStatus: "processing" });
+        await report({
+          status: "video-processing",
+          stage: "provider-generation",
+          taskId: videoTaskId,
+          paidTaskSubmitted: true,
+        });
       }
 
       let completed;
       try {
-        completed = await this.waitForVideo(video, videoTaskId);
+        completed = await this.waitForVideo(video, videoTaskId, 45 * 60 * 1000, (progress) => report({
+          status: "video-processing",
+          stage: "provider-generation",
+          taskId: videoTaskId,
+          paidTaskSubmitted: true,
+          ...progress,
+        }));
       } catch (error) {
         throw this.generationModelError("video", model, error);
       }
+      await report({
+        status: "saving",
+        stage: "saving",
+        taskId: videoTaskId,
+        paidTaskSubmitted: true,
+      });
       const savedVideoPath = this.copyVaultFile(completed.localPath, videoPath);
       this.updateProjectShot(paths.folder, shot.id, {
         videoPath: savedVideoPath,

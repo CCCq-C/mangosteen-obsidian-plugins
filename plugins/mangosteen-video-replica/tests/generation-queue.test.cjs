@@ -12,6 +12,10 @@ const {
 
 assert.strictEqual(typeof appendGenerationPlan, "function", "an active queue must support appending later shot plans");
 
+function runShots(run) {
+  return run.queue.map((id) => run.shots[id]);
+}
+
 function draft() {
   return {
     version: 3,
@@ -178,8 +182,10 @@ for (const changed of [
     "enqueue must verify a serialized confirmed plan again",
   );
   const queue = createGenerationQueue(confirmedBatch, { now: "2026-10-11T00:00:00.000Z" });
-  assert.strictEqual(queue.status, "idle");
-  assert.deepStrictEqual(queue.shots.map((shot) => shot.status), ["queued", "queued"]);
+  assert.strictEqual(queue.status, "queued");
+  assert.deepStrictEqual(queue.queue, ["001", "003"]);
+  assert.deepStrictEqual(runShots(queue).map((shot) => shot.status), ["queued", "queued"]);
+  assert.strictEqual(queue.shots["001"].confirmedPayload.effectiveVideoPrompt, confirmedBatch.shots[0].effectiveVideoPrompt);
   assert.deepStrictEqual(lockedShotIds(queue), ["001", "003"]);
   assert.strictEqual(lockedShotIds(queue).includes("002"), false, "unselected shots must remain editable");
   assert.throws(
@@ -191,26 +197,26 @@ for (const changed of [
   );
 
   const tamperedQueue = createGenerationQueue(confirmedBatch, { now: "2026-10-11T00:00:01.000Z" });
-  tamperedQueue.shots[0].effectiveVideoPrompt = "持久化后被替换的未确认提示词";
+  tamperedQueue.shots["001"].confirmedPayload.effectiveVideoPrompt = "持久化后被替换的未确认提示词";
   let tamperedPaidCalls = 0;
   await runGenerationQueue(tamperedQueue, async () => {
     tamperedPaidCalls += 1;
     return { videoPath: "should-not-run.mp4" };
   });
   assert.strictEqual(tamperedPaidCalls, 1, "only the untouched later shot may reach the paid runner");
-  assert.strictEqual(tamperedQueue.shots[0].status, "failed");
-  assert.match(tamperedQueue.shots[0].error, /队列内容已变化.*不会提交付费任务/);
+  assert.strictEqual(tamperedQueue.shots["001"].status, "failed");
+  assert.match(tamperedQueue.shots["001"].error.message, /队列内容已变化.*不会提交付费任务/);
 
   const unsignedQueue = createGenerationQueue(confirmedBatch, { now: "2026-10-11T00:00:02.000Z" });
-  delete unsignedQueue.shots[0].confirmedPayloadSignature;
+  delete unsignedQueue.shots["001"].confirmedPayloadSignature;
   let unsignedPaidCalls = 0;
   await runGenerationQueue(unsignedQueue, async () => {
     unsignedPaidCalls += 1;
     return { videoPath: "should-not-run.mp4" };
   });
   assert.strictEqual(unsignedPaidCalls, 1, "an unsigned shot must fail before paid submission while later signed shots may continue");
-  assert.strictEqual(unsignedQueue.shots[0].status, "failed");
-  assert.match(unsignedQueue.shots[0].error, /缺少确认签名.*不会提交付费任务/);
+  assert.strictEqual(unsignedQueue.shots["001"].status, "failed");
+  assert.match(unsignedQueue.shots["001"].error.message, /缺少确认签名.*不会提交付费任务/);
 
   const callOrder = [];
   const finished = await runGenerationQueue(queue, async (shot, context) => {
@@ -221,8 +227,8 @@ for (const changed of [
   });
   assert.deepStrictEqual(callOrder, ["001", "003"]);
   assert.strictEqual(finished.status, "completed");
-  assert.deepStrictEqual(finished.shots.map((shot) => shot.status), ["completed", "completed"]);
-  assert.deepStrictEqual(finished.shots.map((shot) => shot.result.videoPath), ["03-视频片段/001.mp4", "03-视频片段/003.mp4"]);
+  assert.deepStrictEqual(runShots(finished).map((shot) => shot.status), ["completed", "completed"]);
+  assert.deepStrictEqual(runShots(finished).map((shot) => shot.result.videoPath), ["03-视频片段/001.mp4", "03-视频片段/003.mp4"]);
   assert.deepStrictEqual(lockedShotIds(finished), [], "terminal shots must become editable again");
 
   const failureQueue = createGenerationQueue(confirmedBatch);
@@ -233,10 +239,10 @@ for (const changed of [
     return { videoPath: `${shot.id}.mp4` };
   });
   assert.deepStrictEqual(failureOrder, ["001", "003"], "one shot failure must not block later selected shots");
-  assert.strictEqual(failureQueue.status, "completed_with_errors");
-  assert.strictEqual(failureQueue.shots[0].status, "failed");
-  assert.match(failureQueue.shots[0].error, /供应商任务失败/);
-  assert.strictEqual(failureQueue.shots[1].status, "completed");
+  assert.strictEqual(failureQueue.status, "partial-failure");
+  assert.strictEqual(failureQueue.shots["001"].status, "failed");
+  assert.match(failureQueue.shots["001"].error.message, /供应商任务失败/);
+  assert.strictEqual(failureQueue.shots["003"].status, "completed");
   assert.deepStrictEqual(lockedShotIds(failureQueue), []);
 
   const stopQueue = createGenerationQueue(confirmedBatch);
@@ -247,10 +253,41 @@ for (const changed of [
     return { videoPath: `${shot.id}.mp4` };
   });
   assert.deepStrictEqual(stopOrder, ["001"], "stop request must prevent the next paid task from being submitted");
-  assert.strictEqual(stopQueue.shots[0].status, "completed", "already submitted current shot may complete");
-  assert.strictEqual(stopQueue.shots[1].status, "stopped");
+  assert.strictEqual(stopQueue.shots["001"].status, "completed", "already submitted current shot may complete");
+  assert.strictEqual(stopQueue.shots["003"].status, "stopped");
   assert.strictEqual(stopQueue.status, "stopped");
   assert.deepStrictEqual(lockedShotIds(stopQueue), []);
+
+  const acceptedTaskQueue = createGenerationQueue(firstOnly, { now: "2026-10-11T00:00:03.000Z" });
+  await runGenerationQueue(acceptedTaskQueue, async (_shot, context) => {
+    await context.updateState({
+      status: "video-processing",
+      stage: "provider-generation",
+      taskId: "provider-task-1",
+      progress: null,
+      elapsedMs: 5000,
+    });
+    requestQueueStop(acceptedTaskQueue);
+    throw Object.assign(new Error("查询暂时失败"), { code: "PROVIDER_QUERY_FAILED", retryable: true });
+  });
+  assert.strictEqual(acceptedTaskQueue.shots["001"].taskId, "provider-task-1");
+  assert.strictEqual(acceptedTaskQueue.shots["001"].paidTaskSubmitted, true);
+  assert.strictEqual(acceptedTaskQueue.shots["001"].progress, null, "queue state must not fabricate provider progress");
+  assert.strictEqual(acceptedTaskQueue.shots["001"].error.code, "PROVIDER_QUERY_FAILED");
+  assert.strictEqual(acceptedTaskQueue.shots["001"].error.paidTaskSubmitted, true);
+
+  const stoppedBeforePaidQueue = createGenerationQueue(firstOnly, { now: "2026-10-11T00:00:04.000Z" });
+  let paidAfterStop = 0;
+  await runGenerationQueue(stoppedBeforePaidQueue, async (_shot, context) => {
+    requestQueueStop(stoppedBeforePaidQueue);
+    context.assertPaidSubmissionAllowed();
+    paidAfterStop += 1;
+    return { videoPath: "must-not-run.mp4" };
+  });
+  assert.strictEqual(paidAfterStop, 0, "stop must block a paid submission that has not been accepted yet");
+  assert.strictEqual(stoppedBeforePaidQueue.shots["001"].status, "stopped");
+  assert.strictEqual(stoppedBeforePaidQueue.shots["001"].paidTaskSubmitted, false);
+  assert.strictEqual(stoppedBeforePaidQueue.status, "stopped");
 
   console.log("generation-queue: ok");
 })().catch((error) => {

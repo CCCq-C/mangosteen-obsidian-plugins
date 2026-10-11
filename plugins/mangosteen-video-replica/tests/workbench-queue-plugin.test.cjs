@@ -20,6 +20,11 @@ Module._load = function patchedLoad(request, parent, isMain) {
 
 const ReplicaPlugin = require("../main.js");
 const { confirmGenerationPlan, createGenerationQueue } = require("../generation-queue.cjs");
+const projectStorage = require("../project-storage.cjs");
+
+function runShots(run) {
+  return run.queue.map((id) => run.shots[id]);
+}
 
 function request() {
   return {
@@ -118,7 +123,7 @@ function request() {
   );
   releaseStartValidation();
   const queued = await firstStart;
-  assert.strictEqual(queued.status, "idle", "enqueue must return before long-running generation completes");
+  assert.strictEqual(queued.status, "queued", "enqueue must return before long-running generation completes");
   await plugin.queueRuns.get(folder);
   assert.deepStrictEqual(submitted.map((item) => item.id), ["001", "002"]);
   assert.match(submitted[1].prompt, /用户确认后的完整视频提示词。/);
@@ -147,7 +152,7 @@ function request() {
   const appendSecondPlan = await plugin.previewWorkbenchGeneration(folder, ["002"]);
   const appendedQueue = await plugin.startWorkbenchGeneration(folder, appendSecondPlan);
   assert.deepStrictEqual(
-    appendedQueue.shots.map((shot) => [shot.id, shot.status]),
+    runShots(appendedQueue).map((shot) => [shot.id, shot.status]),
     [["001", "processing"], ["002", "queued"]],
     "a later selected shot must append to the live queue instead of starting a conflicting queue",
   );
@@ -271,9 +276,12 @@ function request() {
   const activeQueue = {
     ...persistedQueue,
     queueId: "active-queue",
+    runId: "active-queue",
     status: "processing",
     stopRequested: false,
-    shots: [{ ...persistedQueue.shots[0], id: "001", status: "processing" }],
+    queue: ["001"],
+    selectedShotIds: ["001"],
+    shots: { "001": { ...persistedQueue.shots["001"], id: "001", status: "processing" } },
   };
   fs.writeFileSync(path.join(root, ".work/generation-queue.json"), JSON.stringify(activeQueue));
   plugin.queueApis.delete(folder);
@@ -319,6 +327,7 @@ function request() {
   plugin.copyVaultFile = (_source, target) => target;
   fs.writeFileSync(path.join(root, ".work/generation-queue.json"), JSON.stringify({}));
   const directPlan = await plugin.previewWorkbenchGeneration(folder, ["002"]);
+  const directRunStateUpdates = [];
   const directRun = plugin.runWorkbenchQueueShot(folder, directPlan.shots[0], {
     queueId: "direct",
     planId: directPlan.planId,
@@ -326,11 +335,20 @@ function request() {
     products: directPlan.products,
     scenes: directPlan.scenes,
     settings: directPlan.settings,
+    updateState: async (patch) => { directRunStateUpdates.push(JSON.parse(JSON.stringify(patch))); },
   });
   await videoWaitStarted;
   const duringVideo = JSON.parse(fs.readFileSync(path.join(root, "project.json")));
   const runningShot = duringVideo.shots.find((shot) => shot.id === "002");
   assert.strictEqual(runningShot.videoTaskId, "video-task", "provider task ID must be persisted before polling begins");
+  const acceptedTaskUpdate = directRunStateUpdates.find((patch) => patch.taskId === "video-task");
+  assert.strictEqual(acceptedTaskUpdate?.paidTaskSubmitted, true, "an accepted provider task must immediately update active run state");
+  assert.strictEqual(acceptedTaskUpdate?.progress, null, "provider progress must remain null when the provider supplies no number");
+  assert.strictEqual(
+    directRunStateUpdates.some((patch) => patch.stage === "first-frame" && patch.paidTaskSubmitted === true),
+    true,
+    "a completed paid image submission must mark the active run even before a video task ID exists",
+  );
   duringVideo.shots.find((shot) => shot.id === "001").title = "用户生成期间修改的第一镜";
   fs.writeFileSync(path.join(root, "project.json"), JSON.stringify(duringVideo));
   releaseVideoWait();
@@ -465,8 +483,9 @@ function request() {
     { now: "2026-10-11T00:20:00.000Z" },
   );
   recoverQueue.queueId = "recover-queue";
+  recoverQueue.runId = "recover-queue";
   recoverQueue.status = "processing";
-  recoverQueue.shots[0].status = "processing";
+  recoverQueue.shots["002"].status = "processing";
   fs.writeFileSync(path.join(root, ".work/generation-queue.json"), JSON.stringify(recoverQueue));
   plugin.queueApis.delete(folder);
   submittedVideoOptions.length = 0;
@@ -546,10 +565,128 @@ function request() {
   });
   assert.strictEqual(submittedVideoOptions.length, 1, "retry after a terminal failure must submit a new provider task");
 
+  const v6Folder = "山竹视频复刻/版本六队列";
+  const v6Root = path.join(vault, ...v6Folder.split("/"));
+  const v6MetadataRoot = path.join(v6Root, ".mangosteen");
+  const v6LegacyWorkRoot = path.join(v6Root, ".work");
+  fs.mkdirSync(path.join(v6MetadataRoot, "runs"), { recursive: true });
+  fs.mkdirSync(v6LegacyWorkRoot, { recursive: true });
+  fs.writeFileSync(path.join(v6MetadataRoot, "project.json"), JSON.stringify({
+    schemaVersion: 6,
+    folder: v6Folder,
+    title: "版本六队列",
+    status: "analysis_ready",
+    statusText: "等待选择镜头",
+    shots: request().shots.map((shot) => ({ ...shot, status: "等待生成" })),
+  }));
+  fs.writeFileSync(path.join(v6MetadataRoot, "draft.json"), JSON.stringify({ ...request(), schemaVersion: 6 }));
+  const staleLegacyQueue = JSON.stringify({ queueId: "stale-legacy", status: "completed", shots: [] });
+  const staleLegacyState = JSON.stringify({ status: "stopped", requestMtimeMs: 1, updatedAt: "2026-10-10T00:00:00.000Z" });
+  fs.writeFileSync(path.join(v6LegacyWorkRoot, "generation-queue.json"), staleLegacyQueue);
+  fs.writeFileSync(path.join(v6LegacyWorkRoot, "generation-state.json"), staleLegacyState);
+
+  plugin.refreshGenerationModelCatalog = async () => ({
+    imageModels: ["gpt-image-2-w"],
+    videoModels: ["MiniMax-H3"],
+  });
+  const v6Plan = await plugin.previewWorkbenchGeneration(v6Folder, ["001", "002"]);
+  let releaseV6AcceptedTask;
+  let v6AcceptedTaskReached;
+  const v6AcceptedTaskGate = new Promise((resolve) => { releaseV6AcceptedTask = resolve; });
+  const v6AcceptedTaskStarted = new Promise((resolve) => { v6AcceptedTaskReached = resolve; });
+  const v6Submitted = [];
+  plugin.runWorkbenchQueueShot = async (_folder, shot, context) => {
+    v6Submitted.push(shot.id);
+    await context.updateState({
+      status: "video-processing",
+      stage: "provider-generation",
+      taskId: `v6-task-${shot.id}`,
+      progress: null,
+      elapsedMs: 1200,
+    });
+    if (shot.id === "001") {
+      v6AcceptedTaskReached();
+      await v6AcceptedTaskGate;
+    }
+    return { videoPath: `${v6Folder}/03-分镜/${shot.id}/视频.mp4` };
+  };
+  await plugin.startWorkbenchGeneration(v6Folder, v6Plan);
+  await v6AcceptedTaskStarted;
+  const activeRunPath = path.join(v6MetadataRoot, "active-run.json");
+  assert.strictEqual(fs.existsSync(activeRunPath), true, "version 6 queues must persist only to active-run.json");
+  const acceptedActiveRun = JSON.parse(fs.readFileSync(activeRunPath, "utf8"));
+  assert.strictEqual(acceptedActiveRun.shots["001"].taskId, "v6-task-001");
+  assert.strictEqual(acceptedActiveRun.shots["001"].paidTaskSubmitted, true);
+  assert.strictEqual(acceptedActiveRun.shots["001"].progress, null, "missing provider progress must remain null");
+  const loadedV6 = plugin.loadWorkbenchProject(v6Folder);
+  assert.strictEqual(loadedV6.currentRun.status, "processing", "active-run must override a stale legacy stopped state");
+  assert.strictEqual(loadedV6.generationQueue.status, "processing", "the UI compatibility view must come from selectCurrentRun");
+  assert.strictEqual(loadedV6.generationQueue.shots[0].status, "processing", "the compatibility view must keep the active shot locked without interpreting provider stages");
+  assert.deepStrictEqual(loadedV6.generationState, {}, "the UI must not compare the raw stale generation state itself");
+  await plugin.stopWorkbenchGeneration(v6Folder);
+  const stoppingActiveRun = JSON.parse(fs.readFileSync(activeRunPath, "utf8"));
+  assert.strictEqual(stoppingActiveRun.status, "stopping");
+  assert.strictEqual(stoppingActiveRun.shots["001"].taskId, "v6-task-001", "stop must retain accepted provider recovery data");
+  releaseV6AcceptedTask();
+  await plugin.queueRuns.get(v6Folder);
+  assert.deepStrictEqual(v6Submitted, ["001"], "stop must block only the future paid submission");
+  assert.strictEqual(fs.existsSync(activeRunPath), false, "the active pointer must be removed after archive succeeds");
+  const archivedRuns = fs.readdirSync(path.join(v6MetadataRoot, "runs")).filter((name) => name.endsWith(".json"));
+  assert.strictEqual(archivedRuns.length, 1);
+  const archivedRun = JSON.parse(fs.readFileSync(path.join(v6MetadataRoot, "runs", archivedRuns[0]), "utf8"));
+  assert.strictEqual(archivedRun.status, "stopped");
+  assert.strictEqual(archivedRun.shots["001"].taskId, "v6-task-001");
+  assert.strictEqual(fs.readFileSync(path.join(v6LegacyWorkRoot, "generation-queue.json"), "utf8"), staleLegacyQueue);
+  assert.strictEqual(fs.readFileSync(path.join(v6LegacyWorkRoot, "generation-state.json"), "utf8"), staleLegacyState);
+  const afterV6Archive = plugin.loadWorkbenchProject(v6Folder);
+  assert.strictEqual(afterV6Archive.currentRun, null, "a version 6 project must not revive stale legacy state after its active run is archived");
+  assert.deepStrictEqual(afterV6Archive.generationQueue, {});
+  assert.deepStrictEqual(afterV6Archive.generationState, {});
+
+  const retainedPointerAfterArchive = { ...archivedRun };
+  delete retainedPointerAfterArchive.archivedAt;
+  fs.writeFileSync(activeRunPath, `${JSON.stringify(retainedPointerAfterArchive, null, 2)}\n`);
+  plugin.archiveWorkbenchRun(
+    plugin.workbenchProjectPaths(v6Folder),
+    retainedPointerAfterArchive,
+    "2026-10-12T00:00:00.000Z",
+  );
+  assert.strictEqual(fs.existsSync(activeRunPath), false, "an archive retry must clear a pointer left behind after a successful archive write");
+
+  plugin.queueApis.delete(v6Folder);
+  const archiveFailurePlan = await plugin.previewWorkbenchGeneration(v6Folder, ["001"]);
+  plugin.runWorkbenchQueueShot = async (_folder, shot, context) => {
+    await context.updateState({
+      status: "video-processing",
+      stage: "provider-generation",
+      taskId: "v6-archive-failure-task",
+      progress: null,
+    });
+    return { videoPath: `${v6Folder}/03-分镜/${shot.id}/视频.mp4` };
+  };
+  const originalAtomicWriteJson = projectStorage.atomicWriteJson;
+  projectStorage.atomicWriteJson = (options) => {
+    if (String(options?.relativePath || "").includes("/.mangosteen/runs/")) throw new Error("injected archive failure");
+    return originalAtomicWriteJson(options);
+  };
+  try {
+    await plugin.startWorkbenchGeneration(v6Folder, archiveFailurePlan);
+    await assert.rejects(plugin.queueRuns.get(v6Folder), /injected archive failure/);
+  } finally {
+    projectStorage.atomicWriteJson = originalAtomicWriteJson;
+  }
+  assert.strictEqual(fs.existsSync(activeRunPath), true, "archive failure must keep the terminal active run for recovery");
+  const retainedAfterArchiveFailure = JSON.parse(fs.readFileSync(activeRunPath, "utf8"));
+  assert.strictEqual(retainedAfterArchiveFailure.shots["001"].taskId, "v6-archive-failure-task");
+  assert.strictEqual(retainedAfterArchiveFailure.shots["001"].paidTaskSubmitted, true);
+  assert.strictEqual(await plugin.recoverWorkbenchQueue(v6Folder), false, "terminal recovery performs no paid work");
+  assert.strictEqual(fs.existsSync(activeRunPath), false, "a later recovery pass must retry a previously failed archive before allowing another run");
+
   const syncScriptPath = path.resolve(__dirname, "../../../scripts/sync-plugin-code-to-vault.sh");
   if (fs.existsSync(syncScriptPath)) {
     const syncScript = fs.readFileSync(syncScriptPath, "utf8");
     assert.match(syncScript, /generation-queue\.cjs/, "live-vault sync must include the queue engine");
+    assert.match(syncScript, /run-state\.cjs/, "live-vault sync must include the active-run state model");
     assert.match(syncScript, /replica-logic-api\.cjs/, "live-vault sync must include the queue facade");
     assert.match(syncScript, /workbench-queue-plugin\.test\.cjs/, "live-vault sync must include its queue regression test");
   }

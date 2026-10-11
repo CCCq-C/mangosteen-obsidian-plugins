@@ -43,9 +43,9 @@ copy_plugin_files mangosteen-video \
   tests/video-api.test.cjs tests/video-plugin.test.cjs tests/output-storage.test.cjs
 
 copy_plugin_files mangosteen-video-replica \
-  main.js generation-policy.cjs generation-queue.cjs project-storage.cjs reference-assets.cjs replica-core.cjs replica-cli.cjs replica-editor.cjs replica-logic-api.cjs replica-ui-state.cjs replica-workbench.cjs shot-timeline.cjs visual-style.cjs video-analysis-schema.json manifest.json styles.css \
+  main.js generation-policy.cjs generation-queue.cjs project-storage.cjs run-state.cjs reference-assets.cjs replica-core.cjs replica-cli.cjs replica-editor.cjs replica-logic-api.cjs replica-ui-state.cjs replica-workbench.cjs shot-timeline.cjs visual-style.cjs video-analysis-schema.json manifest.json styles.css \
   tests/generation-policy.test.cjs tests/plugin-load.test.cjs tests/reference-assets.test.cjs \
-  tests/generation-queue.test.cjs tests/replica-cli.test.cjs tests/replica-core.test.cjs tests/replica-editor.test.cjs \
+  tests/generation-queue.test.cjs tests/run-state.test.cjs tests/replica-cli.test.cjs tests/replica-core.test.cjs tests/replica-editor.test.cjs \
   tests/replica-logic-api.test.cjs tests/replica-ui-state.test.cjs tests/replica-workbench.test.cjs \
   tests/workbench-queue-plugin.test.cjs tests/shot-timeline.test.cjs tests/visual-style.test.cjs
 

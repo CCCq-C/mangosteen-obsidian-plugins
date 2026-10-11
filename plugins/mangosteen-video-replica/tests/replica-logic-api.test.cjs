@@ -68,7 +68,7 @@ const request = {
   assert.match(submitted[0].prompt, /第二句/);
   assert.strictEqual(queue.status, "completed");
   assert.strictEqual(api.isLocked(queue, "002"), false);
-  assert(persisted.some((item) => item.shots[0].status === "processing"));
+  assert(persisted.some((item) => item.shots["002"].status === "processing"));
   assert.strictEqual(persisted.at(-1).status, "completed");
 
   const stoppedQueue = await api.enqueue(api.confirm(api.preview(request, ["001"]), request));
