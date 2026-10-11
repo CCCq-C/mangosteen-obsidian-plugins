@@ -166,6 +166,73 @@ function createVault(initialFiles = {}) {
     assetType: "first-frame",
     destinationPath: "山竹视频复刻/project-1/03-分镜/008/首帧.png",
   };
+  const usageTask = {
+    id: "usage-image-task",
+    taskPath: "/v1/images/generations/tasks",
+    mode: "文生图",
+    model: "gpt-image-2-w",
+    group: "gpt_image_web",
+    size: "1024x1024",
+    requestedCount: 1,
+    outputCount: 1,
+    accountUserId: "account-1",
+    createdAt: "2026-10-11T07:00:51.000Z",
+    status: "completed",
+    usageRequestId: "",
+    usageGroup: "",
+    outputTarget,
+    imagePaths: [outputTarget.destinationPath],
+    recordPath: outputTarget.destinationPath,
+    saved: true,
+  };
+  let usageBridgePayload;
+  const usageBridge = {
+    getAccountUserId: () => "account-1",
+    matchMediaUsage: async (tasks) => {
+      usageBridgePayload = tasks;
+      return {
+        ok: true,
+        matches: {
+          [usageTask.id]: {
+            accountUserId: "account-1",
+            costUsd: "0.125",
+            detail: "matched image usage",
+            requestId: "request-1",
+            tokenName: "image-token",
+            group: "gpt_image_web",
+          },
+        },
+      };
+    },
+  };
+  const usagePlugin = new ImagePlugin();
+  usagePlugin.settings = { model: "gpt-image-2", size: "1024x1024", imageTasks: [usageTask], submissionMarkers: [] };
+  usagePlugin.app = { plugins: { getPlugin: () => ({ getAccountBridge: () => usageBridge }) } };
+  usagePlugin.saveSettings = async () => {};
+  usagePlugin.refreshImageTaskViews = () => {};
+  await usagePlugin.refreshTaskUsageRecords();
+  assert.deepStrictEqual(usageBridgePayload, [{
+    kind: "image",
+    id: usageTask.id,
+    taskPath: usageTask.taskPath,
+    mode: usageTask.mode,
+    model: usageTask.model,
+    group: usageTask.group,
+    size: usageTask.size,
+    requestedCount: usageTask.requestedCount,
+    outputCount: usageTask.outputCount,
+    accountUserId: usageTask.accountUserId,
+    createdAt: usageTask.createdAt,
+    status: usageTask.status,
+    usageRequestId: "",
+    usageGroup: "",
+  }]);
+  assert.ok(!Object.prototype.hasOwnProperty.call(usageBridgePayload[0], "outputTarget"));
+  assert.ok(!JSON.stringify(usageBridgePayload).includes("destinationPath"), "usage-log bridge payload must exclude every local destination path");
+  assert.strictEqual(usageTask.usageLogMatched, true, "safe usage payload must still match usage records");
+  assert.strictEqual(usageTask.cost, 0.125);
+  assert.strictEqual(usageTask.usageRequestId, "request-1");
+
   const targetPlugin = new ImagePlugin();
   targetPlugin.api = imageApi;
   targetPlugin.settings = { model: "gpt-image-2", size: "1024x1024", imageTasks: [], submissionMarkers: [] };

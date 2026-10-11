@@ -617,7 +617,22 @@ module.exports = class MangosteenImagePlugin extends Plugin {
     const accountUserId = String(bridge?.getAccountUserId?.() || "");
     const tasks = (this.settings.imageTasks || []).filter((task) => ["completed", "failed"].includes(task.status) && (!task.usageLogMatched || !task.accountUserId) && (!task.accountUserId || String(task.accountUserId) === accountUserId));
     if (!tasks.length) return;
-    const result = await bridge?.matchMediaUsage?.(tasks.map((task) => Object.assign({ kind: "image" }, task)));
+    const result = await bridge?.matchMediaUsage?.(tasks.map((task) => ({
+      kind: "image",
+      id: task.id,
+      taskPath: task.taskPath,
+      mode: task.mode,
+      model: task.model,
+      group: task.group,
+      size: task.size,
+      requestedCount: task.requestedCount,
+      outputCount: task.outputCount,
+      accountUserId: task.accountUserId,
+      createdAt: task.createdAt,
+      status: task.status,
+      usageRequestId: task.usageRequestId,
+      usageGroup: task.usageGroup,
+    })));
     if (!result?.ok) return;
     let changed = false;
     for (const task of tasks) {
