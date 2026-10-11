@@ -189,7 +189,7 @@ function createPlugin(snapshot = readySnapshot, projects = [{ folder: readySnaps
       this.previewCalls.push({ folder, shotIds: [...shotIds] });
       const selected = new Set(shotIds);
       return {
-        warning: "点击生成后，所选镜头的提示词将无法修改，请确认生成。",
+        warning: "确认后，所选分镜在本次生成期间将无法更改。",
         selectedShotIds: this.snapshot.request.shots.filter((shot) => selected.has(shot.id)).map((shot) => shot.id),
         shots: this.snapshot.request.shots.filter((shot) => selected.has(shot.id)).map((shot) => ({
           ...clone(shot),
@@ -276,8 +276,11 @@ function createView(plugin) {
   await selectedGenerateButton.dispatch("click");
   assert.deepStrictEqual(plugin.previewCalls.at(-1).shotIds, ["001"]);
   assert.strictEqual(plugin.queueCalls.length, 1);
-  assert.match(confirmMessages.at(-1), /点击生成后，所选镜头的提示词将无法修改，请确认生成。/);
-  assert.match(confirmMessages.at(-1), /最终提示词：人物举起手机，镜头推进/);
+  assert.strictEqual(
+    confirmMessages.at(-1),
+    "是否生成（分镜 001）？\n\n确认后，所选分镜在本次生成期间将无法更改。",
+  );
+  assert.doesNotMatch(confirmMessages.at(-1), /最终提示词|人物举起手机|镜头推进/);
   assert.strictEqual(plugin.snapshot.request.confirmed, false, "the UI must not revive the legacy confirmed=true workflow");
 
   const titleInput = view.contentEl.find((element) => (

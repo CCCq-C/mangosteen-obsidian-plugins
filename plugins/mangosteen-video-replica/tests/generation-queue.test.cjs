@@ -57,7 +57,7 @@ assert.throws(() => prepareGenerationPlan(draft(), ["001", "001"]), /重复选�
 const request = draft();
 const plan = prepareGenerationPlan(request, ["003", "001"]);
 assert.strictEqual(plan.warning, CONFIRMATION_WARNING);
-assert.strictEqual(CONFIRMATION_WARNING, "点击生成后，所选镜头的提示词将无法修改，请确认生成。");
+assert.strictEqual(CONFIRMATION_WARNING, "确认后，所选分镜在本次生成期间将无法更改。");
 assert.match(plan.planId, /^sha256:[a-f0-9]{64}$/);
 assert.deepStrictEqual(plan.selectedShotIds, ["001", "003"], "selected shots must follow draft order");
 assert.deepStrictEqual(plan.shots.map((shot) => shot.id), ["001", "003"]);

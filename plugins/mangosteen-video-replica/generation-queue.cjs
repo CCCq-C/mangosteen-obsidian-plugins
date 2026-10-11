@@ -2,7 +2,7 @@ const crypto = require("crypto");
 const { resolveVideoPrompt } = require("./generation-policy.cjs");
 const { normalizeGenerationRequest } = require("./replica-core.cjs");
 
-const CONFIRMATION_WARNING = "点击生成后，所选镜头的提示词将无法修改，请确认生成。";
+const CONFIRMATION_WARNING = "确认后，所选分镜在本次生成期间将无法更改。";
 
 function clone(value) {
   if (Array.isArray(value)) return value.map(clone);

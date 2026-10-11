@@ -752,10 +752,11 @@ function createVideoReplicaWorkbenchView(ItemView) {
       if (this.dirty && !(await this.saveDraft())) return false;
       if (!this.viewModel.canGenerate || !this.selectedFolder) return false;
       const plan = await this.plugin.previewWorkbenchGeneration(this.selectedFolder, selected);
-      const promptPreview = list(plan?.shots).map((shot) => (
-        `镜头 ${text(shot.id, "-")} · ${text(shot.title, "未命名")}\n${text(shot.effectiveVideoPrompt, "（无视频提示词）")}`
-      )).join("\n\n");
-      const message = `${text(plan?.warning, "点击生成前请确认提示词。")}\n\n${promptPreview}`;
+      const plannedShotIds = list(plan?.selectedShotIds).map((id) => String(id)).filter(Boolean);
+      const message = `是否生成（分镜 ${(plannedShotIds.length ? plannedShotIds : selected).join("、")}）？\n\n${text(
+        plan?.warning,
+        "确认后，所选分镜在本次生成期间将无法更改。",
+      )}`;
       const confirmed = typeof window === "undefined" || typeof window.confirm !== "function" || window.confirm(message);
       if (!confirmed) return false;
       await this.plugin.startWorkbenchGeneration(this.selectedFolder, plan);

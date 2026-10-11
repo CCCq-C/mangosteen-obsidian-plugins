@@ -167,6 +167,26 @@ assert.deepStrictEqual(completed.output, {
   concatError: "",
 });
 
+const completedSelectedShot = deriveWorkbenchState({
+  project: {
+    folder: "山竹视频复刻/可重做",
+    title: "可重做",
+    status: "completed",
+    statusText: "全部镜头已生成并拼接为最终成片",
+    finalVideoPath: "山竹视频复刻/可重做/04-最终成片/最终成片.mp4",
+    shots: [{ id: "001", status: "已完成", videoPath: "001.mp4" }],
+  },
+  request: { confirmed: false, shots: [{ id: "001" }] },
+  generationQueue: {
+    status: "completed",
+    shots: [{ id: "001", status: "completed" }],
+  },
+  nowMs,
+});
+assert.strictEqual(completedSelectedShot.locked, false, "a completed selected-shot queue must unlock the draft");
+assert.strictEqual(completedSelectedShot.canGenerate, true, "a completed shot must remain editable and regeneratable");
+assert.deepStrictEqual(completedSelectedShot.lockedShotIds, []);
+
 const legacy = deriveWorkbenchState({
   project: { folder: "山竹视频复刻/旧项目", status: "analysis_ready", productAssets: null },
   request: { version: 2, confirmed: false, scenes: [], shots: [] },
