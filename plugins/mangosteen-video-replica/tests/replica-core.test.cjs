@@ -105,6 +105,16 @@ assert.deepStrictEqual(requestV3.shots[0].timeline, [{
   camera: "",
   environment: "",
 }]);
+const migratedLegacyV4 = core.normalizeGenerationRequest({
+  ...requestV3,
+  version: 4,
+  confirmed: true,
+  shots: requestV3.shots.map((shot) => ({ ...shot, legacyFrameMode: true })),
+});
+assert.strictEqual(migratedLegacyV4.shots[0].legacyFrameMode, true);
+assert.strictEqual(migratedLegacyV4.shots[0].imagePrompt, requestV3.shots[0].imagePrompt);
+assert.strictEqual(migratedLegacyV4.shots[0].lastImagePrompt, requestV3.shots[0].lastImagePrompt);
+assert.strictEqual(migratedLegacyV4.shots[0].videoPrompt, requestV3.shots[0].videoPrompt);
 assert.throws(
   () => core.normalizeGenerationRequest({ ...requestV3Input, shots: [{ ...requestV3Input.shots[0], productIds: ["missing"] }] }),
   /找不到产品 ID.*missing/,
@@ -151,6 +161,26 @@ const fractionalAnalysisDraft = core.buildGenerationDraft({ width: 1080, height:
 }, { videoModel: "MiniMax-H3", resolution: "768p" });
 assert.strictEqual(fractionalAnalysisDraft.shots[0].duration, 14);
 assert.strictEqual(fractionalAnalysisDraft.shots[0].timeline.at(-1).end, 14);
+const longAnalysisDraft = core.buildGenerationDraft({ width: 1080, height: 1920 }, {
+  character: analysisDraft.character,
+  products: analysisDraft.products,
+  scenes: analysisDraft.scenes,
+  shots: [{
+    ...analysisDraft.shots[0],
+    startTime: 0,
+    endTime: 20,
+    timeline: [
+      { ...analysisDraft.shots[0].timeline[0], start: 0, end: 16, action: "前半段动作" },
+      { ...analysisDraft.shots[0].timeline[0], start: 16, end: 20, action: "后半段动作" },
+    ],
+  }],
+}, { videoModel: "MiniMax-H3", resolution: "768p" });
+assert.strictEqual(longAnalysisDraft.shots[0].duration, 15);
+assert.deepStrictEqual(
+  longAnalysisDraft.shots[0].timeline.map(({ start, end }) => [start, end]),
+  [[0, 12], [12, 15]],
+  "overlong analyzed timelines must scale all plot boundaries to the model limit",
+);
 const storyboard = core.analysisStoryboardMarkdown({ title: "测试" }, analysisDraft);
 assert.match(storyboard, /原片截图只用于分析/);
 assert.match(storyboard, /产品参考提示词/);

@@ -308,6 +308,10 @@ function createView(plugin) {
   ));
   assert(performanceInput, "per-segment performance should be editable in the workbench");
   assert.strictEqual(performanceInput.value, "自然");
+  const livePromptPreview = view.contentEl.find((element) => element.attributes["aria-label"] === "最终视频提示词预览");
+  performanceInput.value = "紧张低声说话";
+  await performanceInput.dispatch("input");
+  assert.match(livePromptPreview.value, /紧张低声说话/, "the final prompt preview must update before paid confirmation");
   const addSegmentButton = view.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "在后面添加");
   await addSegmentButton.dispatch("click");
   assert.strictEqual(view.draft.shots[0].timeline.length, 3);
@@ -468,6 +472,9 @@ function createView(plugin) {
   assert.strictEqual(v1View.draft.version, 4, "v1 drafts must migrate in memory before the timeline editor opens");
   assert.strictEqual(v1View.draft.shots[0].timeline.length, 1);
   assert.strictEqual(v1View.draft.shots[0].sceneId, "legacy-scene-001");
+  assert.strictEqual(v1View.draft.shots[0].legacyFrameMode, true, "migrated legacy drafts must preserve their original frame-generation route");
+  assert.strictEqual(v1View.draft.shots[0].imagePrompt, "人物在明亮客厅走入画面");
+  assert.strictEqual(v1View.draft.shots[0].videoPrompt, "人物走入画面");
   await v1View.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "分镜").dispatch("click");
   const v1Action = v1View.contentEl.find((element) => element.dataset.section === "timeline" && element.dataset.field === "action");
   v1Action.value = "用户修改后的旧版动作";

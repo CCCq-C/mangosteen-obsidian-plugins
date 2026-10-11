@@ -132,7 +132,9 @@ function queuedShots(plan) {
 
 function verifyQueuedShot(shot) {
   const signature = String(shot?.confirmedPayloadSignature || "");
-  if (!signature) return;
+  if (!signature) {
+    throw new Error("队列缺少确认签名；系统不会提交付费任务，请重新预览并确认。");
+  }
   const payload = clone(shot);
   const context = clone(payload.generationContext);
   delete payload.generationContext;
@@ -155,7 +157,7 @@ function createGenerationQueue(confirmedPlan, { activeQueues = [], now = new Dat
   }
   const createdAt = String(now || new Date().toISOString());
   const queue = {
-    version: 1,
+    version: 2,
     queueId: sha256({ planId: confirmedPlan.planId, createdAt }),
     planId: confirmedPlan.planId,
     createdAt,

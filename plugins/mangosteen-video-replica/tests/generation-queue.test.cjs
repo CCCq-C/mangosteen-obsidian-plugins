@@ -194,6 +194,17 @@ for (const changed of [
   assert.strictEqual(tamperedQueue.shots[0].status, "failed");
   assert.match(tamperedQueue.shots[0].error, /队列内容已变化.*不会提交付费任务/);
 
+  const unsignedQueue = createGenerationQueue(confirmedBatch, { now: "2026-10-11T00:00:02.000Z" });
+  delete unsignedQueue.shots[0].confirmedPayloadSignature;
+  let unsignedPaidCalls = 0;
+  await runGenerationQueue(unsignedQueue, async () => {
+    unsignedPaidCalls += 1;
+    return { videoPath: "should-not-run.mp4" };
+  });
+  assert.strictEqual(unsignedPaidCalls, 1, "an unsigned shot must fail before paid submission while later signed shots may continue");
+  assert.strictEqual(unsignedQueue.shots[0].status, "failed");
+  assert.match(unsignedQueue.shots[0].error, /缺少确认签名.*不会提交付费任务/);
+
   const callOrder = [];
   const finished = await runGenerationQueue(queue, async (shot, context) => {
     callOrder.push(shot.id);

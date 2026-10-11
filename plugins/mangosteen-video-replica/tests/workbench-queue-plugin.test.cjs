@@ -19,6 +19,7 @@ Module._load = function patchedLoad(request, parent, isMain) {
 };
 
 const ReplicaPlugin = require("../main.js");
+const { confirmGenerationPlan, createGenerationQueue } = require("../generation-queue.cjs");
 
 function request() {
   return {
@@ -397,7 +398,7 @@ function request() {
     "Seedance must receive the shared character, scene, and product assets directly",
   );
 
-  async function runLegacyReferenceCase(model) {
+  async function runLegacyReferenceCase(model, requestVersion = 3, legacyFrameMode = false) {
     const caseFolder = `山竹视频复刻/旧版参考-${model}`;
     const caseRoot = path.join(vault, ...caseFolder.split("/"));
     fs.mkdirSync(path.join(caseRoot, ".work"), { recursive: true });
@@ -423,10 +424,11 @@ function request() {
       imagePrompt: "旧版首帧提示词",
       lastImagePrompt: "旧版尾帧提示词",
       effectiveVideoPrompt: "旧版已确认提示词",
+      legacyFrameMode,
     }, {
       queueId: `legacy-queue-${model}`,
       planId: `legacy-plan-${model}`,
-      requestVersion: 3,
+      requestVersion,
       character: { id: "hero", prompt: "固定人物三视图", voiceProfile: "固定女声" },
       products: [{ id: "phone", prompt: "银色手机" }],
       scenes: [{ id: "room", prompt: "明亮客厅" }],
@@ -442,6 +444,9 @@ function request() {
   const legacySeedanceCalls = await runLegacyReferenceCase("seedance-2.5");
   assert.strictEqual(legacySeedanceCalls.frames, 2, "legacy Seedance queues must keep their confirmed first and last frame flow");
   assert.strictEqual(legacySeedanceCalls.options.referenceImageFiles.length, 2);
+  const migratedLegacyCalls = await runLegacyReferenceCase("MiniMax-H3", 4, true);
+  assert.strictEqual(migratedLegacyCalls.frames, 2, "migrated v4 legacy shots must retain their original first/last frame semantics");
+  assert(migratedLegacyCalls.options.lastImageFile);
   plugin.resolveQueueGenerationRuntime = directRuntimeResolver;
 
   const recoverProject = JSON.parse(fs.readFileSync(path.join(root, "project.json")));
@@ -450,19 +455,13 @@ function request() {
   recoverShot.status = "正在生成视频";
   recoverShot.videoTaskId = "video-task";
   fs.writeFileSync(path.join(root, "project.json"), JSON.stringify(recoverProject));
-  const recoverQueue = {
-    ...JSON.parse(JSON.stringify(persistedQueue)),
-    queueId: "recover-queue",
-    planId: directPlan.planId,
-    status: "processing",
-    stopRequested: false,
-    character: directPlan.character,
-    products: directPlan.products,
-    scenes: directPlan.scenes,
-    settings: directPlan.settings,
-    selectedShotIds: ["002"],
-    shots: [{ ...directPlan.shots[0], status: "processing", error: "", result: null }],
-  };
+  const recoverQueue = createGenerationQueue(
+    confirmGenerationPlan(directPlan, request()),
+    { now: "2026-10-11T00:20:00.000Z" },
+  );
+  recoverQueue.queueId = "recover-queue";
+  recoverQueue.status = "processing";
+  recoverQueue.shots[0].status = "processing";
   fs.writeFileSync(path.join(root, ".work/generation-queue.json"), JSON.stringify(recoverQueue));
   plugin.queueApis.delete(folder);
   submittedVideoOptions.length = 0;

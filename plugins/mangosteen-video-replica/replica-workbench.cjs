@@ -59,6 +59,7 @@ function editableRequest(request) {
         productIds: [],
         duration,
         timeline: legacyTimeline({ ...shot, duration }),
+        legacyFrameMode: true,
       };
     });
   } else if (version >= 2 && version < 4 && Array.isArray(next.scenes)) {
@@ -69,6 +70,7 @@ function editableRequest(request) {
       ...shot,
       productIds: Array.isArray(shot.productIds) ? shot.productIds : [],
       timeline: Array.isArray(shot.timeline) && shot.timeline.length ? shot.timeline : legacyTimeline(shot),
+      legacyFrameMode: true,
     }));
   }
   return next;
@@ -131,6 +133,7 @@ function createVideoReplicaWorkbenchView(ItemView) {
     this.selectedShotIds = new Set();
     this.stopButtons = [];
     this.stopPending = false;
+    this.promptPreviewElements = new Map();
     this.generationModelCatalog = { imageModels: [], videoModels: [] };
     this.generationCatalogStatus = "idle";
     this.generationCatalogError = "";
@@ -266,6 +269,7 @@ function createVideoReplicaWorkbenchView(ItemView) {
     this.saveStatusElements = [];
     this.confirmButtons = [];
     this.stopButtons = [];
+    this.promptPreviewElements = new Map();
 
     const frame = this.contentEl.createDiv({ cls: "mangosteen-replica-frame" });
     this.renderToolbar(frame);
@@ -592,6 +596,7 @@ function createVideoReplicaWorkbenchView(ItemView) {
       } catch (error) {
         preview.value = `时间轴待修正：${String(error?.message || error)}`;
       }
+      this.promptPreviewElements.set(index, preview);
 
       if (projectShot.error) card.createDiv({ cls: "mangosteen-replica-error", text: projectShot.error });
     });
@@ -729,6 +734,9 @@ function createVideoReplicaWorkbenchView(ItemView) {
         this.dirty = true;
         this.feedback = "";
         this.syncSaveState();
+        if (target.section === "timeline") this.refreshPromptPreview(target.shotIndex);
+        else if (target.section === "shot" && target.field === "duration") this.refreshPromptPreview(target.index);
+        else if (target.section === "character" && target.field === "voiceProfile") this.refreshAllPromptPreviews();
         this.renderSignature = this.buildRenderSignature();
         if (typeof options.onChange === "function") await options.onChange(nextValue, control);
       } catch (error) {
@@ -736,6 +744,30 @@ function createVideoReplicaWorkbenchView(ItemView) {
       }
     });
     return control;
+  }
+
+  refreshPromptPreview(shotIndex) {
+    const preview = this.promptPreviewElements.get(Number(shotIndex));
+    const shot = this.draft?.shots?.[Number(shotIndex)];
+    if (!preview || !shot) return;
+    const timeline = list(shot.timeline).length ? list(shot.timeline) : legacyTimeline(shot);
+    try {
+      preview.value = resolveVideoPrompt({
+        timeline,
+        duration: shot.duration,
+        videoPrompt: shot.videoPrompt,
+        videoPromptOverride: shot.videoPromptOverride,
+        dialogue: shot.dialogue,
+        voiceProfile: this.draft?.character?.voiceProfile,
+        voiceDirection: shot.voiceDirection,
+      });
+    } catch (error) {
+      preview.value = `时间轴待修正：${String(error?.message || error)}`;
+    }
+  }
+
+  refreshAllPromptPreviews() {
+    for (const shotIndex of this.promptPreviewElements.keys()) this.refreshPromptPreview(shotIndex);
   }
 
   createButton(parent, label, action, className = "", disabled = false) {

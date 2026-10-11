@@ -36,6 +36,7 @@ const WORKBENCH_SHOT_FIELDS = [
   "lastImagePrompt",
   "videoPrompt",
   "videoPromptOverride",
+  "legacyFrameMode",
 ];
 
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
@@ -832,8 +833,14 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       for (const id of lockedIds) {
         const currentShot = currentById.get(id);
         const nextShot = nextById.get(id);
-        const snapshot = (shot) => Object.fromEntries(WORKBENCH_SHOT_FIELDS.map((field) => [field, shot?.[field]]));
-        if (!currentShot || !nextShot || JSON.stringify(snapshot(currentShot)) !== JSON.stringify(snapshot(nextShot))) {
+        const snapshot = (shot, legacyDefault) => ({
+          ...Object.fromEntries(WORKBENCH_SHOT_FIELDS.map((field) => [field, shot?.[field]])),
+          productIds: Array.isArray(shot?.productIds) ? shot.productIds : [],
+          legacyFrameMode: shot?.legacyFrameMode === true || legacyDefault,
+        });
+        if (!currentShot || !nextShot
+          || JSON.stringify(snapshot(currentShot, Number(normalizedCurrent.version) < 4))
+            !== JSON.stringify(snapshot(nextShot, Number(savedRequest.version) < 4))) {
           throw new Error(`镜头 ${id} 正在队列中，完成或停止前不能修改。`);
         }
       }
@@ -1781,7 +1788,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     });
     const latestProject = this.readJson(paths.projectPath);
     const existing = (latestProject.shots || []).find((item) => String(item.id) === String(shot.id)) || {};
-    const structuredTimeline = Number(context.requestVersion) >= 4
+    const structuredTimeline = Number(context.requestVersion) >= 4 && shot.legacyFrameMode !== true
       && Array.isArray(shot.timeline) && shot.timeline.length > 0;
     const modelFamily = generationPolicy.classifyModel(model);
     const directReferenceMode = structuredTimeline && modelFamily === "seedance";

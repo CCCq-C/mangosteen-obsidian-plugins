@@ -152,6 +152,11 @@ function normalizeGenerationRequest(input) {
         const title = safeSegment(shot?.title, `镜头-${id}`);
         const duration = normalizeVideoDuration(shot?.duration, model);
         if (version >= 4) {
+          const legacyFrameMode = shot?.legacyFrameMode === true;
+          const imagePrompt = cleanText(shot?.imagePrompt || shot?.prompt);
+          if (legacyFrameMode && !imagePrompt) {
+            throw validationError(`镜头 ${id} 缺少旧版首帧提示词。`, `shots.${index}.imagePrompt`);
+          }
           return {
             id,
             title,
@@ -159,6 +164,12 @@ function normalizeGenerationRequest(input) {
             productIds: shotProductIds,
             duration,
             timeline: withValidationPath(`shots.${index}.timeline`, () => normalizeTimeline(shot?.timeline, duration)),
+            legacyFrameMode,
+            ...(legacyFrameMode ? {
+              imagePrompt,
+              lastImagePrompt: cleanText(shot?.lastImagePrompt),
+              videoPrompt: cleanText(shot?.videoPrompt || shot?.prompt),
+            } : {}),
             videoPromptOverride: cleanText(shot?.videoPromptOverride),
           };
         }
@@ -266,8 +277,14 @@ function buildGenerationDraft(project, analysis, settings = {}) {
       const rawDuration = Number(shot?.endTime) - Number(shot?.startTime) || Number(shot?.duration) || 4;
       const duration = normalizeVideoDuration(rawDuration, videoModel);
       let timeline = Array.isArray(shot?.timeline) ? shot.timeline.map((segment) => ({ ...segment })) : legacyTimeline({ ...shot, duration });
-      if (timeline.length && Math.abs(Number(timeline.at(-1)?.end) - Number(rawDuration)) <= 0.001) {
-        timeline[timeline.length - 1].end = duration;
+      const timelineEnd = Number(timeline.at(-1)?.end);
+      if (timeline.length && Number.isFinite(timelineEnd) && timelineEnd > 0 && Math.abs(timelineEnd - duration) > 0.001) {
+        const scale = duration / timelineEnd;
+        timeline = timeline.map((segment, index) => ({
+          ...segment,
+          start: Number((Number(segment.start) * scale).toFixed(3)),
+          end: index === timeline.length - 1 ? duration : Number((Number(segment.end) * scale).toFixed(3)),
+        }));
       }
       timeline = normalizeTimeline(timeline, duration);
       return {

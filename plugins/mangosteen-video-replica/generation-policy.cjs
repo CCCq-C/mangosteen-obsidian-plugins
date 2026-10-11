@@ -72,6 +72,7 @@ function createGenerationFingerprint({ character = {}, scene = {}, products = []
     })),
     imagePrompt: clean(shot.imagePrompt),
     lastImagePrompt: clean(shot.lastImagePrompt),
+    legacyFrameMode: shot.legacyFrameMode === true,
     effectiveVideoPrompt: resolveVideoPrompt({
       timeline: shot.timeline,
       duration: shot.duration,

@@ -19,8 +19,9 @@ const { createReplicaLogicApi } = require("./replica-logic-api.cjs");
 - `shot.videoPromptOverride`：兼容旧项目的完整视频提示词覆盖值；v4 工作台不再提供这个编辑入口。
 - `plan.shots[].effectiveVideoPrompt`：根据时间段、固定人物和声音要求编译出的最终提示词。UI 只读预览，实际提交必须使用同一份内容。
 - `queue.shots[].status`：`queued`、`processing`、`completed`、`failed`、`stopped`。
+- `queue.shots[].confirmedPayloadSignature`：确认后生成的完整负载签名；缺失或不匹配时不得调用付费接口，用户需要重新预览确认。
 
-v1-v3 项目仍可读取；进入编辑器后会在内存中补成一个覆盖整段时长的时间段。新保存的草案使用 v4。
+v1-v3 项目仍可读取；进入编辑器后会在内存中补成时间段。旧首尾帧字段会随 `legacyFrameMode` 一起保留，保存后仍走原有首尾帧流程；新分析产生的 v4 草案才使用新版模型自适应参考图流程。
 
 ## 单镜头与批量流程
 
