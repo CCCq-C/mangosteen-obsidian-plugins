@@ -128,11 +128,18 @@ function atomicWriteJson({ resolveSafe, relativePath, value } = {}) {
     throw new Error("项目 JSON 临时路径不安全，已拒绝写入。");
   }
 
+  let temporaryOwned = false;
   try {
-    fs.writeFileSync(temporaryAbsolutePath, `${content}\n`, { flag: "wx" });
+    const descriptor = fs.openSync(temporaryAbsolutePath, "wx");
+    temporaryOwned = true;
+    try {
+      fs.writeFileSync(descriptor, `${content}\n`);
+    } finally {
+      fs.closeSync(descriptor);
+    }
     fs.renameSync(temporaryAbsolutePath, absolutePath);
   } finally {
-    fs.rmSync(temporaryAbsolutePath, { force: true });
+    if (temporaryOwned) fs.rmSync(temporaryAbsolutePath, { force: true });
   }
   return relativePath;
 }
@@ -175,7 +182,8 @@ function archiveCurrentArtifact({ resolveSafe, projectFolder, shotId, kind, now 
   if (fs.lstatSync(archivedAbsolutePath, { throwIfNoEntry: false })) {
     throw new Error("镜头历史文件已存在，已拒绝覆盖。");
   }
-  fs.renameSync(currentAbsolutePath, archivedAbsolutePath);
+  fs.linkSync(currentAbsolutePath, archivedAbsolutePath);
+  fs.unlinkSync(currentAbsolutePath);
   return archivedRelativePath;
 }
 

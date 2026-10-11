@@ -1,4 +1,5 @@
 const assert = require("assert");
+const crypto = require("crypto");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -165,6 +166,34 @@ try {
     "failed atomic writes must clean up their temporary file",
   );
 
+  const collisionPath = `${projectFolder}/.mangosteen/collision.json`;
+  storage.atomicWriteJson({ resolveSafe: layoutVault.resolveSafe, relativePath: collisionPath, value: { version: "original" } });
+  const collisionOriginalBytes = fs.readFileSync(layoutVault.resolveSafe(collisionPath), "utf8");
+  const collidingUuid = "00000000-0000-4000-8000-000000000000";
+  const collidingTemporaryPath = `${collisionPath}.tmp-${process.pid}-${collidingUuid}`;
+  fs.writeFileSync(layoutVault.resolveSafe(collidingTemporaryPath), "temporary-file-owned-by-another-writer");
+  const originalRandomUuid = crypto.randomUUID;
+  crypto.randomUUID = () => collidingUuid;
+  let collisionError;
+  try {
+    storage.atomicWriteJson({ resolveSafe: layoutVault.resolveSafe, relativePath: collisionPath, value: { version: "new" } });
+  } catch (error) {
+    collisionError = error;
+  } finally {
+    crypto.randomUUID = originalRandomUuid;
+  }
+  assert.strictEqual(collisionError?.code, "EEXIST", "a claimed temp name must fail without claiming ownership");
+  assert.strictEqual(
+    fs.readFileSync(layoutVault.resolveSafe(collidingTemporaryPath), "utf8"),
+    "temporary-file-owned-by-another-writer",
+    "a temp collision must not delete another writer's file",
+  );
+  assert.strictEqual(
+    fs.readFileSync(layoutVault.resolveSafe(collisionPath), "utf8"),
+    collisionOriginalBytes,
+    "a temp collision must leave the original JSON intact",
+  );
+
   const artifact = storage.shotArtifactPaths(projectFolder, "008");
   fs.mkdirSync(path.dirname(layoutVault.resolveSafe(artifact.firstFrame)), { recursive: true });
   fs.writeFileSync(layoutVault.resolveSafe(artifact.firstFrame), "current-frame");
@@ -178,6 +207,51 @@ try {
   assert.strictEqual(archived, `${projectFolder}/.mangosteen/history/20261011-070051-000/008/首帧.png`);
   assert.strictEqual(fs.existsSync(layoutVault.resolveSafe(artifact.firstFrame)), false);
   assert.strictEqual(fs.readFileSync(layoutVault.resolveSafe(archived), "utf8"), "current-frame");
+
+  const archiveRaceVault = createVault();
+  const archiveRaceArtifact = storage.shotArtifactPaths(projectFolder, "008");
+  fs.mkdirSync(path.dirname(archiveRaceVault.resolveSafe(archiveRaceArtifact.video)), { recursive: true });
+  fs.writeFileSync(archiveRaceVault.resolveSafe(archiveRaceArtifact.video), "current-video-must-survive");
+  const archiveRaceDestination = `${projectFolder}/.mangosteen/history/20261011-070051-000/008/视频.mp4`;
+  const archiveRaceDestinationAbsolute = path.join(archiveRaceVault.vault, ...archiveRaceDestination.split("/"));
+  const originalLstatSync = fs.lstatSync;
+  let destinationChecks = 0;
+  fs.lstatSync = function createHistoryCollisionAfterCheck(target, options) {
+    if (path.resolve(String(target)) === path.resolve(archiveRaceDestinationAbsolute)) {
+      destinationChecks += 1;
+      const existing = originalLstatSync.call(this, target, options);
+      if (destinationChecks === 2 && !existing) {
+        fs.writeFileSync(archiveRaceDestinationAbsolute, "history-created-by-racing-writer");
+      }
+      return existing;
+    }
+    return originalLstatSync.call(this, target, options);
+  };
+  let archiveRaceError;
+  try {
+    storage.archiveCurrentArtifact({
+      resolveSafe: archiveRaceVault.resolveSafe,
+      projectFolder,
+      shotId: "008",
+      kind: "video",
+      now: new Date("2026-10-11T07:00:51.000Z"),
+    });
+  } catch (error) {
+    archiveRaceError = error;
+  } finally {
+    fs.lstatSync = originalLstatSync;
+  }
+  assert.strictEqual(archiveRaceError?.code, "EEXIST", "a racing history destination must be rejected without replacement");
+  assert.strictEqual(
+    fs.readFileSync(archiveRaceVault.resolveSafe(archiveRaceArtifact.video), "utf8"),
+    "current-video-must-survive",
+    "the current artifact must remain when history reservation collides",
+  );
+  assert.strictEqual(
+    fs.readFileSync(archiveRaceVault.resolveSafe(archiveRaceDestination), "utf8"),
+    "history-created-by-racing-writer",
+    "the racing historical file must not be overwritten",
+  );
 
   const missingVault = createVault();
   assert.strictEqual(storage.archiveCurrentArtifact({
