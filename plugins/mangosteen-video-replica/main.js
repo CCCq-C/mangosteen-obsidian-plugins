@@ -1937,7 +1937,9 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     for (const shot of Array.isArray(project?.shots) ? project.shots : []) {
       if (shot?.videoPath) this.checkedProjectPath(projectFolder, shot.videoPath);
     }
-    this.checkedProjectPath(projectFolder, ".work/concat.txt", { createParents: true });
+    if (Number(project?.schemaVersion) !== 6) {
+      this.checkedProjectPath(projectFolder, ".work/concat.txt", { createParents: true });
+    }
     this.checkedProjectPath(projectFolder, "04-最终成片/最终成片.mp4", { createParents: true });
     return workflow.concatProjectVideos({ project, vaultPath: this.vaultPath(), pluginRoot: this.pluginRoot });
   }

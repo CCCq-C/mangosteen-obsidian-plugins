@@ -373,6 +373,60 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   assert.strictEqual(fs.readFileSync(path.join(versionSixRoot, "03-分镜/001/视频.mp4"), "utf8"), "artifact-one");
   assert.strictEqual(fs.readFileSync(path.join(versionSixRoot, "03-分镜/002/视频.mp4"), "utf8"), "artifact-two");
 
+  const pluginConcatSuccess = path.join(vault, "fake-plugin-concat-success");
+  const pluginConcatFailure = path.join(vault, "fake-plugin-concat-failure");
+  fs.writeFileSync(pluginConcatSuccess, `#!/usr/bin/env node
+const fs = require("fs");
+fs.writeFileSync(process.argv.at(-1), "plugin-joined-video");
+`);
+  fs.writeFileSync(pluginConcatFailure, `#!/usr/bin/env node
+process.stderr.write("injected plugin concat failure");
+process.exit(1);
+`);
+  fs.chmodSync(pluginConcatSuccess, 0o755);
+  fs.chmodSync(pluginConcatFailure, 0o755);
+  const oldPluginConcatFfmpeg = process.env.MANGOSTEEN_FFMPEG;
+  try {
+    process.env.MANGOSTEEN_FFMPEG = pluginConcatSuccess;
+    const pluginV6Final = await plugin.concatProject(movedVersionSixProject);
+    assert.strictEqual(pluginV6Final, `${versionSixFolder}/04-最终成片/最终成片.mp4`);
+    assert.strictEqual(fs.readFileSync(path.join(versionSixRoot, "04-最终成片/最终成片.mp4"), "utf8"), "plugin-joined-video");
+    assert.strictEqual(fs.existsSync(path.join(versionSixRoot, ".work")), false, "plugin v6 concat success must not create legacy .work");
+    assert.strictEqual(
+      fs.readdirSync(versionSixMetadata).some((name) => name.startsWith("concat-")),
+      false,
+      "plugin v6 concat success must remove its .mangosteen manifest and temp file",
+    );
+
+    process.env.MANGOSTEEN_FFMPEG = pluginConcatFailure;
+    await assert.rejects(() => plugin.concatProject(movedVersionSixProject), /injected plugin concat failure/);
+    assert.strictEqual(fs.existsSync(path.join(versionSixRoot, ".work")), false, "plugin v6 concat failure must not create legacy .work");
+    assert.strictEqual(
+      fs.readdirSync(versionSixMetadata).some((name) => name.startsWith("concat-")),
+      false,
+      "plugin v6 concat failure must remove its .mangosteen manifest and temp file",
+    );
+
+    const legacyConcatFolder = "山竹视频复刻/旧版拼接";
+    const legacyConcatRoot = path.join(vault, ...legacyConcatFolder.split("/"));
+    const legacyClips = ["001", "002"].map((id) => `${legacyConcatFolder}/03-视频片段/镜头-${id}.mp4`);
+    for (const clip of legacyClips) {
+      const absoluteClip = path.join(vault, ...clip.split("/"));
+      fs.mkdirSync(path.dirname(absoluteClip), { recursive: true });
+      fs.writeFileSync(absoluteClip, clip);
+    }
+    process.env.MANGOSTEEN_FFMPEG = pluginConcatSuccess;
+    const legacyFinal = await plugin.concatProject({
+      folder: legacyConcatFolder,
+      shots: legacyClips.map((videoPath) => ({ videoPath })),
+    });
+    assert.strictEqual(legacyFinal, `${legacyConcatFolder}/04-最终成片/最终成片.mp4`);
+    assert.strictEqual(fs.existsSync(path.join(legacyConcatRoot, ".work/concat.txt")), true, "legacy concat must keep using .work");
+  } finally {
+    if (oldPluginConcatFfmpeg === undefined) delete process.env.MANGOSTEEN_FFMPEG;
+    else process.env.MANGOSTEEN_FFMPEG = oldPluginConcatFfmpeg;
+  }
+
   plugin.saveProject(versionSixFolder, {
     ...movedVersionSixProject,
     status: "generating",
