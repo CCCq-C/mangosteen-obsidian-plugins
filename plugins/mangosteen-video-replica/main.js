@@ -513,13 +513,16 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     try {
       this.currentWorkbenchLock(paths);
       const catalog = await this.refreshGenerationModelCatalog();
-      const selection = this.resolveGenerationSelection(catalog);
-      if (!selection.imageModel || !selection.videoModel) {
-        throw new Error("当前账号没有可用的图片或视频模型，请打开模型选择后重试。");
-      }
-      await this.setGenerationSelection(selection.imageModel, selection.videoModel, catalog);
-
       const { request } = this.currentWorkbenchLock(paths);
+      const requestedImageModel = String(request.settings?.imageModel || "").trim();
+      const requestedVideoModel = String(request.settings?.videoModel || "").trim();
+      const exact = (models, requested) => models.find((model) => model === requested)
+        || models.find((model) => model.toLowerCase() === requested.toLowerCase());
+      const imageModel = exact(Array.isArray(catalog?.imageModels) ? catalog.imageModels : [], requestedImageModel);
+      const videoModel = exact(Array.isArray(catalog?.videoModels) ? catalog.videoModels : [], requestedVideoModel);
+      if (!imageModel) throw this.unavailableGenerationModel("image", requestedImageModel, catalog?.imageModels || []);
+      if (!videoModel) throw this.unavailableGenerationModel("video", requestedVideoModel, catalog?.videoModels || []);
+      const selection = { imageModel, videoModel };
       request.settings = Object.assign({}, request.settings, selection);
       request.confirmed = true;
       writeJson(paths.requestPath, request);

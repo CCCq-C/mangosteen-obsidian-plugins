@@ -83,6 +83,10 @@ function createVideoReplicaWorkbenchView(ItemView) {
     this.confirmPending = false;
     this.stopButtons = [];
     this.stopPending = false;
+    this.generationModelCatalog = { imageModels: [], videoModels: [] };
+    this.generationCatalogStatus = "idle";
+    this.generationCatalogError = "";
+    this.generationCatalogPromise = null;
   }
 
   getViewType() { return VIEW_TYPE; }
@@ -184,6 +188,12 @@ function createVideoReplicaWorkbenchView(ItemView) {
       projects: this.projects.map(({ folder, title }) => ({ folder, title })),
       refreshFeedback: this.refreshFeedback,
       selectedFolder: this.selectedFolder,
+      generationCatalog: {
+        status: this.generationCatalogStatus,
+        error: this.generationCatalogError,
+        imageModels: this.generationModelCatalog.imageModels,
+        videoModels: this.generationModelCatalog.videoModels,
+      },
       state: stateSignature(this.viewModel),
     });
   }
@@ -224,7 +234,13 @@ function createVideoReplicaWorkbenchView(ItemView) {
 
   renderToolbar(parent) {
     const toolbar = parent.createDiv({ cls: "mangosteen-replica-toolbar" });
-    const projectGroup = toolbar.createDiv({ cls: "mangosteen-replica-toolbar-group" });
+    const primary = toolbar.createDiv({ cls: "mangosteen-replica-toolbar-primary" });
+    const brand = primary.createDiv({ cls: "mangosteen-replica-brand" });
+    brand.createEl("span", { cls: "mangosteen-replica-brand-mark", text: "M" });
+    const brandCopy = brand.createDiv();
+    brandCopy.createEl("strong", { text: "山竹视频复刻" });
+    brandCopy.createEl("small", { text: "MANGOSTEEN STUDIO" });
+    const projectGroup = primary.createDiv({ cls: "mangosteen-replica-toolbar-group" });
     projectGroup.createEl("span", { cls: "mangosteen-replica-eyebrow", text: "项目" });
     const projectSelect = projectGroup.createEl("select", {
       cls: "mangosteen-replica-project-select",
@@ -249,9 +265,7 @@ function createVideoReplicaWorkbenchView(ItemView) {
 
     const actions = toolbar.createDiv({ cls: "mangosteen-replica-toolbar-actions" });
     this.createButton(actions, "新建", () => this.plugin.openPrepareModal(), "mod-cta");
-    this.createButton(actions, "刷新", () => this.refresh({ force: true }));
-    this.createButton(actions, "分析模型", () => this.plugin.openAnalysisModelModal());
-    this.createButton(actions, "生成模型", () => this.plugin.openGenerationModelModal());
+    this.createButton(actions, "刷新", () => this.refreshWorkbench());
     const status = actions.createDiv({ cls: "mangosteen-replica-status-pill" });
     status.createEl("span", { text: text(this.viewModel.statusText, text(this.viewModel.status, "未开始")) });
     this.widthLabelEl = status.createEl("span", { cls: "mangosteen-replica-width-label", text: "" });
@@ -396,37 +410,42 @@ function createVideoReplicaWorkbenchView(ItemView) {
 
   renderShots(parent) {
     this.renderPageTitle(parent, "分镜编辑", "调整内容和顺序；保存前仅修改内存草案。");
-    const shotGrid = parent.createDiv({ cls: "mangosteen-replica-shot-grid" });
+    const shotGrid = parent.createDiv({ cls: "mangosteen-replica-shot-list" });
     list(this.draft?.shots).forEach((shot, index) => {
       const projectShot = this.viewModel.shots[index] || {};
       const card = shotGrid.createDiv({ cls: `mangosteen-replica-shot-card${projectShot.status === "失败" ? " is-failed" : ""}` });
-      const cardHeader = card.createDiv({ cls: "mangosteen-replica-card-heading" });
-      cardHeader.createEl("strong", { text: `${text(shot.id, String(index + 1).padStart(3, "0"))} · ${text(shot.title, "未命名分镜")}` });
-      cardHeader.createEl("span", { cls: "mangosteen-replica-shot-status", text: text(projectShot.status, "草案") });
-
-      this.createDraftControl(card, "标题", "input", shot.title, { section: "shot", index, field: "title" });
-      const formRow = card.createDiv({ cls: "mangosteen-replica-form-row" });
-      this.createDraftControl(formRow, "时长（秒）", "input", shot.duration, {
+      const summaryRow = card.createDiv({ cls: "mangosteen-replica-shot-summary-row" });
+      const identity = summaryRow.createDiv({ cls: "mangosteen-replica-shot-identity" });
+      identity.createEl("strong", { text: text(shot.id, String(index + 1).padStart(3, "0")) });
+      identity.createEl("span", { cls: "mangosteen-replica-shot-status", text: text(projectShot.status, "草案") });
+      this.createDraftControl(summaryRow, "标题", "input", shot.title, {
+        section: "shot", index, field: "title",
+      }, { className: "is-title" });
+      this.createDraftControl(summaryRow, "时长（秒）", "input", shot.duration, {
         section: "shot", index, field: "duration",
-      }, { inputType: "number", min: "2", max: "15" });
-      this.createDraftControl(formRow, "场景", "select", shot.sceneId, {
+      }, { inputType: "number", min: "2", max: "15", className: "is-duration" });
+      this.createDraftControl(summaryRow, "场景", "select", shot.sceneId, {
         section: "shot", index, field: "sceneId",
-      }, { options: list(this.draft?.scenes).map((scene) => [scene.id, scene.id]) });
-
-      const details = this.createDetails(card, `shot-${shot.id || index}`, "镜头内容", true);
-      this.createDraftControl(details, "剧情 / 动作", "textarea", shot.plot, { section: "shot", index, field: "plot" });
-      this.createDraftControl(details, "台词", "textarea", shot.dialogue, { section: "shot", index, field: "dialogue" });
-      this.createDraftControl(details, "情绪与语调（语速、重音、停顿）", "textarea", shot.voiceDirection, { section: "shot", index, field: "voiceDirection" });
-      this.createDraftControl(details, "环境", "textarea", shot.environment, { section: "shot", index, field: "environment" });
-      this.createDraftControl(details, "镜头语言", "textarea", shot.camera, { section: "shot", index, field: "camera" });
-      this.createDraftControl(details, "首帧提示词", "textarea", shot.imagePrompt, { section: "shot", index, field: "imagePrompt" });
-      this.createDraftControl(details, "尾帧提示词", "textarea", shot.lastImagePrompt, { section: "shot", index, field: "lastImagePrompt" });
-      this.createDraftControl(details, "视频提示词", "textarea", shot.videoPrompt, { section: "shot", index, field: "videoPrompt" });
-
-      const cardActions = card.createDiv({ cls: "mangosteen-replica-inline-actions" });
+      }, {
+        options: list(this.draft?.scenes).map((scene) => [scene.id, scene.id]),
+        className: "is-scene",
+      });
+      const cardActions = summaryRow.createDiv({ cls: "mangosteen-replica-shot-actions" });
       this.createButton(cardActions, "上移", () => this.reorderShot(index, "up"), "", this.editingLocked() || index === 0);
       this.createButton(cardActions, "下移", () => this.reorderShot(index, "down"), "", this.editingLocked() || index === this.draft.shots.length - 1);
       if (projectShot.videoPath) this.createButton(cardActions, "打开视频", () => this.plugin.openVaultPath(projectShot.videoPath));
+
+      const details = this.createDetails(card, `shot-${shot.id || index}`, "展开镜头内容", projectShot.status === "失败");
+      const detailGrid = details.createDiv({ cls: "mangosteen-replica-shot-fields" });
+      this.createDraftControl(detailGrid, "剧情 / 动作", "textarea", shot.plot, { section: "shot", index, field: "plot" });
+      this.createDraftControl(detailGrid, "台词", "textarea", shot.dialogue, { section: "shot", index, field: "dialogue" });
+      this.createDraftControl(detailGrid, "情绪与语调（语速、重音、停顿）", "textarea", shot.voiceDirection, { section: "shot", index, field: "voiceDirection" });
+      this.createDraftControl(detailGrid, "环境", "textarea", shot.environment, { section: "shot", index, field: "environment" });
+      this.createDraftControl(detailGrid, "镜头语言", "textarea", shot.camera, { section: "shot", index, field: "camera" });
+      this.createDraftControl(detailGrid, "首帧提示词", "textarea", shot.imagePrompt, { section: "shot", index, field: "imagePrompt" });
+      this.createDraftControl(detailGrid, "尾帧提示词", "textarea", shot.lastImagePrompt, { section: "shot", index, field: "lastImagePrompt" });
+      this.createDraftControl(detailGrid, "视频提示词", "textarea", shot.videoPrompt, { section: "shot", index, field: "videoPrompt" });
+
       if (projectShot.error) card.createDiv({ cls: "mangosteen-replica-error", text: projectShot.error });
     });
     if (!list(this.draft?.shots).length) parent.createDiv({ cls: "mangosteen-replica-empty-inline", text: "当前草案没有分镜。" });
@@ -449,10 +468,19 @@ function createVideoReplicaWorkbenchView(ItemView) {
 
   renderSettings(parent) {
     this.renderPageTitle(parent, "生成设置", "调整草案使用的图片模型、视频模型和输出规格。");
+    if (this.generationCatalogStatus === "idle") void this.ensureGenerationModelCatalog();
     const card = parent.createDiv({ cls: "mangosteen-replica-card mangosteen-replica-settings" });
     const settings = this.draft?.settings || {};
-    this.createDraftControl(card, "图片模型", "input", settings.imageModel, { section: "settings", field: "imageModel" });
-    this.createDraftControl(card, "视频模型", "input", settings.videoModel, { section: "settings", field: "videoModel" });
+    const modelGrid = card.createDiv({ cls: "mangosteen-replica-model-grid" });
+    this.createModelControl(modelGrid, "图片模型", "imageModel", settings.imageModel, this.generationModelCatalog.imageModels);
+    this.createModelControl(modelGrid, "视频模型", "videoModel", settings.videoModel, this.generationModelCatalog.videoModels);
+    if (this.generationCatalogStatus === "loading") {
+      card.createEl("p", { cls: "mangosteen-replica-muted", text: "正在读取当前账号可用模型…" });
+    } else if (this.generationCatalogError) {
+      const errorRow = card.createDiv({ cls: "mangosteen-replica-model-error" });
+      errorRow.createDiv({ cls: "mangosteen-replica-error", text: `模型读取失败：${this.generationCatalogError}` });
+      this.createButton(errorRow, "重新读取", () => this.ensureGenerationModelCatalog({ force: true }));
+    }
     const row = card.createDiv({ cls: "mangosteen-replica-form-row" });
     this.createDraftControl(row, "画面比例", "select", settings.ratio, { section: "settings", field: "ratio" }, {
       options: [["9:16", "9:16"], ["16:9", "16:9"], ["1:1", "1:1"]],
@@ -460,10 +488,55 @@ function createVideoReplicaWorkbenchView(ItemView) {
     this.createDraftControl(row, "清晰度", "select", settings.resolution, { section: "settings", field: "resolution" }, {
       options: [["720p", "720p"], ["768p", "768p"], ["1080p", "1080p"]],
     });
-    const modelActions = card.createDiv({ cls: "mangosteen-replica-inline-actions" });
-    this.createButton(modelActions, "选择分析模型", () => this.plugin.openAnalysisModelModal());
-    this.createButton(modelActions, "选择生成模型", () => this.plugin.openGenerationModelModal());
     this.renderSaveRow(parent);
+  }
+
+  createModelControl(parent, labelText, field, currentValue, availableModels) {
+    const current = text(currentValue);
+    const available = [...new Set(list(availableModels).map(String).filter(Boolean))];
+    const models = current && !available.includes(current) ? [current, ...available] : available;
+    const options = models.length
+      ? models.map((model) => [model, available.includes(model) ? model : `${model} · 当前项目（不可用）`])
+      : [[current, current || "正在读取可用模型…"]];
+    return this.createDraftControl(parent, labelText, "select", current, {
+      section: "settings", field,
+    }, {
+      options,
+      disabled: this.generationCatalogStatus !== "ready" || !available.length,
+    });
+  }
+
+  ensureGenerationModelCatalog({ force = false } = {}) {
+    if (!force && this.generationCatalogStatus === "ready") return Promise.resolve(this.generationModelCatalog);
+    if (this.generationCatalogStatus === "loading" && this.generationCatalogPromise) return this.generationCatalogPromise;
+    this.generationCatalogStatus = "loading";
+    this.generationCatalogError = "";
+    this.generationCatalogPromise = Promise.resolve(this.plugin.refreshGenerationModelCatalog())
+      .then((catalog) => {
+        this.generationModelCatalog = {
+          imageModels: [...new Set(list(catalog?.imageModels).map(String).filter(Boolean))],
+          videoModels: [...new Set(list(catalog?.videoModels).map(String).filter(Boolean))],
+        };
+        this.generationCatalogStatus = "ready";
+        return this.generationModelCatalog;
+      })
+      .catch((error) => {
+        this.generationCatalogStatus = "error";
+        this.generationCatalogError = String(error?.message || error);
+        return this.generationModelCatalog;
+      })
+      .finally(() => {
+        if (this.activeTab === "settings") {
+          this.render();
+          this.renderSignature = this.buildRenderSignature();
+        }
+      });
+    return this.generationCatalogPromise;
+  }
+
+  async refreshWorkbench() {
+    if (this.activeTab === "settings") await this.ensureGenerationModelCatalog({ force: true });
+    return this.refresh({ force: true });
   }
 
   renderPageTitle(parent, title, description) {
@@ -483,6 +556,7 @@ function createVideoReplicaWorkbenchView(ItemView) {
 
   createDraftControl(parent, labelText, tagName, value, target, options = {}) {
     const label = parent.createEl("label", { cls: "mangosteen-replica-field" });
+    if (options.className) label.addClass(options.className);
     label.createEl("span", { text: labelText });
     const control = label.createEl(tagName, { attr: { "aria-label": labelText } });
     control.dataset.section = target.section;
@@ -497,8 +571,8 @@ function createVideoReplicaWorkbenchView(ItemView) {
     if (options.min) control.setAttr("min", options.min);
     if (options.max) control.setAttr("max", options.max);
     control.value = value === undefined || value === null ? "" : String(value);
-    control.disabled = this.editingLocked();
-    control.addEventListener(tagName === "select" ? "change" : "input", () => {
+    control.disabled = this.editingLocked() || Boolean(options.disabled);
+    control.addEventListener(tagName === "select" ? "change" : "input", async () => {
       const nextValue = target.field === "duration" ? Number(control.value) : control.value;
       try {
         this.draft = updateDraftField(this.draft, target, nextValue);
@@ -506,6 +580,7 @@ function createVideoReplicaWorkbenchView(ItemView) {
         this.feedback = "";
         this.syncSaveState();
         this.renderSignature = this.buildRenderSignature();
+        if (typeof options.onChange === "function") await options.onChange(nextValue, control);
       } catch (error) {
         this.setFeedback(String(error?.message || error));
       }

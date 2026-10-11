@@ -646,6 +646,26 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   assert.strictEqual(JSON.parse(fs.readFileSync(workbenchRequestPath, "utf8")).confirmed, false);
 
   fs.writeFileSync(workbenchStatePath, JSON.stringify({ status: "ready" }));
+  fs.writeFileSync(workbenchRequestPath, JSON.stringify({
+    ...savedWorkbenchRequest,
+    settings: { ...savedWorkbenchRequest.settings, imageModel: "retired-image-model" },
+  }));
+  let unavailableProjectProcessCalls = 0;
+  plugin.refreshGenerationModelCatalog = async () => ({
+    imageModels: ["gpt-image-2-w"],
+    videoModels: ["MiniMax-H3"],
+  });
+  plugin.processRequest = async () => { unavailableProjectProcessCalls += 1; };
+  await assert.rejects(
+    () => plugin.confirmWorkbenchDraft(workbenchFolder),
+    /图片模型.*retired-image-model.*不可用/,
+    "confirmation must reject the unavailable model saved by this exact project",
+  );
+  assert.strictEqual(JSON.parse(fs.readFileSync(workbenchRequestPath, "utf8")).confirmed, false);
+  assert.strictEqual(unavailableProjectProcessCalls, 0, "unavailable project models must block paid processing");
+  delete plugin.processRequest;
+
+  fs.writeFileSync(workbenchStatePath, JSON.stringify({ status: "ready" }));
   fs.writeFileSync(workbenchRequestPath, JSON.stringify(savedWorkbenchRequest));
   let releaseConcurrentCatalog;
   let concurrentCatalogStarted;
@@ -654,8 +674,13 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   plugin.refreshGenerationModelCatalog = async () => {
     concurrentCatalogStarted();
     await concurrentCatalogGate;
-    return { imageModels: ["gpt-image-2-w"], videoModels: ["MiniMax-H3"] };
+    return {
+      imageModels: ["other-global-image", "gpt-image-2-w"],
+      videoModels: ["seedance-2.5", "MiniMax-H3"],
+    };
   };
+  const settingsBeforeProjectConfirmation = plugin.settings;
+  plugin.settings = { imageModel: "other-global-image", videoModel: "seedance-2.5" };
   let processingTriggers = 0;
   plugin.processRequest = async (requestPath, notify) => {
     processingTriggers += 1;
@@ -679,13 +704,23 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   } finally {
     fs.renameSync = originalRenameSync;
   }
-  assert.strictEqual(JSON.parse(fs.readFileSync(workbenchRequestPath, "utf8")).confirmed, true);
+  const confirmedWorkbenchRequest = JSON.parse(fs.readFileSync(workbenchRequestPath, "utf8"));
+  assert.strictEqual(confirmedWorkbenchRequest.confirmed, true);
+  assert.deepStrictEqual(
+    {
+      imageModel: confirmedWorkbenchRequest.settings.imageModel,
+      videoModel: confirmedWorkbenchRequest.settings.videoModel,
+    },
+    { imageModel: "gpt-image-2-w", videoModel: "MiniMax-H3" },
+    "confirmation must use the current project's saved model pair, not shared global settings",
+  );
   assert.strictEqual(confirmedRequestWrites, 1, "fast double confirmation must atomically write once");
   assert.strictEqual(processingTriggers, 1, "fast double confirmation must trigger processing once");
   await assert.rejects(() => plugin.confirmWorkbenchDraft(workbenchFolder), /已确认|重复确认/);
   assert(workbenchView.refreshCalls > 0, "project writes must request a refresh from the open workbench view");
   delete plugin.refreshGenerationModelCatalog;
   delete plugin.processRequest;
+  plugin.settings = settingsBeforeProjectConfirmation;
 
   const confirmLatestVault = fs.mkdtempSync(path.join(os.tmpdir(), "mangosteen-confirm-latest-"));
   const pendingLatestFolder = "山竹视频复刻/等待确认";

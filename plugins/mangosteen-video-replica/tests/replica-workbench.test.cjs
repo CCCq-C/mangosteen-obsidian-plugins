@@ -169,6 +169,8 @@ function createPlugin(snapshot = readySnapshot, projects = [{ folder: readySnaps
     saveCalls: [],
     confirmCalls: [],
     stopCalls: [],
+    generationCatalogCalls: 0,
+    generationSelectionCalls: [],
     openedPaths: [],
     async listWorkbenchProjects() { return clone(this.projects); },
     async loadWorkbenchProject(folder) {
@@ -182,6 +184,17 @@ function createPlugin(snapshot = readySnapshot, projects = [{ folder: readySnaps
     },
     async confirmWorkbenchDraft(folder) { this.confirmCalls.push(folder); },
     async stopWorkbenchGeneration(folder) { this.stopCalls.push(folder); },
+    async refreshGenerationModelCatalog() {
+      this.generationCatalogCalls += 1;
+      return {
+        imageModels: ["gpt-image-2", "gpt-image-2-w"],
+        videoModels: ["MiniMax-H3", "seedance-2.5"],
+      };
+    },
+    async setGenerationSelection(imageModel, videoModel) {
+      this.generationSelectionCalls.push({ imageModel, videoModel });
+      return true;
+    },
     async openVaultPath(vaultPath) { this.openedPaths.push(vaultPath); },
     openPrepareModal() {},
     openAnalysisModelModal() {},
@@ -225,6 +238,13 @@ function createView(plugin) {
     assert.strictEqual(element.listeners.pointerdown, undefined);
     assert.strictEqual(element.listeners.mousedown, undefined);
   }
+  const shotList = view.contentEl.find((element) => element.classList.contains("mangosteen-replica-shot-list"));
+  assert(shotList, "storyboards must render as one vertical shot list");
+  assert.strictEqual(
+    shotList.findAll((element) => element.classList.contains("mangosteen-replica-shot-summary-row")).length,
+    view.draft.shots.length,
+    "each storyboard shot must have one compact summary row",
+  );
 
   const titleInput = view.contentEl.find((element) => (
     element.tagName === "INPUT"
@@ -288,12 +308,76 @@ function createView(plugin) {
   assert.strictEqual(view.activeTab, "shots");
   assert.strictEqual(view.contentScrollEl.scrollTop, 137);
 
+  const settingsTab = view.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "设置");
+  await settingsTab.dispatch("click");
+  await view.generationCatalogPromise;
+  const imageModelSelect = view.contentEl.find((element) => (
+    element.tagName === "SELECT"
+      && element.dataset.section === "settings"
+      && element.dataset.field === "imageModel"
+  ));
+  const videoModelSelect = view.contentEl.find((element) => (
+    element.tagName === "SELECT"
+      && element.dataset.section === "settings"
+      && element.dataset.field === "videoModel"
+  ));
+  assert(imageModelSelect, "image model must be selectable directly in Settings");
+  assert(videoModelSelect, "video model must be selectable directly in Settings");
+  assert(imageModelSelect.children.some((option) => option.textContent === "gpt-image-2-w"));
+  assert(videoModelSelect.children.some((option) => option.textContent === "seedance-2.5"));
+  assert.strictEqual(
+    view.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "选择生成模型"),
+    null,
+    "Settings must not add a redundant model-picker button below the selectors",
+  );
+  videoModelSelect.value = "seedance-2.5";
+  await videoModelSelect.dispatch("change");
+  assert.strictEqual(view.draft.settings.videoModel, "seedance-2.5");
+  assert.strictEqual(plugin.generationSelectionCalls.length, 0, "project model changes must not mutate shared global selection");
+
   await view.onOpen();
   assert.strictEqual(timerCalls.length, 1, "reopening an open view must not duplicate polling");
   await view.onClose();
   assert.strictEqual(view.refreshTimer, null);
   assert.deepStrictEqual(clearedTimers, [1]);
   assert.strictEqual(resizeObservers[0].disconnected, true);
+
+  const retiredModelPlugin = createPlugin({
+    ...clone(readySnapshot),
+    request: {
+      ...clone(request),
+      settings: { ...clone(request.settings), imageModel: "retired-image-model" },
+    },
+  });
+  const retiredModelView = createView(retiredModelPlugin);
+  await retiredModelView.onOpen();
+  await retiredModelView.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "设置").dispatch("click");
+  await retiredModelView.generationCatalogPromise;
+  const retiredSelect = retiredModelView.contentEl.find((element) => (
+    element.tagName === "SELECT" && element.dataset.field === "imageModel"
+  ));
+  assert.strictEqual(retiredSelect.value, "retired-image-model");
+  assert(retiredSelect.children.some((option) => option.textContent.includes("当前项目（不可用）")));
+  await retiredModelView.onClose();
+
+  const retryCatalogPlugin = createPlugin();
+  retryCatalogPlugin.refreshGenerationModelCatalog = async function refreshGenerationModelCatalog() {
+    this.generationCatalogCalls += 1;
+    if (this.generationCatalogCalls === 1) throw new Error("目录暂时不可用");
+    return { imageModels: ["gpt-image-2"], videoModels: ["MiniMax-H3"] };
+  };
+  const retryCatalogView = createView(retryCatalogPlugin);
+  await retryCatalogView.onOpen();
+  await retryCatalogView.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "设置").dispatch("click");
+  await retryCatalogView.generationCatalogPromise;
+  assert(retryCatalogView.contentEl.find((element) => element.textContent.includes("目录暂时不可用")));
+  const retryButton = retryCatalogView.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "重新读取");
+  assert(retryButton, "failed model catalog loads must expose an inline retry");
+  await retryButton.dispatch("click");
+  assert.strictEqual(retryCatalogPlugin.generationCatalogCalls, 2);
+  assert.strictEqual(retryCatalogView.generationCatalogStatus, "ready");
+  assert.strictEqual(retryCatalogView.contentEl.find((element) => element.textContent.includes("目录暂时不可用")), null);
+  await retryCatalogView.onClose();
 
   const duplicateIdentityRequest = {
     ...clone(request),
@@ -469,6 +553,13 @@ function createView(plugin) {
   await assert.doesNotReject(() => lockedView.onOpen());
   await lockedView.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "分镜").dispatch("click");
   assert.strictEqual(lockedView.contentEl.find((element) => element.tagName === "INPUT").disabled, true);
+  await lockedView.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "设置").dispatch("click");
+  await lockedView.generationCatalogPromise;
+  assert.strictEqual(
+    lockedView.contentEl.find((element) => element.tagName === "SELECT" && element.dataset.field === "imageModel").disabled,
+    true,
+    "locked projects must disable model switching",
+  );
   await lockedView.onClose();
 
   const failedPlugin = createPlugin({
@@ -566,6 +657,7 @@ function createView(plugin) {
   assert.match(fallbackCss, /\.mangosteen-replica-page-header/);
   assert.match(fallbackCss, /\.mangosteen-replica-toolbar-actions/);
   assert.match(fallbackCss, /\.mangosteen-replica-inline-actions/);
+  assert.match(css, /\.mangosteen-replica-shot-list\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\)/s);
 
   Module._load = originalLoad;
   console.log("replica-workbench: ok");

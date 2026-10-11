@@ -19,6 +19,8 @@
   container-type: inline-size;
   --replica-gap: clamp(8px, 1.2cqi, 18px);
   --replica-pad: clamp(10px, 1.8cqi, 24px);
+  --replica-accent: var(--interactive-accent);
+  --replica-panel: var(--background-secondary);
   height: 100%;
   min-width: 0;
   overflow: hidden;
@@ -40,11 +42,14 @@
   justify-content: space-between;
   gap: var(--replica-gap);
   min-width: 0;
-  padding: 10px var(--replica-pad);
+  padding: 12px var(--replica-pad);
   border-bottom: 1px solid var(--background-modifier-border);
-  background: var(--background-secondary);
+  background: var(--background-primary);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--background-modifier-box-shadow) 24%, transparent);
+  z-index: 2;
 }
 
+.mangosteen-replica-toolbar-primary,
 .mangosteen-replica-toolbar-group,
 .mangosteen-replica-toolbar-actions,
 .mangosteen-replica-inline-actions,
@@ -55,6 +60,49 @@
   align-items: center;
   gap: 8px;
   min-width: 0;
+}
+
+.mangosteen-replica-toolbar-primary {
+  flex: 1 1 auto;
+  gap: clamp(12px, 2cqi, 28px);
+}
+
+.mangosteen-replica-brand {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.mangosteen-replica-brand-mark {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border-radius: 10px 4px 10px 4px;
+  background: var(--replica-accent);
+  color: var(--text-on-accent);
+  font-weight: 800;
+  box-shadow: 0 6px 16px color-mix(in srgb, var(--replica-accent) 24%, transparent);
+}
+
+.mangosteen-replica-brand strong,
+.mangosteen-replica-brand small {
+  display: block;
+  white-space: nowrap;
+}
+
+.mangosteen-replica-brand strong {
+  font-size: var(--font-ui-medium);
+  letter-spacing: -0.02em;
+}
+
+.mangosteen-replica-brand small {
+  margin-top: 1px;
+  color: var(--text-faint);
+  font-size: 9px;
+  letter-spacing: 0.14em;
 }
 
 .mangosteen-replica-toolbar-group {
@@ -92,6 +140,16 @@
   font-size: var(--font-ui-smaller);
 }
 
+.mangosteen-replica-status-pill::before {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--replica-accent);
+  content: "";
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--replica-accent) 16%, transparent);
+}
+
 .mangosteen-replica-width-label:empty {
   display: none;
 }
@@ -108,23 +166,51 @@
 .mangosteen-replica-nav {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
   min-width: 0;
   padding: var(--replica-pad);
   overflow: auto;
   border-right: 1px solid var(--background-modifier-border);
-  background: var(--background-secondary-alt);
+  background: color-mix(in srgb, var(--background-secondary-alt) 92%, var(--text-normal) 8%);
 }
 
 .mangosteen-replica-nav button {
+  position: relative;
   width: 100%;
   margin: 0;
+  padding: 10px 12px 10px 16px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
   text-align: left;
+  transition: background 160ms ease, color 160ms ease, transform 160ms ease;
+}
+
+.mangosteen-replica-nav button:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.mangosteen-replica-nav button:active {
+  transform: translateY(1px);
 }
 
 .mangosteen-replica-nav button.is-active {
-  background: var(--interactive-accent);
-  color: var(--text-on-accent);
+  background: color-mix(in srgb, var(--replica-accent) 13%, transparent);
+  color: var(--text-normal);
+  font-weight: var(--font-semibold);
+}
+
+.mangosteen-replica-nav button.is-active::before {
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  left: 3px;
+  width: 3px;
+  border-radius: 3px;
+  background: var(--replica-accent);
+  content: "";
 }
 
 .mangosteen-replica-content {
@@ -133,6 +219,7 @@
   padding: var(--replica-pad);
   overflow: auto;
   overscroll-behavior: contain;
+  background: color-mix(in srgb, var(--background-primary) 96%, var(--background-secondary) 4%);
 }
 
 .mangosteen-replica-page-header {
@@ -153,6 +240,12 @@
   overflow-wrap: anywhere;
 }
 
+.mangosteen-replica-page-header h2 {
+  font-size: clamp(22px, 2.6cqi, 34px);
+  letter-spacing: -0.035em;
+  line-height: 1.05;
+}
+
 .mangosteen-replica-page-header p,
 .mangosteen-replica-card p {
   margin: 0;
@@ -166,8 +259,8 @@
   min-width: 0;
   padding: var(--replica-pad);
   border: 1px solid var(--background-modifier-border);
-  border-radius: var(--radius-m);
-  background: var(--background-secondary);
+  border-radius: 12px;
+  background: var(--replica-panel);
 }
 
 .mangosteen-replica-progress-card {
@@ -228,16 +321,54 @@
   font-size: var(--font-ui-small);
 }
 
-.mangosteen-replica-shot-grid {
+.mangosteen-replica-shot-list {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--replica-gap);
 }
 
 .mangosteen-replica-shot-card {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
+  padding-left: calc(var(--replica-pad) + 4px);
+  border-left: 4px solid color-mix(in srgb, var(--replica-accent) 55%, var(--background-modifier-border));
+  box-shadow: 0 8px 22px color-mix(in srgb, var(--background-modifier-box-shadow) 18%, transparent);
+}
+
+.mangosteen-replica-shot-summary-row {
+  display: grid;
+  grid-template-columns: minmax(64px, 0.35fr) minmax(220px, 2fr) minmax(88px, 0.45fr) minmax(150px, 1fr) auto;
+  align-items: end;
+  gap: 12px;
+  min-width: 0;
+}
+
+.mangosteen-replica-shot-identity {
+  display: flex;
+  align-self: stretch;
+  flex-direction: column;
+  justify-content: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.mangosteen-replica-shot-identity strong {
+  font-family: var(--font-monospace);
+  font-size: clamp(17px, 1.5cqi, 22px);
+  font-variant-numeric: tabular-nums;
+}
+
+.mangosteen-replica-shot-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: max-content;
+}
+
+.mangosteen-replica-shot-summary-row .mangosteen-replica-field {
+  margin: 0;
 }
 
 .mangosteen-replica-shot-card.is-failed {
@@ -284,8 +415,15 @@
   margin-bottom: 10px;
 }
 
-.mangosteen-replica-details .mangosteen-replica-field + .mangosteen-replica-field {
-  margin-top: 8px;
+.mangosteen-replica-shot-fields,
+.mangosteen-replica-model-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.mangosteen-replica-shot-fields .mangosteen-replica-field {
+  margin: 0;
 }
 
 .mangosteen-replica-save-row {
@@ -295,7 +433,28 @@
 
 .mangosteen-replica-output-card,
 .mangosteen-replica-settings {
-  max-width: 780px;
+  max-width: 960px;
+}
+
+.mangosteen-replica-settings {
+  display: grid;
+  gap: 18px;
+}
+
+.mangosteen-replica-settings > .mangosteen-replica-form-row {
+  padding-top: 16px;
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.mangosteen-replica-model-error {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.mangosteen-replica-model-error .mangosteen-replica-error {
+  flex: 1 1 auto;
+  margin: 0;
 }
 
 .mangosteen-replica-feedback,
@@ -332,9 +491,12 @@
 @container (max-width: 1099px) {
   .mangosteen-replica-page-header { align-items: stretch; flex-direction: column; }
   .mangosteen-replica-inline-actions { flex-wrap: wrap; justify-content: flex-start; }
-  .mangosteen-replica-shot-grid,
   .mangosteen-replica-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .mangosteen-replica-asset-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .mangosteen-replica-shot-summary-row {
+    grid-template-columns: minmax(64px, 0.35fr) minmax(180px, 2fr) minmax(88px, 0.5fr) minmax(140px, 1fr);
+  }
+  .mangosteen-replica-shot-actions { grid-column: 2 / -1; justify-content: flex-start; }
 }
 
 @container (max-width: 759px) {
@@ -344,8 +506,15 @@
   .mangosteen-replica-shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
   .mangosteen-replica-nav { display: flex; flex-direction: row; flex-wrap: wrap; overflow: visible; border-right: 0; border-bottom: 1px solid var(--background-modifier-border); }
   .mangosteen-replica-nav button { width: auto; flex: 1 1 auto; text-align: center; }
-  .mangosteen-replica-shot-grid,
   .mangosteen-replica-asset-grid { grid-template-columns: minmax(0, 1fr); }
+  .mangosteen-replica-toolbar-primary { align-items: stretch; flex-direction: column; }
+  .mangosteen-replica-shot-fields,
+  .mangosteen-replica-model-grid { grid-template-columns: minmax(0, 1fr); }
+  .mangosteen-replica-shot-summary-row { grid-template-columns: minmax(60px, 0.35fr) minmax(0, 1fr); }
+  .mangosteen-replica-shot-summary-row .is-title { grid-column: 2; }
+  .mangosteen-replica-shot-summary-row .is-duration { grid-column: 1; }
+  .mangosteen-replica-shot-summary-row .is-scene { grid-column: 2; }
+  .mangosteen-replica-shot-actions { grid-column: 1 / -1; }
 }
 
 @container (max-width: 519px) {
@@ -354,8 +523,16 @@
   .mangosteen-replica-toolbar-group { flex-basis: auto; align-items: stretch; flex-direction: column; }
   .mangosteen-replica-toolbar-actions { display: grid; grid-template-columns: minmax(0, 1fr); width: 100%; }
   .mangosteen-replica-toolbar button { width: 100%; }
+  .mangosteen-replica-brand { width: 100%; }
   .mangosteen-replica-summary-grid { grid-template-columns: minmax(0, 1fr); }
   .mangosteen-replica-inline-actions { align-items: stretch; flex-direction: column; }
+  .mangosteen-replica-shot-summary-row { grid-template-columns: minmax(0, 1fr); }
+  .mangosteen-replica-shot-summary-row .is-title,
+  .mangosteen-replica-shot-summary-row .is-duration,
+  .mangosteen-replica-shot-summary-row .is-scene,
+  .mangosteen-replica-shot-actions { grid-column: 1; }
+  .mangosteen-replica-shot-actions { flex-wrap: wrap; justify-content: flex-start; min-width: 0; }
+  .mangosteen-replica-model-error { align-items: stretch; flex-direction: column; }
   .mangosteen-replica-workbench input,
   .mangosteen-replica-workbench select,
   .mangosteen-replica-workbench textarea { max-width: 100%; min-width: 0; }
@@ -372,9 +549,12 @@
   @media (max-width: 1099px) {
     .mangosteen-replica-page-header { align-items: stretch; flex-direction: column; }
     .mangosteen-replica-inline-actions { flex-wrap: wrap; justify-content: flex-start; }
-    .mangosteen-replica-shot-grid,
     .mangosteen-replica-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .mangosteen-replica-asset-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .mangosteen-replica-shot-summary-row {
+      grid-template-columns: minmax(64px, 0.35fr) minmax(180px, 2fr) minmax(88px, 0.5fr) minmax(140px, 1fr);
+    }
+    .mangosteen-replica-shot-actions { grid-column: 2 / -1; justify-content: flex-start; }
   }
 
   @media (max-width: 759px) {
@@ -384,8 +564,15 @@
     .mangosteen-replica-shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
     .mangosteen-replica-nav { display: flex; flex-direction: row; flex-wrap: wrap; overflow: visible; border-right: 0; border-bottom: 1px solid var(--background-modifier-border); }
     .mangosteen-replica-nav button { width: auto; flex: 1 1 auto; text-align: center; }
-    .mangosteen-replica-shot-grid,
     .mangosteen-replica-asset-grid { grid-template-columns: minmax(0, 1fr); }
+    .mangosteen-replica-toolbar-primary { align-items: stretch; flex-direction: column; }
+    .mangosteen-replica-shot-fields,
+    .mangosteen-replica-model-grid { grid-template-columns: minmax(0, 1fr); }
+    .mangosteen-replica-shot-summary-row { grid-template-columns: minmax(60px, 0.35fr) minmax(0, 1fr); }
+    .mangosteen-replica-shot-summary-row .is-title { grid-column: 2; }
+    .mangosteen-replica-shot-summary-row .is-duration { grid-column: 1; }
+    .mangosteen-replica-shot-summary-row .is-scene { grid-column: 2; }
+    .mangosteen-replica-shot-actions { grid-column: 1 / -1; }
   }
 
   @media (max-width: 519px) {
@@ -394,8 +581,16 @@
     .mangosteen-replica-toolbar-group { flex-basis: auto; align-items: stretch; flex-direction: column; }
     .mangosteen-replica-toolbar-actions { display: grid; grid-template-columns: minmax(0, 1fr); width: 100%; }
     .mangosteen-replica-toolbar button { width: 100%; }
+    .mangosteen-replica-brand { width: 100%; }
     .mangosteen-replica-summary-grid { grid-template-columns: minmax(0, 1fr); }
     .mangosteen-replica-inline-actions { align-items: stretch; flex-direction: column; }
+    .mangosteen-replica-shot-summary-row { grid-template-columns: minmax(0, 1fr); }
+    .mangosteen-replica-shot-summary-row .is-title,
+    .mangosteen-replica-shot-summary-row .is-duration,
+    .mangosteen-replica-shot-summary-row .is-scene,
+    .mangosteen-replica-shot-actions { grid-column: 1; }
+    .mangosteen-replica-shot-actions { flex-wrap: wrap; justify-content: flex-start; min-width: 0; }
+    .mangosteen-replica-model-error { align-items: stretch; flex-direction: column; }
     .mangosteen-replica-workbench input,
     .mangosteen-replica-workbench select,
     .mangosteen-replica-workbench textarea { max-width: 100%; min-width: 0; }
