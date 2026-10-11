@@ -21,6 +21,7 @@ Module._load = function patchedLoad(request, parent, isMain) {
 const ReplicaPlugin = require("../main.js");
 const { confirmGenerationPlan, createGenerationQueue } = require("../generation-queue.cjs");
 const projectStorage = require("../project-storage.cjs");
+const runState = require("../run-state.cjs");
 
 function runShots(run) {
   return run.queue.map((id) => run.shots[id]);
@@ -509,6 +510,81 @@ function request() {
   }
   assert.strictEqual(paidBoundaryCalls, 0, "a persisted stop must prevent the next paid provider call");
 
+  const paidBoundaryExpectations = {
+    "reference-asset": { references: 0, images: 0, videos: 0 },
+    "first-frame": { references: 2, images: 0, videos: 0 },
+    "last-frame": { references: 2, images: 1, videos: 0 },
+    "video-submission": { references: 2, images: 2, videos: 0 },
+  };
+  const originalBoundaryGenerateImageMulti = plugin.generateImageMulti;
+  for (const [blockedBoundary, expectedCalls] of Object.entries(paidBoundaryExpectations)) {
+    const caseFolder = `山竹视频复刻/付费闸门-${blockedBoundary}`;
+    const caseRoot = path.join(vault, ...caseFolder.split("/"));
+    fs.mkdirSync(path.join(caseRoot, ".work"), { recursive: true });
+    fs.writeFileSync(path.join(caseRoot, "project.json"), JSON.stringify({
+      folder: caseFolder,
+      title: blockedBoundary,
+      status: "analysis_ready",
+      shots: request().shots.map((shot) => ({ ...shot, status: "等待生成" })),
+    }));
+    fs.writeFileSync(path.join(caseRoot, "generation-request.json"), JSON.stringify(request()));
+    fs.writeFileSync(path.join(caseRoot, ".work/generation-queue.json"), JSON.stringify({}));
+    const calls = { references: 0, images: 0, videos: 0, boundaries: [] };
+    plugin.ensureReferenceAsset = async (_image, asset) => {
+      calls.references += 1;
+      return {
+        ...asset,
+        imagePath: `山竹视频资产库/${asset.kind}/${asset.id}.png`,
+        metadataPath: `山竹视频资产库/${asset.kind}/${asset.id}.json`,
+        contentHash: `${asset.kind}-${asset.id}-hash`,
+        reused: true,
+      };
+    };
+    plugin.generateImageMulti = async () => {
+      calls.images += 1;
+      return { kind: "base64", value: "eA==" };
+    };
+    plugin.resolveQueueGenerationRuntime = async () => ({
+      image: {},
+      video: { submitVideo: async () => { calls.videos += 1; return { id: `task-${blockedBoundary}` }; } },
+      imageModel: "gpt-image-2-w",
+      model: "MiniMax-H3",
+      resolution: "768p",
+    });
+    plugin.waitForVideo = async () => ({ localPath: "山竹视频资产库/generated.mp4" });
+    await assert.rejects(
+      () => plugin.runWorkbenchQueueShot(caseFolder, directPlan.shots[0], {
+        queueId: `paid-gate-${blockedBoundary}`,
+        planId: directPlan.planId,
+        requestVersion: directPlan.requestVersion,
+        character: directPlan.character,
+        products: directPlan.products,
+        scenes: directPlan.scenes,
+        settings: directPlan.settings,
+        assertPaidSubmissionAllowed: async () => true,
+        withPaidSubmissionGate: async (boundary, operation) => {
+          calls.boundaries.push(boundary.kind);
+          if (boundary.kind === blockedBoundary) {
+            const stopped = new Error(`blocked ${blockedBoundary}`);
+            stopped.code = "GENERATION_STOPPED";
+            throw stopped;
+          }
+          return operation();
+        },
+      }),
+      new RegExp(`blocked ${blockedBoundary}`),
+    );
+    assert.deepStrictEqual(
+      { references: calls.references, images: calls.images, videos: calls.videos },
+      expectedCalls,
+      `${blockedBoundary} must be reserved through the shared gate before its provider call`,
+    );
+    assert(calls.boundaries.includes(blockedBoundary), `${blockedBoundary} must reach the shared submission gate`);
+  }
+  plugin.ensureReferenceAsset = originalEnsureReferenceAsset;
+  plugin.generateImageMulti = originalBoundaryGenerateImageMulti;
+  plugin.resolveQueueGenerationRuntime = directRuntimeResolver;
+
   const recoverProject = JSON.parse(fs.readFileSync(path.join(root, "project.json")));
   const recoverShot = recoverProject.shots.find((shot) => shot.id === "002");
   recoverShot.videoPath = "";
@@ -626,6 +702,140 @@ function request() {
     imageModels: ["gpt-image-2-w"],
     videoModels: ["MiniMax-H3"],
   });
+
+  const gateFolder = "山竹视频复刻/版本六提交闸门";
+  const gateRoot = path.join(vault, ...gateFolder.split("/"));
+  const gateMetadataRoot = path.join(gateRoot, ".mangosteen");
+  fs.mkdirSync(path.join(gateMetadataRoot, "runs"), { recursive: true });
+  fs.writeFileSync(path.join(gateMetadataRoot, "project.json"), JSON.stringify({
+    schemaVersion: 6,
+    folder: gateFolder,
+    title: "版本六提交闸门",
+    status: "analysis_ready",
+    shots: request().shots.map((shot) => ({ ...shot, status: "等待生成" })),
+  }));
+  fs.writeFileSync(path.join(gateMetadataRoot, "draft.json"), JSON.stringify({ ...request(), schemaVersion: 6 }));
+  const gatePreview = await plugin.previewWorkbenchGeneration(gateFolder, ["001"]);
+  const gatePlan = confirmGenerationPlan(
+    gatePreview,
+    JSON.parse(fs.readFileSync(path.join(gateMetadataRoot, "draft.json"), "utf8")),
+  );
+  const makeGateRun = () => {
+    const active = createGenerationQueue(gatePlan, { now: "2026-10-12T00:30:00.000Z" });
+    active.queueId = "v6-linearizable-run";
+    active.runId = "v6-linearizable-run";
+    active.status = "processing";
+    active.activeShotId = "001";
+    active.revision = 7;
+    active.shots["001"].status = "processing";
+    active.shots["001"].stage = "provider-submission";
+    return active;
+  };
+  const gateActiveRunPath = path.join(gateMetadataRoot, "active-run.json");
+  fs.writeFileSync(gateActiveRunPath, JSON.stringify(makeGateRun()));
+  plugin.queueApis.delete(gateFolder);
+  plugin.activeQueueObjects.delete(gateFolder);
+
+  const realAcquireSubmissionGate = plugin.acquireWorkbenchSubmissionGate.bind(plugin);
+  let releaseStopGate;
+  let stopGateAcquired;
+  const stopGatePause = new Promise((resolve) => { releaseStopGate = resolve; });
+  const stopGateReady = new Promise((resolve) => { stopGateAcquired = resolve; });
+  let pauseFirstSubmissionGate = true;
+  plugin.acquireWorkbenchSubmissionGate = async (...args) => {
+    const lock = await realAcquireSubmissionGate(...args);
+    if (pauseFirstSubmissionGate) {
+      pauseFirstSubmissionGate = false;
+      stopGateAcquired();
+      await stopGatePause;
+    }
+    return lock;
+  };
+  const stopFirst = plugin.stopWorkbenchGeneration(gateFolder);
+  await stopGateReady;
+  let paidAfterStopWon = 0;
+  const stoppedSubmission = plugin.withWorkbenchPaidSubmissionGate(gateFolder, {
+    queueId: "v6-linearizable-run",
+    runId: "v6-linearizable-run",
+    revision: 7,
+  }, async () => {
+    paidAfterStopWon += 1;
+    return { id: "must-not-submit" };
+  });
+  releaseStopGate();
+  await stopFirst;
+  await assert.rejects(stoppedSubmission, /已停止|停止后续付费/);
+  assert.strictEqual(paidAfterStopWon, 0, "when stop acquires the shared gate first, the provider call must remain zero");
+  plugin.acquireWorkbenchSubmissionGate = realAcquireSubmissionGate;
+
+  const reverseRun = makeGateRun();
+  fs.writeFileSync(gateActiveRunPath, JSON.stringify(reverseRun));
+  plugin.queueApis.delete(gateFolder);
+  plugin.activeQueueObjects.delete(gateFolder);
+  let releaseAcceptedSubmission;
+  let acceptedProviderCalled;
+  const acceptedSubmissionPause = new Promise((resolve) => { releaseAcceptedSubmission = resolve; });
+  const acceptedProviderStarted = new Promise((resolve) => { acceptedProviderCalled = resolve; });
+  let paidBeforeStopWon = 0;
+  const acceptedSubmission = plugin.withWorkbenchPaidSubmissionGate(gateFolder, {
+    queueId: reverseRun.queueId,
+    runId: reverseRun.runId,
+    revision: reverseRun.revision,
+  }, async () => {
+    paidBeforeStopWon += 1;
+    acceptedProviderCalled();
+    await acceptedSubmissionPause;
+    const authoritative = plugin.currentWorkbenchQueue(gateFolder);
+    const accepted = runState.updateShotState(authoritative, "001", {
+      status: "video-processing",
+      stage: "provider-generation",
+      taskId: "linearized-provider-task",
+      paidTaskSubmitted: true,
+      progress: null,
+    });
+    plugin.persistWorkbenchRun(plugin.workbenchProjectPaths(gateFolder), accepted);
+    return { id: "linearized-provider-task" };
+  });
+  await acceptedProviderStarted;
+  let reverseStopFinished = false;
+  const reverseStop = plugin.stopWorkbenchGeneration(gateFolder).then((value) => {
+    reverseStopFinished = true;
+    return value;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.strictEqual(reverseStopFinished, false, "stop must wait while a paid submission owns the shared gate");
+  releaseAcceptedSubmission();
+  await acceptedSubmission;
+  await reverseStop;
+  assert.strictEqual(paidBeforeStopWon, 1, "when submission acquires first, exactly one paid call may linearize before stop");
+  const stoppedAfterAccepted = JSON.parse(fs.readFileSync(gateActiveRunPath, "utf8"));
+  assert.strictEqual(stoppedAfterAccepted.stopRequested, true);
+  assert.strictEqual(stoppedAfterAccepted.shots["001"].taskId, "linearized-provider-task");
+  assert.strictEqual(stoppedAfterAccepted.shots["001"].paidTaskSubmitted, true);
+
+  const staleRunnerSave = makeGateRun();
+  plugin.persistWorkbenchRun(plugin.workbenchProjectPaths(gateFolder), staleRunnerSave);
+  const afterStaleRunnerSave = JSON.parse(fs.readFileSync(gateActiveRunPath, "utf8"));
+  assert.strictEqual(afterStaleRunnerSave.stopRequested, true, "a stale runner save must not clear persisted stopRequested");
+  assert.strictEqual(afterStaleRunnerSave.shots["001"].taskId, "linearized-provider-task", "a stale runner save must retain accepted recovery data");
+  assert.strictEqual(afterStaleRunnerSave.shots["001"].paidTaskSubmitted, true);
+
+  const staleGateRun = makeGateRun();
+  fs.writeFileSync(gateActiveRunPath, JSON.stringify(staleGateRun));
+  const gatePaths = plugin.workbenchProjectPaths(gateFolder, { createWorkDirectory: true });
+  fs.writeFileSync(gatePaths.submissionGatePath, JSON.stringify({ token: "crashed-owner" }));
+  const staleGateTime = new Date(Date.now() - 6 * 60 * 1000);
+  fs.utimesSync(gatePaths.submissionGatePath, staleGateTime, staleGateTime);
+  let reclaimedGateCalls = 0;
+  await plugin.withWorkbenchPaidSubmissionGate(gateFolder, {
+    queueId: staleGateRun.queueId,
+    runId: staleGateRun.runId,
+    revision: staleGateRun.revision,
+  }, async () => { reclaimedGateCalls += 1; });
+  assert.strictEqual(reclaimedGateCalls, 1, "a crashed stale gate owner must not deadlock future submissions");
+  assert.strictEqual(fs.existsSync(gatePaths.submissionGatePath), false, "the bounded gate must release after recovery");
+  fs.rmSync(gateRoot, { recursive: true, force: true });
+
   const v6Plan = await plugin.previewWorkbenchGeneration(v6Folder, ["001", "002"]);
   let releaseV6AcceptedTask;
   let v6AcceptedTaskReached;

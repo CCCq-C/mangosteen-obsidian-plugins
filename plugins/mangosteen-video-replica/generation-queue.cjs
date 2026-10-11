@@ -231,14 +231,25 @@ function replaceRun(target, replacement) {
   return target;
 }
 
-async function runGenerationQueue(queue, runShot, { onUpdate = null, isStopRequested = null } = {}) {
+async function runGenerationQueue(queue, runShot, {
+  onUpdate = null,
+  isStopRequested = null,
+  withPaidSubmissionGate = null,
+} = {}) {
   if (!queue || !Array.isArray(queue.queue) || !queue.shots || Array.isArray(queue.shots)) throw new Error("生成队列格式错误。");
   if (typeof runShot !== "function") throw new Error("缺少单镜头运行器。");
   if (queue.status !== "queued") throw new Error(`生成队列当前状态不能运行：${String(queue.status)}`);
 
+  let paidSubmissionGateDepth = 0;
   const notify = async () => {
     queue.updatedAt = new Date().toISOString();
-    if (typeof onUpdate === "function") await onUpdate(clone(queue));
+    if (typeof onUpdate === "function") {
+      const persisted = await onUpdate(clone(queue), { submissionGateHeld: paidSubmissionGateDepth > 0 });
+      if (persisted && typeof persisted === "object"
+        && String(persisted.runId || persisted.queueId || "") === String(queue.runId || queue.queueId || "")) {
+        replaceRun(queue, persisted);
+      }
+    }
   };
   queue.status = "processing";
   queue.startedAt = new Date().toISOString();
@@ -292,6 +303,24 @@ async function runGenerationQueue(queue, runShot, { onUpdate = null, isStopReque
         stopped.code = "GENERATION_STOPPED";
         throw stopped;
       };
+      const runPaidSubmission = async (boundary, operation) => {
+        if (typeof operation !== "function") throw new Error("缺少付费提交操作。");
+        if (typeof withPaidSubmissionGate === "function") {
+          return withPaidSubmissionGate({
+            queueId: queue.queueId,
+            runId: queue.runId,
+            revision: queue.revision,
+            shotId,
+            boundary: String(boundary?.kind || boundary || "paid-submission"),
+          }, async (...args) => {
+            paidSubmissionGateDepth += 1;
+            try { return await operation(...args); }
+            finally { paidSubmissionGateDepth -= 1; }
+          });
+        }
+        await assertPaidSubmissionAllowed();
+        return operation();
+      };
       const context = deepFreeze({
         queueId: queue.queueId,
         runId: queue.runId,
@@ -300,6 +329,7 @@ async function runGenerationQueue(queue, runShot, { onUpdate = null, isStopReque
         recoveryPaidTaskSubmitted: shot.paidTaskSubmitted === true,
         updateState,
         assertPaidSubmissionAllowed,
+        withPaidSubmissionGate: runPaidSubmission,
       });
       const runnableShot = clone(shot.confirmedPayload || shot);
       const result = await runShot(deepFreeze(runnableShot), context);

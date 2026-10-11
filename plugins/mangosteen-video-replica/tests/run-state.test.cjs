@@ -5,6 +5,7 @@ const {
   archiveRun,
   createActiveRun,
   isRunActive,
+  mergeRunState,
   normalizeGenerationError,
   requestRunStop,
   selectCurrentRun,
@@ -116,6 +117,26 @@ assert.strictEqual(monotonicStop.shots["008"].progress, 71);
 assert.deepStrictEqual(monotonicStop.shots["008"].error, structuredError);
 assert.deepStrictEqual(monotonicStop.shots["008"].recoveryContext, { pollAttempt: 4, lastProviderStatus: "unknown" });
 assert.strictEqual(recoverableProcessing.stopRequested, false, "the monotonic stop transition must not mutate its authoritative input");
+
+const authoritativeStopped = requestRunStop(updateShotState(recoverableProcessing, "008", {
+  taskId: "task-linearized",
+  paidTaskSubmitted: true,
+  progress: 73,
+  recoveryContext: { pollAttempt: 5, lastProviderStatus: "processing" },
+}), "2026-10-11T15:09:00.000Z");
+authoritativeStopped.revision = 9;
+const staleRunner = JSON.parse(JSON.stringify(run));
+staleRunner.status = "processing";
+staleRunner.shots["008"].status = "processing";
+staleRunner.revision = 7;
+const monotonicMerge = mergeRunState(authoritativeStopped, staleRunner, "2026-10-11T15:10:00.000Z");
+assert.strictEqual(monotonicMerge.stopRequested, true, "a stale runner save must not clear a persisted stop");
+assert.strictEqual(monotonicMerge.status, "stopping");
+assert.strictEqual(monotonicMerge.shots["008"].taskId, "task-linearized");
+assert.strictEqual(monotonicMerge.shots["008"].paidTaskSubmitted, true);
+assert.strictEqual(monotonicMerge.shots["008"].progress, 73);
+assert.deepStrictEqual(monotonicMerge.shots["008"].recoveryContext, { pollAttempt: 5, lastProviderStatus: "processing" });
+assert.strictEqual(monotonicMerge.revision, 10, "each persisted merge must advance the authoritative revision");
 
 assert.strictEqual(
   selectCurrentRun({ activeRun: processing, legacyState: { status: "stopped" } }).status,

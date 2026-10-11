@@ -333,6 +333,29 @@ for (const changed of [
   assert.strictEqual(persistedStopQueue.stopRequested, true);
   assert.strictEqual(persistedStopQueue.shots["001"].status, "stopped");
 
+  const sharedGateQueue = createGenerationQueue(firstOnly, { now: "2026-10-11T00:00:06.000Z" });
+  sharedGateQueue.revision = 12;
+  const gateIdentities = [];
+  let gatedPaidCalls = 0;
+  await runGenerationQueue(sharedGateQueue, async (_shot, context) => {
+    return context.withPaidSubmissionGate({ kind: "video-submission" }, async () => {
+      gatedPaidCalls += 1;
+      return { videoPath: "shared-gate.mp4" };
+    });
+  }, {
+    withPaidSubmissionGate: async (identity, operation) => {
+      gateIdentities.push(identity);
+      return operation();
+    },
+  });
+  assert.strictEqual(gatedPaidCalls, 1);
+  assert.deepStrictEqual(gateIdentities.map(({ runId, revision, shotId, boundary }) => ({ runId, revision, shotId, boundary })), [{
+    runId: sharedGateQueue.runId,
+    revision: 12,
+    shotId: "001",
+    boundary: "video-submission",
+  }], "the queue must pass current run identity and revision into the shared paid-submission gate");
+
   console.log("generation-queue: ok");
 })().catch((error) => {
   console.error(error);

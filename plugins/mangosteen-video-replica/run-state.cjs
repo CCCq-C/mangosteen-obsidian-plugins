@@ -121,6 +121,7 @@ function createActiveRun({ runId, plan, now } = {}) {
   }
   return {
     version: 3,
+    revision: 0,
     runId: normalizedRunId,
     queueId: normalizedRunId,
     planId: String(plan.planId || ""),
@@ -178,6 +179,56 @@ function requestRunStop(activeRun, now) {
     next.activeShotId = null;
     next.completedAt ||= stoppedAt;
   }
+  return next;
+}
+
+function mergeRunState(authoritative, candidate, now) {
+  if (!authoritative || typeof authoritative !== "object" || Array.isArray(authoritative)) throw new Error("权威活动运行格式错误。");
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) throw new Error("待保存活动运行格式错误。");
+  const authoritativeId = String(authoritative.runId || authoritative.queueId || "");
+  const candidateId = String(candidate.runId || candidate.queueId || "");
+  if (!authoritativeId || authoritativeId !== candidateId) throw new Error("活动运行已变化，已拒绝保存旧状态。");
+  const authoritativeRevision = Number.isSafeInteger(authoritative.revision) && authoritative.revision >= 0 ? authoritative.revision : 0;
+  const candidateRevision = Number.isSafeInteger(candidate.revision) && candidate.revision >= 0 ? candidate.revision : 0;
+
+  let next = clone(candidate);
+  next.shots ||= {};
+  for (const [id, authoritativeShot] of Object.entries(authoritative.shots || {})) {
+    const candidateShot = next.shots[id];
+    if (!candidateShot) {
+      next.shots[id] = clone(authoritativeShot);
+      continue;
+    }
+    const authoritativeTaskId = String(authoritativeShot?.taskId || "").trim();
+    const candidateTaskId = String(candidateShot?.taskId || "").trim();
+    const conflictingAcceptedTask = authoritativeTaskId && authoritativeTaskId !== candidateTaskId;
+    const authoritativeUpdatedAt = Date.parse(authoritativeShot?.updatedAt || "");
+    const candidateUpdatedAt = Date.parse(candidateShot?.updatedAt || "");
+    const authoritativeNewer = authoritativeUpdatedAt > candidateUpdatedAt
+      || (candidateRevision < authoritativeRevision
+        && (!Number.isFinite(candidateUpdatedAt) || !Number.isFinite(authoritativeUpdatedAt) || authoritativeUpdatedAt >= candidateUpdatedAt));
+    const candidateTerminal = TERMINAL_SHOT_STATUSES.has(String(candidateShot?.status || ""));
+    if (conflictingAcceptedTask) {
+      next.shots[id] = clone(authoritativeShot);
+      continue;
+    }
+    if (authoritativeNewer && !candidateTerminal) {
+      for (const key of ["status", "stage", "progress", "elapsedMs", "error", "result", "recoveryContext", "updatedAt"]) {
+        if (Object.prototype.hasOwnProperty.call(authoritativeShot, key)) next.shots[id][key] = clone(authoritativeShot[key]);
+      }
+    } else if (next.shots[id].recoveryContext === undefined && authoritativeShot.recoveryContext !== undefined) {
+      next.shots[id].recoveryContext = clone(authoritativeShot.recoveryContext);
+    }
+    if (!candidateTaskId && authoritativeTaskId) next.shots[id].taskId = authoritativeTaskId;
+    if (authoritativeShot.paidTaskSubmitted === true || authoritativeTaskId) next.shots[id].paidTaskSubmitted = true;
+  }
+
+  if (authoritative.stopRequested === true || candidate.stopRequested === true) {
+    next = requestRunStop(next, now);
+  } else {
+    next.updatedAt = timestamp(now) || timestamp(candidate.updatedAt) || timestamp(authoritative.updatedAt) || new Date().toISOString();
+  }
+  next.revision = Math.max(authoritativeRevision, candidateRevision) + 1;
   return next;
 }
 
@@ -373,6 +424,7 @@ module.exports = {
   archiveRun,
   createActiveRun,
   isRunActive,
+  mergeRunState,
   normalizeGenerationError,
   requestRunStop,
   selectCurrentRun,
