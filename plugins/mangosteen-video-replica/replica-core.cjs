@@ -85,6 +85,7 @@ function normalizeGenerationRequest(input) {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw validationError("生成任务格式错误。", "request");
   if (input.confirmed !== true) throw validationError("生成任务尚未确认，不会调用付费算力。", "confirmed");
   const version = input.version === undefined ? 1 : Number(input.version);
+  const isVersionSix = Number(input.schemaVersion) === 6;
   if (![1, 2, 3, 4, 5].includes(version)) throw validationError(`不支持生成任务版本：${String(input.version)}`, "version");
   let visualStyle;
   try {
@@ -127,7 +128,9 @@ function normalizeGenerationRequest(input) {
       if (productIds.has(product.id)) throw validationError(`产品 ID 重复：${product.id}`, `products.${index}.id`);
       productIds.add(product.id);
     }
+    const stableShotIds = new Set();
     return {
+      ...(isVersionSix ? { schemaVersion: 6 } : {}),
       version,
       confirmed: true,
       visualStyle,
@@ -141,7 +144,17 @@ function normalizeGenerationRequest(input) {
         videoModel: model,
       },
       shots: shots.map((shot, index) => {
-        const id = String(index + 1).padStart(3, "0");
+        let id = String(index + 1).padStart(3, "0");
+        if (isVersionSix) {
+          const rawId = String(shot?.id ?? "");
+          const numericId = Number(rawId);
+          if (!/^\d{3}$/.test(rawId) || !Number.isInteger(numericId) || numericId < 1 || numericId > 999) {
+            throw validationError("schema v6 镜头 ID 必须是 001 到 999 的规范三位数字。", `shots.${index}.id`);
+          }
+          id = rawId;
+          if (stableShotIds.has(id)) throw validationError(`镜头 ID 重复：${id}`, `shots.${index}.id`);
+          stableShotIds.add(id);
+        }
         const sceneId = cleanText(shot?.sceneId);
         if (!sceneId) throw validationError(`镜头 ${id} 缺少场景 ID。`, `shots.${index}.sceneId`);
         withValidationPath(`shots.${index}.sceneId`, () => assertAssetId(sceneId));

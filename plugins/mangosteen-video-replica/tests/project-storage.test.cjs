@@ -166,6 +166,140 @@ try {
     "failed atomic writes must clean up their temporary file",
   );
 
+  const transactionPaths = [
+    layoutPaths.project,
+    layoutPaths.draft,
+    layoutPaths.overview,
+    layoutPaths.referenceIndex,
+  ];
+  const transactionOriginals = transactionPaths.map((relativePath, index) => Buffer.from(`original-${index}\n`));
+  for (const [index, relativePath] of transactionPaths.entries()) {
+    fs.mkdirSync(path.dirname(layoutVault.resolveSafe(relativePath)), { recursive: true });
+    fs.writeFileSync(layoutVault.resolveSafe(relativePath), transactionOriginals[index]);
+  }
+  const originalWriteFileSync = fs.writeFileSync;
+  let stagedWriteCount = 0;
+  fs.writeFileSync = function rejectThirdExistingBundleStage(target, content, options) {
+    if (typeof target === "number") {
+      stagedWriteCount += 1;
+      if (stagedWriteCount === 3) throw new Error("injected third existing bundle write failure");
+    }
+    return originalWriteFileSync.call(this, target, content, options);
+  };
+  try {
+    assert.throws(
+      () => storage.atomicWriteBundle({
+        resolveSafe: layoutVault.resolveSafe,
+        entries: transactionPaths.map((relativePath, index) => ({ relativePath, content: `staged-${index}\n` })),
+      }),
+      /injected third existing bundle write failure/,
+    );
+  } finally {
+    fs.writeFileSync = originalWriteFileSync;
+  }
+  for (const [index, relativePath] of transactionPaths.entries()) {
+    assert.deepStrictEqual(fs.readFileSync(layoutVault.resolveSafe(relativePath)), transactionOriginals[index]);
+  }
+
+  let bundleRenameCount = 0;
+  fs.renameSync = function rejectSecondBundleCommit(source, destination) {
+    if (transactionPaths.some((relativePath) => destination === layoutVault.resolveSafe(relativePath))) {
+      bundleRenameCount += 1;
+      if (bundleRenameCount === 2) throw new Error("injected second bundle rename failure");
+    }
+    return originalRenameSync.call(this, source, destination);
+  };
+  try {
+    assert.throws(
+      () => storage.atomicWriteBundle({
+        resolveSafe: layoutVault.resolveSafe,
+        entries: transactionPaths.map((relativePath, index) => ({ relativePath, content: `updated-${index}\n` })),
+      }),
+      /injected second bundle rename failure/,
+    );
+  } finally {
+    fs.renameSync = originalRenameSync;
+  }
+  for (const [index, relativePath] of transactionPaths.entries()) {
+    assert.deepStrictEqual(fs.readFileSync(layoutVault.resolveSafe(relativePath)), transactionOriginals[index]);
+  }
+  assert.strictEqual(
+    fs.readdirSync(layoutVault.resolveSafe(layoutPaths.metadataRoot)).some((name) => name.includes("bundle-")),
+    false,
+    "failed existing-project transactions must clean owned temps and backups",
+  );
+
+  const stagingPaths = transactionPaths.map((relativePath) => relativePath.replace(/(\.[^/.]+)$/, "-staging$1"));
+  stagedWriteCount = 0;
+  fs.writeFileSync = function rejectSecondNewBundleStage(target, content, options) {
+    if (typeof target === "number") {
+      stagedWriteCount += 1;
+      if (stagedWriteCount === 2) throw new Error("injected second new bundle write failure");
+    }
+    return originalWriteFileSync.call(this, target, content, options);
+  };
+  try {
+    assert.throws(
+      () => storage.atomicWriteBundle({
+        resolveSafe: layoutVault.resolveSafe,
+        entries: stagingPaths.map((relativePath, index) => ({ relativePath, content: `new-${index}\n` })),
+      }),
+      /injected second new bundle write failure/,
+    );
+  } finally {
+    fs.writeFileSync = originalWriteFileSync;
+  }
+  assert(stagingPaths.every((relativePath) => !fs.existsSync(layoutVault.resolveSafe(relativePath))), "failed staging must not create target files");
+
+  const newBundlePaths = transactionPaths.map((relativePath) => relativePath.replace(/(\.[^/.]+)$/, "-new$1"));
+  bundleRenameCount = 0;
+  fs.renameSync = function rejectThirdNewBundleCommit(source, destination) {
+    if (newBundlePaths.some((relativePath) => destination === layoutVault.resolveSafe(relativePath))) {
+      bundleRenameCount += 1;
+      if (bundleRenameCount === 3) throw new Error("injected third new bundle rename failure");
+    }
+    return originalRenameSync.call(this, source, destination);
+  };
+  try {
+    assert.throws(
+      () => storage.atomicWriteBundle({
+        resolveSafe: layoutVault.resolveSafe,
+        entries: newBundlePaths.map((relativePath, index) => ({ relativePath, content: `new-${index}\n` })),
+      }),
+      /injected third new bundle rename failure/,
+    );
+  } finally {
+    fs.renameSync = originalRenameSync;
+  }
+  assert(newBundlePaths.every((relativePath) => !fs.existsSync(layoutVault.resolveSafe(relativePath))), "failed new-project commit must remove partial target files");
+  for (const parent of new Set(newBundlePaths.map((relativePath) => path.posix.dirname(relativePath)))) {
+    assert.strictEqual(
+      fs.readdirSync(layoutVault.resolveSafe(parent)).some((name) => name.includes("bundle-")),
+      false,
+      "failed new-project transactions must clean owned temps and backups",
+    );
+  }
+
+  const bundleCollisionUuid = "11111111-1111-4111-8111-111111111111";
+  const bundleCollisionBackup = `${transactionPaths[0]}.bak-bundle-${process.pid}-${bundleCollisionUuid}-0`;
+  fs.writeFileSync(layoutVault.resolveSafe(bundleCollisionBackup), "unrelated-backup");
+  const bundleOriginalRandomUuid = crypto.randomUUID;
+  crypto.randomUUID = () => bundleCollisionUuid;
+  let bundleCollisionError;
+  try {
+    storage.atomicWriteBundle({
+      resolveSafe: layoutVault.resolveSafe,
+      entries: [{ relativePath: transactionPaths[0], content: "must-not-commit" }],
+    });
+  } catch (error) {
+    bundleCollisionError = error;
+  } finally {
+    crypto.randomUUID = bundleOriginalRandomUuid;
+  }
+  assert.strictEqual(bundleCollisionError?.code, "EEXIST");
+  assert.strictEqual(fs.readFileSync(layoutVault.resolveSafe(bundleCollisionBackup), "utf8"), "unrelated-backup");
+  assert.deepStrictEqual(fs.readFileSync(layoutVault.resolveSafe(transactionPaths[0])), transactionOriginals[0]);
+
   const collisionPath = `${projectFolder}/.mangosteen/collision.json`;
   storage.atomicWriteJson({ resolveSafe: layoutVault.resolveSafe, relativePath: collisionPath, value: { version: "original" } });
   const collisionOriginalBytes = fs.readFileSync(layoutVault.resolveSafe(collisionPath), "utf8");
@@ -357,6 +491,15 @@ try {
   fs.symlinkSync(outsideJson, path.join(jsonSymlinkVault.vault, "山竹视频复刻", "project-1", ".mangosteen", "project.json"));
   assert.throws(
     () => storage.atomicWriteJson({ resolveSafe: jsonSymlinkVault.resolveSafe, relativePath: `${projectFolder}/.mangosteen/project.json`, value: { changed: true } }),
+    /符号链接/,
+  );
+  assert.strictEqual(fs.readFileSync(outsideJson, "utf8"), "outside-unchanged");
+
+  assert.throws(
+    () => storage.atomicWriteBundle({
+      resolveSafe: jsonSymlinkVault.resolveSafe,
+      entries: [{ relativePath: `${projectFolder}/.mangosteen/project.json`, content: "blocked" }],
+    }),
     /符号链接/,
   );
   assert.strictEqual(fs.readFileSync(outsideJson, "utf8"), "outside-unchanged");

@@ -8,6 +8,7 @@ const {
   concatProjectVideos,
   hasFrameCoverage,
   prepareProject,
+  prepareResult,
   resolveRuntimes,
   sampleFrames,
   transcriptSegments,
@@ -143,6 +144,14 @@ if (output.includes("%03d")) {
   assert.strictEqual(createdDraft.schemaVersion, 6);
   assert.strictEqual(createdDraft.confirmed, false);
   assert.strictEqual(createdDraft.transcriptSegments.length, 0);
+  assert.strictEqual(
+    prepareResult({ ...created, transcriptSegments: [{ text: "wrong project location" }] }, {
+      ...createdDraft,
+      transcriptSegments: [{ start: 0, end: 1, text: "draft transcript" }],
+    }).transcriptCount,
+    1,
+    "v6 CLI summaries must count transcript segments from draft.json",
+  );
   for (const volatileField of ["status", "statusText", "runtime", "generationQueue", "activeRun"]) {
     assert.strictEqual(Object.hasOwn(createdProject, volatileField), false, `project.json must not persist volatile ${volatileField}`);
   }
@@ -251,6 +260,43 @@ fs.writeFileSync(output, "joined-video");
     });
     assert.strictEqual(finalVideoPath, `${projectFolder}/04-最终成片/最终成片.mp4`);
     assert.strictEqual(fs.readFileSync(path.join(vault, ...finalVideoPath.split("/")), "utf8"), "joined-video");
+
+    const versionSixClips = ["001", "002"].map((id) => `${created.folder}/03-分镜/${id}/视频.mp4`);
+    for (const clip of versionSixClips) {
+      fs.mkdirSync(path.dirname(path.join(creationVault, ...clip.split("/"))), { recursive: true });
+      fs.writeFileSync(path.join(creationVault, ...clip.split("/")), clip);
+    }
+    const versionSixFinalVideoPath = await concatProjectVideos({
+      project: { schemaVersion: 6, folder: created.folder, shots: versionSixClips.map((videoPath) => ({ videoPath })) },
+      vaultPath: creationVault,
+      pluginRoot: path.resolve(__dirname, ".."),
+    });
+    assert.strictEqual(versionSixFinalVideoPath, `${created.folder}/04-最终成片/最终成片.mp4`);
+    assert.strictEqual(fs.existsSync(path.join(createdRoot, ".work")), false, "v6 concat must not create the legacy .work directory");
+    assert.strictEqual(
+      fs.readdirSync(path.join(createdRoot, ".mangosteen")).some((name) => name.startsWith("concat-") || name.includes(".tmp-")),
+      false,
+      "v6 concat must remove its temporary manifest after success",
+    );
+
+    const failingFfmpeg = path.join(creationVault, "fake-ffmpeg-failure");
+    fs.writeFileSync(failingFfmpeg, "#!/usr/bin/env node\nprocess.stderr.write('injected concat failure'); process.exit(1);\n");
+    fs.chmodSync(failingFfmpeg, 0o755);
+    process.env.MANGOSTEEN_FFMPEG = failingFfmpeg;
+    await assert.rejects(
+      () => concatProjectVideos({
+        project: { schemaVersion: 6, folder: created.folder, shots: versionSixClips.map((videoPath) => ({ videoPath })) },
+        vaultPath: creationVault,
+        pluginRoot: path.resolve(__dirname, ".."),
+      }),
+      /injected concat failure|命令执行失败|退出码/,
+    );
+    assert.strictEqual(fs.existsSync(path.join(createdRoot, ".work")), false);
+    assert.strictEqual(
+      fs.readdirSync(path.join(createdRoot, ".mangosteen")).some((name) => name.startsWith("concat-") || name.includes(".tmp-")),
+      false,
+      "v6 concat must remove its temporary manifest after failure",
+    );
   } finally {
     if (oldFfmpeg === undefined) delete process.env.MANGOSTEEN_FFMPEG; else process.env.MANGOSTEEN_FFMPEG = oldFfmpeg;
     fs.rmSync(vault, { recursive: true, force: true });

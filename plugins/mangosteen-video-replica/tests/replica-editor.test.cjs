@@ -71,6 +71,15 @@ assert.deepStrictEqual(moved.shots.map((shot) => shot.title), ["第二镜", "第
 assert.deepStrictEqual(moved.shots.map((shot) => shot.id), ["001", "002"]);
 assert.deepStrictEqual(draft.shots.map((shot) => shot.title), ["第一镜", "第二镜"]);
 
+const versionSixDraft = { ...draft, schemaVersion: 6 };
+const movedVersionSix = moveShot(versionSixDraft, 1, "up");
+assert.deepStrictEqual(movedVersionSix.shots.map((shot) => shot.title), ["第二镜", "第一镜"]);
+assert.deepStrictEqual(
+  movedVersionSix.shots.map((shot) => shot.id),
+  ["002", "001"],
+  "v6 reordering must move stable shot IDs with their shots instead of renumbering them",
+);
+
 const split = addTimelineSegment(draft, 0, 0);
 assert.deepStrictEqual(split.shots[0].timeline.map(({ start, end }) => [start, end]), [[0, 2], [2, 4]]);
 assert.strictEqual(split.shots[0].timeline[1].action, "");

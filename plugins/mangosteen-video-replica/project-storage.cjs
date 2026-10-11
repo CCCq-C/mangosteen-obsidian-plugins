@@ -144,6 +144,104 @@ function atomicWriteJson({ resolveSafe, relativePath, value } = {}) {
   return relativePath;
 }
 
+function atomicWriteBundle({ resolveSafe, entries } = {}) {
+  if (!Array.isArray(entries) || entries.length === 0) throw new Error("项目文档事务不能为空。");
+  const transactionId = `${process.pid}-${crypto.randomUUID()}`;
+  const seen = new Set();
+  const prepared = entries.map((entry, index) => {
+    const relativePath = String(entry?.relativePath ?? "");
+    if (!relativePath || seen.has(relativePath)) throw new Error("项目文档事务路径缺失或重复。");
+    seen.add(relativePath);
+    if (entry?.content === undefined) throw new Error(`项目文档内容缺失：${relativePath}`);
+
+    const parentRelativePath = path.posix.dirname(relativePath);
+    if (!parentRelativePath || parentRelativePath === ".") throw new Error("项目文档路径不完整。");
+    const parentAbsolutePath = ensureDirectory(resolveSafe, parentRelativePath);
+    const absolutePath = absoluteFrom(resolveSafe, relativePath, { createParents: true });
+    if (path.resolve(path.dirname(absolutePath)) !== path.resolve(parentAbsolutePath)) {
+      throw new Error("项目文档路径解析结果不一致，已拒绝写入。");
+    }
+    const originalStat = fs.lstatSync(absolutePath, { throwIfNoEntry: false });
+    if (originalStat && (originalStat.isSymbolicLink() || !originalStat.isFile())) {
+      throw new Error("项目文档不是安全的普通文件，已拒绝写入。");
+    }
+
+    const temporaryRelativePath = `${relativePath}.tmp-bundle-${transactionId}-${index}`;
+    const backupRelativePath = `${relativePath}.bak-bundle-${transactionId}-${index}`;
+    const temporaryAbsolutePath = absoluteFrom(resolveSafe, temporaryRelativePath, { createParents: true });
+    const backupAbsolutePath = absoluteFrom(resolveSafe, backupRelativePath, { createParents: true });
+    if (path.resolve(path.dirname(temporaryAbsolutePath)) !== path.resolve(parentAbsolutePath)
+        || path.resolve(path.dirname(backupAbsolutePath)) !== path.resolve(parentAbsolutePath)) {
+      throw new Error("项目文档事务临时路径不安全，已拒绝写入。");
+    }
+    return {
+      relativePath,
+      content: Buffer.isBuffer(entry.content) ? entry.content : String(entry.content),
+      absolutePath,
+      temporaryAbsolutePath,
+      backupAbsolutePath,
+      originalExists: Boolean(originalStat),
+      temporaryOwned: false,
+      backupOwned: false,
+    };
+  });
+
+  let commitStarted = false;
+  try {
+    for (const item of prepared) {
+      const descriptor = fs.openSync(item.temporaryAbsolutePath, "wx");
+      item.temporaryOwned = true;
+      try {
+        fs.writeFileSync(descriptor, item.content);
+        fs.fsyncSync(descriptor);
+      } finally {
+        fs.closeSync(descriptor);
+      }
+    }
+    for (const item of prepared) {
+      if (!item.originalExists) continue;
+      fs.copyFileSync(item.absolutePath, item.backupAbsolutePath, fs.constants.COPYFILE_EXCL);
+      item.backupOwned = true;
+    }
+    commitStarted = true;
+    for (const item of prepared) {
+      fs.renameSync(item.temporaryAbsolutePath, item.absolutePath);
+      item.temporaryOwned = false;
+    }
+  } catch (error) {
+    const rollbackErrors = [];
+    if (commitStarted) {
+      for (const item of prepared) {
+        try {
+          const currentStat = fs.lstatSync(item.absolutePath, { throwIfNoEntry: false });
+          if (currentStat?.isSymbolicLink() || (currentStat && !currentStat.isFile())) {
+            throw new Error(`事务回滚目标不安全：${item.relativePath}`);
+          }
+          if (item.originalExists) {
+            if (!item.backupOwned) throw new Error(`事务回滚备份缺失：${item.relativePath}`);
+            fs.copyFileSync(item.backupAbsolutePath, item.absolutePath);
+          } else if (currentStat) {
+            fs.rmSync(item.absolutePath, { force: true });
+          }
+        } catch (rollbackError) {
+          rollbackErrors.push(rollbackError);
+        }
+      }
+    }
+    if (rollbackErrors.length) {
+      error.rollbackErrors = rollbackErrors;
+      error.message = `${error.message}；事务回滚失败：${rollbackErrors.map((item) => item.message).join("；")}`;
+    }
+    throw error;
+  } finally {
+    for (const item of prepared) {
+      if (item.temporaryOwned) fs.rmSync(item.temporaryAbsolutePath, { force: true });
+      if (item.backupOwned) fs.rmSync(item.backupAbsolutePath, { force: true });
+    }
+  }
+  return prepared.map((item) => item.relativePath);
+}
+
 const ARTIFACT_KINDS = Object.freeze({
   firstFrame: "firstFrame",
   "first-frame": "firstFrame",
@@ -260,6 +358,7 @@ function restoreArchivedArtifact({ resolveSafe, projectFolder, shotId, kind, arc
 module.exports = {
   archiveFailedArtifact,
   archiveCurrentArtifact,
+  atomicWriteBundle,
   atomicWriteJson,
   createProjectLayout,
   projectRelativePaths,

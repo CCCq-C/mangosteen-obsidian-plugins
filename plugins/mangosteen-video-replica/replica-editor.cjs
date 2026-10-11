@@ -134,7 +134,9 @@ function moveShot(request, shotIndex, direction) {
   if (!Number.isInteger(shotIndex) || shotIndex < 0 || shotIndex >= next.shots.length
       || targetIndex < 0 || targetIndex >= next.shots.length) return next;
   [next.shots[shotIndex], next.shots[targetIndex]] = [next.shots[targetIndex], next.shots[shotIndex]];
-  next.shots = next.shots.map((shot, index) => ({ ...shot, id: String(index + 1).padStart(3, "0") }));
+  if (Number(next.schemaVersion) !== 6) {
+    next.shots = next.shots.map((shot, index) => ({ ...shot, id: String(index + 1).padStart(3, "0") }));
+  }
   return next;
 }
 

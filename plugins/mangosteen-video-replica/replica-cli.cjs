@@ -162,10 +162,15 @@ function initialVersionSixDraft() {
 }
 
 function writeVersionSixDocuments({ resolveSafe, paths, project, draft }) {
-  projectStorage.atomicWriteJson({ resolveSafe, relativePath: paths.project, value: project });
-  projectStorage.atomicWriteJson({ resolveSafe, relativePath: paths.draft, value: draft });
-  atomicWrite(resolveSafe(paths.referenceIndex, { createParents: true }), core.referenceAssetsMarkdown(project, draft));
-  atomicWrite(resolveSafe(paths.overview, { createParents: true }), core.dashboardMarkdown(project, draft));
+  projectStorage.atomicWriteBundle({
+    resolveSafe,
+    entries: [
+      { relativePath: paths.project, content: `${JSON.stringify(project, null, 2)}\n` },
+      { relativePath: paths.draft, content: `${JSON.stringify(draft, null, 2)}\n` },
+      { relativePath: paths.referenceIndex, content: core.referenceAssetsMarkdown(project, draft) },
+      { relativePath: paths.overview, content: core.dashboardMarkdown(project, draft) },
+    ],
+  });
 }
 
 async function probeVideo(ffprobe, sourcePath) {
@@ -507,23 +512,49 @@ async function concatProjectVideos({ project, vaultPath, pluginRoot = __dirname 
   const vault = path.resolve(String(vaultPath || ""));
   const folder = core.normalizeVaultPath(project?.folder);
   const shots = Array.isArray(project?.shots) ? project.shots : [];
-  if (!shots.length || shots.some((shot) => !shot.videoPath)) throw new Error("分镜视频尚未全部生成，暂时不能拼接。");
-  const clips = shots.map((shot) => path.join(vault, ...core.normalizeVaultPath(shot.videoPath).split("/")));
+  const videoPaths = shots.map((shot) => shot?.videoPath || shot?.currentArtifacts?.video || "");
+  if (!shots.length || videoPaths.some((videoPath) => !videoPath)) throw new Error("分镜视频尚未全部生成，暂时不能拼接。");
+  const isVersionSix = Number(project?.schemaVersion) === 6;
+  const resolveSafe = isVersionSix ? createProjectResolver(vault, folder) : null;
+  const clips = videoPaths.map((videoPath) => {
+    const normalized = core.normalizeVaultPath(videoPath);
+    return resolveSafe ? resolveSafe(normalized) : path.join(vault, ...normalized.split("/"));
+  });
   const missing = clips.find((filePath) => !fs.statSync(filePath, { throwIfNoEntry: false })?.isFile());
   if (missing) throw new Error(`找不到视频片段：${path.basename(missing)}`);
   const ffmpeg = resolveRuntimes(pluginRoot).ffmpeg;
   if (!ffmpeg) throw new Error("缺少 FFmpeg，无法拼接最终成片。请重新安装山竹视频复刻组件。");
-  const absoluteFolder = path.join(vault, ...folder.split("/"));
-  const workFolder = path.join(absoluteFolder, ".work");
-  const outputFolder = path.join(absoluteFolder, "04-最终成片");
-  const listPath = path.join(workFolder, "concat.txt");
-  const outputPath = path.join(outputFolder, "最终成片.mp4");
-  fs.mkdirSync(workFolder, { recursive: true });
+  const absoluteFolder = resolveSafe ? resolveSafe(folder, { directory: true }) : path.join(vault, ...folder.split("/"));
+  const outputFolder = resolveSafe
+    ? resolveSafe(`${folder}/04-最终成片`, { createParents: true, directory: true })
+    : path.join(absoluteFolder, "04-最终成片");
+  const listPath = resolveSafe
+    ? resolveSafe(`${folder}/.mangosteen/concat-${crypto.randomUUID()}.txt`, { createParents: true })
+    : path.join(absoluteFolder, ".work", "concat.txt");
+  const outputPath = resolveSafe
+    ? resolveSafe(`${folder}/04-最终成片/最终成片.mp4`, { createParents: true })
+    : path.join(outputFolder, "最终成片.mp4");
+  if (!resolveSafe) fs.mkdirSync(path.dirname(listPath), { recursive: true });
   fs.mkdirSync(outputFolder, { recursive: true });
-  atomicWrite(listPath, `${clips.map(concatFileLine).join("\n")}\n`);
-  await run(ffmpeg, ["-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", "-movflags", "+faststart", "-y", outputPath], { timeoutMs: 10 * 60 * 1000 });
-  if (!fs.statSync(outputPath, { throwIfNoEntry: false })?.isFile()) throw new Error("FFmpeg 已结束，但没有生成最终成片。");
-  return `${folder}/04-最终成片/最终成片.mp4`;
+  try {
+    atomicWrite(listPath, `${clips.map(concatFileLine).join("\n")}\n`);
+    await run(ffmpeg, ["-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", "-movflags", "+faststart", "-y", outputPath], { timeoutMs: 10 * 60 * 1000 });
+    if (!fs.statSync(outputPath, { throwIfNoEntry: false })?.isFile()) throw new Error("FFmpeg 已结束，但没有生成最终成片。");
+    return `${folder}/04-最终成片/最终成片.mp4`;
+  } finally {
+    if (isVersionSix) fs.rmSync(listPath, { force: true });
+  }
+}
+
+function prepareResult(project, draft = {}) {
+  const transcriptSource = Number(project?.schemaVersion) === 6 ? draft : project;
+  return {
+    ok: true,
+    projectFolder: project.folder,
+    dashboard: `${project.folder}/00-项目总览.md`,
+    frameCount: Array.isArray(project.frames) ? project.frames.length : 0,
+    transcriptCount: Array.isArray(transcriptSource?.transcriptSegments) ? transcriptSource.transcriptSegments.length : 0,
+  };
 }
 
 function parseArgs(argv) {
@@ -542,7 +573,12 @@ async function main() {
     throw new Error('用法：node replica-cli.cjs prepare --source "/绝对路径/视频.mp4" --vault "/知识库路径" --json');
   }
   const project = await prepareProject({ sourcePath: args.source, vaultPath: args.vault, projectFolder: args.project });
-  const result = { ok: true, projectFolder: project.folder, dashboard: `${project.folder}/00-项目总览.md`, frameCount: project.frames.length, transcriptCount: project.transcriptSegments?.length || 0 };
+  let draft = {};
+  if (Number(project.schemaVersion) === 6) {
+    const resolveSafe = createProjectResolver(args.vault, project.folder);
+    draft = JSON.parse(fs.readFileSync(resolveSafe(projectStorage.projectRelativePaths(project.folder).draft), "utf8"));
+  }
+  const result = prepareResult(project, draft);
   process.stdout.write(args.json ? `${JSON.stringify(result)}\n` : `已创建：${result.dashboard}\n`);
 }
 
@@ -554,6 +590,7 @@ module.exports = {
   concatProjectVideos,
   hasFrameCoverage,
   prepareProject,
+  prepareResult,
   resolveRuntimes,
   sampleFrames,
   transcriptSegments,

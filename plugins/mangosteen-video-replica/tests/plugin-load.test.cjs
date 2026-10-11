@@ -252,7 +252,18 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
     projectId: "驾驶舱版本六",
     folder: versionSixFolder,
     title: "驾驶舱版本六",
-    shots: [{ id: "001", currentArtifacts: {} }],
+    shots: [
+      {
+        id: "001",
+        currentArtifacts: { video: `${versionSixFolder}/03-分镜/001/视频.mp4` },
+        videoPath: `${versionSixFolder}/03-分镜/001/视频.mp4`,
+      },
+      {
+        id: "002",
+        currentArtifacts: { video: `${versionSixFolder}/03-分镜/002/视频.mp4` },
+        videoPath: `${versionSixFolder}/03-分镜/002/视频.mp4`,
+      },
+    ],
   };
   const versionSixDraft = {
     schemaVersion: 6,
@@ -260,12 +271,37 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
     confirmed: false,
     analysisStatus: "analysis_ready",
     analysisStatusText: "等待选择镜头",
+    analysis: { provider: "mangosteen-agent", group: "production", model: "analysis-model", updatedAt: "2026-10-12T00:01:00.000Z" },
+    transcriptSegments: [{ start: 0, end: 1.2, text: "保留的台词" }],
+    source: { transcriptionLanguage: "zh", checksum: "source-checksum" },
+    createdAt: "2026-10-12T00:00:00.000Z",
+    updatedAt: "2026-10-12T00:01:00.000Z",
+    analysisConfidence: { overall: 0.91 },
+    visualStyle: { category: "真人写实", prompt: "统一真人电影质感，自然光影。" },
     character: workbenchDraft.character,
     products: workbenchDraft.products,
     scenes: workbenchDraft.scenes,
     settings: workbenchDraft.settings,
-    shots: [{ ...workbenchDraft.shots[0], id: "001" }],
+    shots: [
+      {
+        ...workbenchDraft.shots[0],
+        id: "001",
+        timeline: [{ start: 0, end: 4, action: "A 动作", dialogue: "A 台词", performance: "A 语气", camera: "中景固定", environment: "摄影棚" }],
+        analysisNotes: { sourceRange: [0, 4] },
+      },
+      {
+        ...workbenchDraft.shots[1],
+        id: "002",
+        timeline: [{ start: 0, end: 5, action: "B 动作", dialogue: "B 台词", performance: "B 语气", camera: "近景固定", environment: "摄影棚" }],
+        analysisNotes: { sourceRange: [4, 9] },
+      },
+    ],
   };
+  for (const [id, bytes] of [["001", "artifact-one"], ["002", "artifact-two"]]) {
+    const shotFolder = path.join(versionSixRoot, "03-分镜", id);
+    fs.mkdirSync(shotFolder, { recursive: true });
+    fs.writeFileSync(path.join(shotFolder, "视频.mp4"), bytes);
+  }
   fs.writeFileSync(path.join(versionSixMetadata, "project.json"), JSON.stringify(versionSixProject));
   fs.writeFileSync(path.join(versionSixMetadata, "draft.json"), JSON.stringify(versionSixDraft));
   const versionSixBeforeOpen = fs.readdirSync(versionSixRoot).sort();
@@ -281,27 +317,81 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   assert.deepStrictEqual(fs.readdirSync(versionSixRoot).sort(), versionSixBeforeOpen, "opening v6 must not create or move files");
   assert.strictEqual(fs.existsSync(path.join(versionSixRoot, "project.json")), false);
   assert.strictEqual(fs.existsSync(path.join(versionSixRoot, "generation-request.json")), false);
+
+  const editedVersionSix = replicaEditor.updateDraftField(
+    loadedVersionSix.request,
+    { section: "shot", index: 0, field: "title" },
+    "第一镜已编辑",
+  );
+  editedVersionSix.schemaVersion = 999;
+  editedVersionSix.analysisStatus = "tampered";
+  editedVersionSix.analysisStatusText = "tampered";
+  editedVersionSix.analysis = { provider: "tampered" };
+  editedVersionSix.transcriptSegments = [{ start: 9, end: 10, text: "tampered" }];
+  editedVersionSix.source = { checksum: "tampered" };
+  editedVersionSix.createdAt = "tampered";
+  editedVersionSix.analysisConfidence = { overall: 0 };
+  editedVersionSix.shots[0].analysisNotes = { sourceRange: [99, 100] };
+  const savedEditedVersionSix = await plugin.saveWorkbenchDraft(versionSixFolder, editedVersionSix);
+  assert.strictEqual(savedEditedVersionSix.shots[0].title, "第一镜已编辑");
+  const persistedEditedVersionSix = JSON.parse(fs.readFileSync(path.join(versionSixMetadata, "draft.json"), "utf8"));
+  assert.strictEqual(persistedEditedVersionSix.schemaVersion, 6);
+  assert.strictEqual(persistedEditedVersionSix.analysisStatus, versionSixDraft.analysisStatus);
+  assert.strictEqual(persistedEditedVersionSix.analysisStatusText, versionSixDraft.analysisStatusText);
+  assert.deepStrictEqual(persistedEditedVersionSix.analysis, versionSixDraft.analysis);
+  assert.deepStrictEqual(persistedEditedVersionSix.transcriptSegments, versionSixDraft.transcriptSegments);
+  assert.deepStrictEqual(persistedEditedVersionSix.source, versionSixDraft.source);
+  assert.strictEqual(persistedEditedVersionSix.createdAt, versionSixDraft.createdAt);
+  assert.deepStrictEqual(persistedEditedVersionSix.analysisConfidence, versionSixDraft.analysisConfidence);
+  assert.deepStrictEqual(persistedEditedVersionSix.shots[0].analysisNotes, versionSixDraft.shots[0].analysisNotes);
+
+  await assert.rejects(
+    () => plugin.saveWorkbenchDraft(versionSixFolder, {
+      ...savedEditedVersionSix,
+      shots: savedEditedVersionSix.shots.map((shot, index) => index === 0 ? { ...shot, id: "009" } : shot),
+    }),
+    /镜头 ID.*不能修改|稳定镜头 ID/,
+    "v6 editing must reject attempts to change an existing shot ID",
+  );
+
+  const movedVersionSix = replicaEditor.moveShot(savedEditedVersionSix, 1, "up");
+  const savedMovedVersionSix = await plugin.saveWorkbenchDraft(versionSixFolder, movedVersionSix);
+  assert.deepStrictEqual(savedMovedVersionSix.shots.map((shot) => shot.id), ["002", "001"]);
+  const persistedMovedVersionSix = JSON.parse(fs.readFileSync(path.join(versionSixMetadata, "draft.json"), "utf8"));
+  assert.deepStrictEqual(persistedMovedVersionSix.shots.map((shot) => shot.id), ["002", "001"]);
+  assert.deepStrictEqual(persistedMovedVersionSix.analysis, versionSixDraft.analysis);
+  assert.deepStrictEqual(persistedMovedVersionSix.transcriptSegments, versionSixDraft.transcriptSegments);
+  assert.deepStrictEqual(persistedMovedVersionSix.shots.map((shot) => shot.analysisNotes), [
+    versionSixDraft.shots[1].analysisNotes,
+    versionSixDraft.shots[0].analysisNotes,
+  ]);
+  const movedVersionSixProject = JSON.parse(fs.readFileSync(path.join(versionSixMetadata, "project.json"), "utf8"));
+  assert.deepStrictEqual(movedVersionSixProject.shots.map((shot) => ({ id: shot.id, video: shot.currentArtifacts.video })), [
+    { id: "002", video: `${versionSixFolder}/03-分镜/002/视频.mp4` },
+    { id: "001", video: `${versionSixFolder}/03-分镜/001/视频.mp4` },
+  ]);
+  assert.strictEqual(fs.readFileSync(path.join(versionSixRoot, "03-分镜/001/视频.mp4"), "utf8"), "artifact-one");
+  assert.strictEqual(fs.readFileSync(path.join(versionSixRoot, "03-分镜/002/视频.mp4"), "utf8"), "artifact-two");
+
   plugin.saveProject(versionSixFolder, {
-    ...versionSixProject,
+    ...movedVersionSixProject,
     status: "generating",
     statusText: "volatile queue state",
     runtime: { ffmpeg: "/tmp/ffmpeg" },
-    shots: [{
-      id: "001",
-      title: "可编辑标题",
+    shots: movedVersionSixProject.shots.map((shot) => ({
+      ...shot,
       status: "正在生成视频",
       error: "transient error",
       videoTaskId: "task-volatile",
-      currentArtifacts: {},
-    }],
+    })),
   });
   const stableVersionSixProject = JSON.parse(fs.readFileSync(path.join(versionSixMetadata, "project.json"), "utf8"));
   assert.strictEqual(Object.hasOwn(stableVersionSixProject, "status"), false);
   assert.strictEqual(Object.hasOwn(stableVersionSixProject, "statusText"), false);
   assert.strictEqual(Object.hasOwn(stableVersionSixProject, "runtime"), false);
-  assert.strictEqual(Object.hasOwn(stableVersionSixProject.shots[0], "status"), false);
-  assert.strictEqual(Object.hasOwn(stableVersionSixProject.shots[0], "error"), false);
-  assert.strictEqual(Object.hasOwn(stableVersionSixProject.shots[0], "videoTaskId"), false);
+  assert(stableVersionSixProject.shots.every((shot) => !Object.hasOwn(shot, "status")));
+  assert(stableVersionSixProject.shots.every((shot) => !Object.hasOwn(shot, "error")));
+  assert(stableVersionSixProject.shots.every((shot) => !Object.hasOwn(shot, "videoTaskId")));
 
   const malformedFolder = "山竹视频复刻/损坏项目";
   const malformedRoot = path.join(vault, ...malformedFolder.split("/"));

@@ -203,6 +203,41 @@ const compatibleV4 = core.normalizeGenerationRequest({
 });
 assert.match(compatibleV4.visualStyle.prompt, /保持现有人物、场景和产品参考图/);
 
+const stableIdV6 = core.normalizeGenerationRequest({
+  ...analysisDraft,
+  schemaVersion: 6,
+  confirmed: true,
+  shots: [
+    { ...analysisDraft.shots[0], id: "002", title: "第二镜" },
+    { ...analysisDraft.shots[0], id: "001", title: "第一镜" },
+  ],
+});
+assert.strictEqual(stableIdV6.schemaVersion, 6);
+assert.deepStrictEqual(stableIdV6.shots.map((shot) => shot.id), ["002", "001"]);
+assert.throws(
+  () => core.normalizeGenerationRequest({
+    ...analysisDraft,
+    schemaVersion: 6,
+    confirmed: true,
+    shots: [{ ...analysisDraft.shots[0], id: "1" }],
+  }),
+  /三位数字|规范/,
+  "v6 shot IDs must already be normalized",
+);
+assert.throws(
+  () => core.normalizeGenerationRequest({
+    ...analysisDraft,
+    schemaVersion: 6,
+    confirmed: true,
+    shots: [
+      { ...analysisDraft.shots[0], id: "001" },
+      { ...analysisDraft.shots[0], id: "001" },
+    ],
+  }),
+  /镜头 ID 重复.*001/,
+  "v6 shot IDs must be unique",
+);
+
 const markdown = core.dashboardMarkdown({
   folder: "山竹视频复刻/测试项目",
   title: "测试项目",

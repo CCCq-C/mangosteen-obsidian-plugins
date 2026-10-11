@@ -124,6 +124,94 @@ function stableVersionSixProject(project = {}) {
   return stable;
 }
 
+function assertVersionSixProtectedIdentities(currentRequest, nextRequest) {
+  const current = withWorkbenchShotIds(currentRequest);
+  const next = withWorkbenchShotIds(nextRequest);
+  if (String(next?.character?.id || "") !== String(current?.character?.id || "")) {
+    throw new Error("schema v6 人物资产 ID 不能通过草案编辑修改。");
+  }
+  for (const key of ["products", "scenes"]) {
+    const currentItems = Array.isArray(current?.[key]) ? current[key] : [];
+    const nextItems = Array.isArray(next?.[key]) ? next[key] : [];
+    if (currentItems.length !== nextItems.length
+        || currentItems.some((item, index) => String(item?.id || "") !== String(nextItems[index]?.id || ""))) {
+      throw new Error(`schema v6 ${key === "products" ? "产品" : "场景"}资产 ID 不能通过草案编辑修改。`);
+    }
+  }
+
+  const currentByWorkbenchId = new Map((current?.shots || []).map((shot) => [String(shot?.workbenchId || ""), shot]));
+  if ((current?.shots || []).length !== (next?.shots || []).length) {
+    throw new Error("schema v6 稳定镜头 ID 集合不能修改。");
+  }
+  const matched = new Set();
+  for (const shot of next?.shots || []) {
+    const workbenchId = String(shot?.workbenchId || "");
+    const previous = currentByWorkbenchId.get(workbenchId);
+    if (!previous || matched.has(workbenchId) || String(previous.id || "") !== String(shot?.id || "")) {
+      throw new Error("schema v6 稳定镜头 ID 不能修改；重排只能改变数组顺序。");
+    }
+    matched.add(workbenchId);
+  }
+}
+
+function versionSixValidationInput(currentRequest, identifiedDraft) {
+  assertVersionSixProtectedIdentities(currentRequest, identifiedDraft);
+  const products = Array.isArray(identifiedDraft.products) ? identifiedDraft.products : [];
+  const scenes = Array.isArray(identifiedDraft.scenes) ? identifiedDraft.scenes : [];
+  return {
+    ...identifiedDraft,
+    schemaVersion: 6,
+    version: currentRequest.version,
+    confirmed: false,
+    character: { ...identifiedDraft.character, id: currentRequest.character?.id },
+    products: products.map((item, index) => ({
+      ...item,
+      id: currentRequest.products?.[index]?.id,
+    })),
+    scenes: scenes.map((item, index) => ({
+      ...item,
+      id: currentRequest.scenes?.[index]?.id,
+    })),
+  };
+}
+
+function mergeVersionSixDraftEnvelope(currentRequest, identifiedDraft, validatedDraft) {
+  const currentShotsById = new Map((currentRequest.shots || []).map((shot) => [String(shot?.id || ""), shot]));
+  const inputShotsById = new Map((identifiedDraft.shots || []).map((shot) => [String(shot?.id || ""), shot]));
+  const mergePromptAssets = (key) => validatedDraft[key].map((item) => {
+    const previous = (currentRequest[key] || []).find((candidate) => String(candidate?.id || "") === String(item.id));
+    return { ...(previous || {}), id: item.id, prompt: item.prompt };
+  });
+  const merged = {
+    ...currentRequest,
+    schemaVersion: 6,
+    version: validatedDraft.version,
+    confirmed: false,
+    visualStyle: { ...(currentRequest.visualStyle || {}), ...validatedDraft.visualStyle },
+    character: {
+      ...(currentRequest.character || {}),
+      id: currentRequest.character?.id,
+      prompt: validatedDraft.character.prompt,
+      voiceProfile: validatedDraft.character.voiceProfile,
+    },
+    products: mergePromptAssets("products"),
+    scenes: mergePromptAssets("scenes"),
+    settings: { ...(currentRequest.settings || {}), ...validatedDraft.settings },
+    shots: validatedDraft.shots.map((shot) => {
+      const previous = currentShotsById.get(String(shot.id)) || {};
+      const input = inputShotsById.get(String(shot.id)) || {};
+      const next = { ...previous, id: previous.id || shot.id };
+      for (const field of WORKBENCH_SHOT_FIELDS) {
+        if (field !== "id" && Object.prototype.hasOwnProperty.call(shot, field)) next[field] = shot[field];
+      }
+      if (input.workbenchId) next.workbenchId = input.workbenchId;
+      return next;
+    }),
+  };
+  if (Object.prototype.hasOwnProperty.call(currentRequest, "updatedAt")) merged.updatedAt = new Date().toISOString();
+  return merged;
+}
+
 class PrepareModal extends Modal {
   constructor(plugin) { super(plugin.app); this.plugin = plugin; this.sourcePath = ""; }
 
@@ -1421,18 +1509,23 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     if (this.confirmingProjects?.has(paths.folder)) throw new Error("项目正在确认，不能编辑草案。");
     const { request: currentRequest } = this.currentWorkbenchLock(paths);
     const identifiedDraft = withWorkbenchShotIds(draft);
-    const validation = replicaEditor.validateDraft(identifiedDraft, core.normalizeGenerationRequest);
+    const validationInput = paths.isV6
+      ? versionSixValidationInput(currentRequest, identifiedDraft)
+      : identifiedDraft;
+    const validation = replicaEditor.validateDraft(validationInput, core.normalizeGenerationRequest);
     if (!validation.ok) {
       const details = validation.errors.map((error) => `${error.path}：${error.message}`).join("；");
       throw new Error(`草案校验失败：${details}`);
     }
-    const savedRequest = {
-      ...validation.value,
-      shots: validation.value.shots.map((shot, index) => ({
-        ...shot,
-        workbenchId: identifiedDraft.shots[index].workbenchId,
-      })),
-    };
+    const savedRequest = paths.isV6
+      ? mergeVersionSixDraftEnvelope(currentRequest, identifiedDraft, validation.value)
+      : {
+        ...validation.value,
+        shots: validation.value.shots.map((shot, index) => ({
+          ...shot,
+          workbenchId: identifiedDraft.shots[index].workbenchId,
+        })),
+      };
     const queue = this.currentWorkbenchQueue(paths.folder);
     const api = this.workbenchQueueApi(paths.folder);
     const lockedIds = new Set(api.lockedShotIds(queue));
@@ -1459,31 +1552,38 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       }
     }
     const project = this.readJson(paths.projectPath);
-    const currentShots = Array.isArray(project.shots)
-      ? withWorkbenchShotIds({ shots: project.shots }).shots
-      : [];
-    const currentShotsByWorkbenchId = new Map();
-    for (const shot of currentShots) {
-      if (!shot || typeof shot !== "object" || Array.isArray(shot)) continue;
-      const workbenchId = String(shot.workbenchId || "").trim();
-      if (workbenchId) currentShotsByWorkbenchId.set(workbenchId, shot);
-    }
-    project.shots = savedRequest.shots.map((shot) => {
-      const previous = currentShotsByWorkbenchId.get(shot.workbenchId);
-      const next = { ...(previous || {}), workbenchId: shot.workbenchId };
-      for (const field of WORKBENCH_SHOT_FIELDS) {
-        if (Object.prototype.hasOwnProperty.call(shot, field)) next[field] = shot[field];
-      }
-      return next;
-    });
     if (paths.isV6) {
-      projectStorage.atomicWriteJson({
-        resolveSafe: this.projectStorageResolver(paths.folder),
-        relativePath: projectStorage.projectRelativePaths(paths.folder).draft,
-        value: savedRequest,
+      const currentShotsById = new Map((project.shots || []).map((shot) => [String(shot?.id || ""), shot]));
+      project.shots = savedRequest.shots.map((shot) => {
+        const previous = currentShotsById.get(String(shot.id));
+        const next = { ...(previous || {}), id: shot.id };
+        for (const field of WORKBENCH_SHOT_FIELDS) {
+          if (field !== "id" && Object.prototype.hasOwnProperty.call(shot, field)) next[field] = shot[field];
+        }
+        return next;
       });
-    } else writeJson(paths.requestPath, savedRequest);
-    this.saveProject(paths.folder, project);
+      this.saveVersionSixDocuments(paths.folder, project, savedRequest);
+    } else {
+      const currentShots = Array.isArray(project.shots)
+        ? withWorkbenchShotIds({ shots: project.shots }).shots
+        : [];
+      const currentShotsByWorkbenchId = new Map();
+      for (const shot of currentShots) {
+        if (!shot || typeof shot !== "object" || Array.isArray(shot)) continue;
+        const workbenchId = String(shot.workbenchId || "").trim();
+        if (workbenchId) currentShotsByWorkbenchId.set(workbenchId, shot);
+      }
+      project.shots = savedRequest.shots.map((shot) => {
+        const previous = currentShotsByWorkbenchId.get(shot.workbenchId);
+        const next = { ...(previous || {}), workbenchId: shot.workbenchId };
+        for (const field of WORKBENCH_SHOT_FIELDS) {
+          if (Object.prototype.hasOwnProperty.call(shot, field)) next[field] = shot[field];
+        }
+        return next;
+      });
+      writeJson(paths.requestPath, savedRequest);
+      this.saveProject(paths.folder, project);
+    }
     this.requestWorkbenchRefresh();
     return savedRequest;
   }
@@ -1728,13 +1828,8 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       delete draft.analysisErrorCode;
       delete draft.analysisErrorStatus;
       delete draft.analysisErrorAt;
-      projectStorage.atomicWriteJson({
-        resolveSafe: this.projectStorageResolver(checkedFolder),
-        relativePath: versionSixPaths.draft,
-        value: draft,
-      });
       documents.draft = draft;
-      this.saveProject(projectFolder, project);
+      this.saveVersionSixDocuments(checkedFolder, project, draft);
     } else {
       project.status = "analyzing";
       project.statusText = "山竹智能体正在分析人物、场景和分镜";
@@ -1786,12 +1881,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
           analysisErrorStatus: modelError ? Number(error?.status || 0) || undefined : undefined,
           analysisErrorAt: new Date().toISOString(),
         };
-        projectStorage.atomicWriteJson({
-          resolveSafe: this.projectStorageResolver(checkedFolder),
-          relativePath: versionSixPaths.draft,
-          value: draft,
-        });
-        this.saveProject(checkedFolder, project);
+        this.saveVersionSixDocuments(checkedFolder, project, draft);
         if (!modelError) throw error;
         const surfaced = new Error(draft.analysisStatusText);
         surfaced.code = draft.analysisErrorCode;
@@ -1909,23 +1999,35 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
 
   readJson(filePath) { return JSON.parse(fs.readFileSync(filePath, "utf8")); }
 
+  saveVersionSixDocuments(projectFolder, project, draft) {
+    const checkedFolder = this.checkedWorkbenchProjectFolder(projectFolder).folder;
+    if (String(project?.folder || "").replace(/\\/g, "/") !== checkedFolder) {
+      throw new Error("project.json 的项目目录与当前项目范围不一致，已拒绝写入。");
+    }
+    const stableProject = stableVersionSixProject(project);
+    const paths = projectStorage.projectRelativePaths(checkedFolder);
+    projectStorage.atomicWriteBundle({
+      resolveSafe: this.projectStorageResolver(checkedFolder),
+      entries: [
+        { relativePath: paths.project, content: `${JSON.stringify(stableProject, null, 2)}\n` },
+        { relativePath: paths.draft, content: `${JSON.stringify(draft, null, 2)}\n` },
+        { relativePath: paths.overview, content: core.dashboardMarkdown(stableProject, draft) },
+        { relativePath: paths.referenceIndex, content: core.referenceAssetsMarkdown(stableProject, draft) },
+      ],
+    });
+    return stableProject;
+  }
+
   saveProject(projectFolder, project) {
     const checkedFolder = this.checkedWorkbenchProjectFolder(projectFolder).folder;
     if (String(project?.folder || "").replace(/\\/g, "/") !== checkedFolder) throw new Error("project.json 的项目目录与当前项目范围不一致，已拒绝写入。");
     const paths = this.workbenchProjectPaths(checkedFolder);
     if (paths.isV6) {
-      project = stableVersionSixProject(project);
-      projectStorage.atomicWriteJson({
-        resolveSafe: this.projectStorageResolver(checkedFolder),
-        relativePath: projectStorage.projectRelativePaths(checkedFolder).project,
-        value: project,
-      });
-    } else writeJson(paths.projectPath, project);
-    const draft = paths.isV6 ? this.readOptionalJson(paths.requestPath) || {} : {};
-    atomicWrite(this.checkedProjectPath(checkedFolder, "00-项目总览.md", { createParents: true }), core.dashboardMarkdown(project, draft));
-    if (paths.isV6) {
-      const referenceIndex = projectStorage.projectRelativePaths(checkedFolder).referenceIndex;
-      atomicWrite(this.checkedProjectPath(checkedFolder, referenceIndex, { createParents: true }), core.referenceAssetsMarkdown(project, draft));
+      const draft = this.readOptionalJson(paths.requestPath) || {};
+      this.saveVersionSixDocuments(checkedFolder, project, draft);
+    } else {
+      writeJson(paths.projectPath, project);
+      atomicWrite(this.checkedProjectPath(checkedFolder, "00-项目总览.md", { createParents: true }), core.dashboardMarkdown(project, {}));
     }
     this.requestWorkbenchRefresh();
   }
