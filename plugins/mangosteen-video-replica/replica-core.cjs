@@ -3,6 +3,7 @@ const path = require("path");
 const { classifyModel, normalizeVideoDuration } = require("./generation-policy.cjs");
 const { assertAssetId } = require("./reference-assets.cjs");
 const { fitTimelineDuration, legacyTimeline, normalizeTimeline } = require("./shot-timeline.cjs");
+const { normalizeVisualStyle } = require("./visual-style.cjs");
 
 const ALLOWED_VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".m4v"]);
 const WINDOWS_RESERVED_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
@@ -84,7 +85,13 @@ function normalizeGenerationRequest(input) {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw validationError("生成任务格式错误。", "request");
   if (input.confirmed !== true) throw validationError("生成任务尚未确认，不会调用付费算力。", "confirmed");
   const version = input.version === undefined ? 1 : Number(input.version);
-  if (![1, 2, 3, 4].includes(version)) throw validationError(`不支持生成任务版本：${String(input.version)}`, "version");
+  if (![1, 2, 3, 4, 5].includes(version)) throw validationError(`不支持生成任务版本：${String(input.version)}`, "version");
+  let visualStyle;
+  try {
+    visualStyle = normalizeVisualStyle(input.visualStyle, { required: version >= 5 });
+  } catch (error) {
+    throw validationError(String(error?.message || error), "visualStyle");
+  }
   const characterPrompt = cleanText(input.character?.prompt);
   if (!characterPrompt) throw validationError("缺少人物参考图提示词。", "character.prompt");
   const inputShots = Array.isArray(input.shots) ? input.shots : [];
@@ -123,6 +130,7 @@ function normalizeGenerationRequest(input) {
     return {
       version,
       confirmed: true,
+      visualStyle,
       character: { id: characterId, prompt: characterPrompt, voiceProfile: cleanText(input.character?.voiceProfile) },
       ...(version >= 3 ? { products } : {}),
       scenes,
@@ -205,6 +213,7 @@ function normalizeGenerationRequest(input) {
   return {
     version: 1,
     confirmed: true,
+    visualStyle,
     character: { prompt: characterPrompt, voiceProfile: cleanText(input.character?.voiceProfile) },
     settings: {
       imageModel: cleanText(input.settings?.imageModel),
@@ -258,8 +267,9 @@ function buildGenerationDraft(project, analysis, settings = {}) {
   const rawShots = Array.isArray(analysis.shots) ? analysis.shots.slice(0, 12) : [];
   const videoModel = cleanText(settings.videoModel) || "MiniMax-H3";
   const draft = {
-    version: 4,
+    version: 5,
     confirmed: true,
+    visualStyle: normalizeVisualStyle(analysis.visualStyle),
     character: {
       id: characterId,
       prompt: cleanText(analysis.character?.prompt),
@@ -306,6 +316,7 @@ function analysisStoryboardMarkdown(project, request) {
       lines.push(`| ${shot.id}｜${safeSegment(shot.title)} | ${Number(segment.start)}～${Number(segment.end)} 秒 | ${cleanText(segment.action).replace(/\|/g, "\\|")} | ${cleanText(segment.dialogue).replace(/\|/g, "\\|")} | ${cleanText(segment.performance).replace(/\|/g, "\\|")} | ${cleanText(segment.camera).replace(/\|/g, "\\|")} | ${cleanText(segment.environment).replace(/\|/g, "\\|")} |`);
     }
   }
+  lines.push("", "## 统一视觉风格", "", `**${request.visualStyle.category}**`, "", request.visualStyle.prompt, "");
   lines.push("", "## 人物参考提示词", "", request.character.prompt, "", "## 人物声音设定", "", request.character.voiceProfile || "未指定，由视频模型根据人物和剧情自然生成。", "", "## 产品参考提示词", "");
   if (!(request.products || []).length) lines.push("本项目没有需要固定外观的核心产品。", "");
   for (const product of request.products || []) lines.push(`### ${product.id}`, "", product.prompt, "");

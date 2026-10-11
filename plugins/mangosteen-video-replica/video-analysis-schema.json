@@ -2,8 +2,17 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["character", "products", "scenes", "shots"],
+  "required": ["visualStyle", "character", "products", "scenes", "shots"],
   "properties": {
+    "visualStyle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["category", "prompt"],
+      "properties": {
+        "category": { "type": "string", "minLength": 2, "maxLength": 32 },
+        "prompt": { "type": "string", "minLength": 20 }
+      }
+    },
     "character": {
       "type": "object",
       "additionalProperties": false,

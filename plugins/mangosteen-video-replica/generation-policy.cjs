@@ -1,5 +1,6 @@
 const crypto = require("crypto");
 const { compileTimelinePrompt } = require("./shot-timeline.cjs");
+const { applyVisualStyle, normalizeVisualStyle } = require("./visual-style.cjs");
 
 const clean = (value) => String(value || "").trim();
 
@@ -23,9 +24,16 @@ function normalizeVideoDuration(value, model) {
   return Math.max(min, Math.min(max, seconds));
 }
 
-function referenceRequirements(model, lastImagePrompt = "") {
+function referenceRequirements(model, lastImagePrompt = "", { structured = false } = {}) {
   const family = classifyModel(model);
   if (!family) throw new Error(`视频复刻不支持模型：${String(model || "未选择")}`);
+  if (structured) {
+    return {
+      mode: family === "minimax-h3" ? "frame-fields" : "reference-images",
+      firstImage: family === "minimax-h3",
+      lastImage: false,
+    };
+  }
   return {
     mode: family === "minimax-h3" ? "frame-fields" : "reference-images",
     firstImage: true,
@@ -33,16 +41,16 @@ function referenceRequirements(model, lastImagePrompt = "") {
   };
 }
 
-function composeVideoPrompt({ timeline, duration, videoPrompt, dialogue, voiceProfile, voiceDirection } = {}) {
+function composeVideoPrompt({ timeline, duration, videoPrompt, dialogue, voiceProfile, voiceDirection, visualStyle } = {}) {
   if (Array.isArray(timeline) && timeline.length) {
-    return compileTimelinePrompt(timeline, { duration, voiceProfile });
+    return applyVisualStyle(compileTimelinePrompt(timeline, { duration, voiceProfile }), visualStyle);
   }
   const visualPrompt = clean(videoPrompt);
   const spokenText = clean(dialogue);
-  if (!spokenText) return visualPrompt;
+  if (!spokenText) return applyVisualStyle(visualPrompt, visualStyle);
   const stableVoice = clean(voiceProfile) || "中文普通话，声音自然清晰，符合人物年龄与形象。";
   const delivery = clean(voiceDirection) || "根据当前剧情自然表达，语速适中，停顿自然。";
-  return [
+  return applyVisualStyle([
     visualPrompt,
     "",
     "【角色对白】",
@@ -51,18 +59,20 @@ function composeVideoPrompt({ timeline, duration, videoPrompt, dialogue, voicePr
     `固定声音设定：${stableVoice}`,
     `本镜头情绪与语调：${delivery}`,
     "对白语言和口音严格遵循固定声音设定，并与人物口型同步，吐字清楚；不得添加、删减或改写台词；背景音乐和环境音不得盖过对白。",
-  ].filter(Boolean).join("\n");
+  ].filter(Boolean).join("\n"), visualStyle);
 }
 
-function resolveVideoPrompt({ videoPromptOverride, ...parts } = {}) {
+function resolveVideoPrompt({ videoPromptOverride, visualStyle, ...parts } = {}) {
   const override = clean(videoPromptOverride);
-  return override || composeVideoPrompt(parts);
+  return override ? applyVisualStyle(override, visualStyle) : composeVideoPrompt({ ...parts, visualStyle });
 }
 
-function createGenerationFingerprint({ character = {}, scene = {}, products = [], shot = {}, model, ratio, resolution } = {}) {
-  const requirements = referenceRequirements(model, shot.lastImagePrompt);
+function createGenerationFingerprint({ requestVersion = 1, visualStyle, character = {}, scene = {}, products = [], shot = {}, model, ratio, resolution } = {}) {
+  const structured = Number(requestVersion) >= 4 && Array.isArray(shot.timeline) && shot.timeline.length > 0;
+  const requirements = referenceRequirements(model, shot.lastImagePrompt, { structured });
   const canonical = {
-    version: 3,
+    version: 4,
+    visualStyle: normalizeVisualStyle(visualStyle),
     character: { id: clean(character.id), prompt: clean(character.prompt), contentHash: clean(character.contentHash) },
     scene: { id: clean(scene.id), prompt: clean(scene.prompt), contentHash: clean(scene.contentHash) },
     products: (Array.isArray(products) ? products : []).map((product) => ({
@@ -71,8 +81,8 @@ function createGenerationFingerprint({ character = {}, scene = {}, products = []
       contentHash: clean(product?.contentHash),
     })),
     imagePrompt: clean(shot.imagePrompt),
-    lastImagePrompt: clean(shot.lastImagePrompt),
-    legacyFrameMode: shot.legacyFrameMode === true,
+    lastImagePrompt: structured ? "" : clean(shot.lastImagePrompt),
+    legacyFrameMode: structured ? false : shot.legacyFrameMode === true,
     effectiveVideoPrompt: resolveVideoPrompt({
       timeline: shot.timeline,
       duration: shot.duration,
@@ -81,6 +91,7 @@ function createGenerationFingerprint({ character = {}, scene = {}, products = []
       dialogue: shot.dialogue,
       voiceProfile: character.voiceProfile,
       voiceDirection: shot.voiceDirection,
+      visualStyle,
     }),
     timeline: (Array.isArray(shot.timeline) ? shot.timeline : []).map((segment) => ({
       start: Number(segment?.start),

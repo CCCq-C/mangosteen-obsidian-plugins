@@ -22,6 +22,7 @@ const COLLECTIONS = {
 };
 
 const DIRECT_FIELDS = {
+  visualStyle: new Set(["category", "prompt"]),
   character: new Set(["prompt", "voiceProfile"]),
   settings: new Set(["imageModel", "videoModel", "ratio", "resolution"]),
 };

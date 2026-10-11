@@ -1,6 +1,7 @@
 const { normalizeGenerationRequest } = require("./replica-core.cjs");
 const { normalizeVideoDuration, resolveVideoPrompt, videoDurationRange } = require("./generation-policy.cjs");
 const { fitTimelineDuration, legacyTimeline } = require("./shot-timeline.cjs");
+const { normalizeVisualStyle } = require("./visual-style.cjs");
 const {
   addTimelineSegment,
   isDraftLocked,
@@ -79,6 +80,15 @@ function editableRequest(request) {
         legacyFrameMode: true,
       };
     });
+  }
+  if (version < 5) {
+    next.version = 5;
+    next.confirmed = false;
+    next.visualStyle = normalizeVisualStyle(next.visualStyle);
+    next.shots = list(next.shots).map((shot) => ({
+      ...shot,
+      legacyFrameMode: false,
+    }));
   }
   return next;
 }
@@ -227,7 +237,7 @@ function createVideoReplicaWorkbenchView(ItemView) {
       if (!this.dirty || folderChanged || !this.draft) {
         const sourceVersion = Number(nextSnapshot.request?.version || 1);
         this.draft = editableRequest(nextSnapshot.request);
-        if (sourceVersion < 4 && Number(this.draft?.version) === 4) this.dirty = true;
+        if (sourceVersion < 5 && Number(this.draft?.version) === 5) this.dirty = true;
       }
       this.snapshot = nextSnapshot;
       this.viewModel = deriveWorkbenchState(nextSnapshot);
@@ -434,6 +444,16 @@ function createVideoReplicaWorkbenchView(ItemView) {
 
   renderAssets(parent) {
     this.renderPageTitle(parent, "参考资产", "编辑人物、产品和场景提示词；本地修改保存前不会被轮询覆盖。");
+    const projectStyleLocked = list(this.viewModel?.lockedShotIds).length > 0;
+    const styleCard = parent.createDiv({ cls: "mangosteen-replica-card mangosteen-replica-style-card" });
+    styleCard.createEl("h3", { text: "项目统一视觉风格" });
+    this.createDraftControl(styleCard, "风格分类", "input", this.draft?.visualStyle?.category, {
+      section: "visualStyle", field: "category",
+    }, { disabled: projectStyleLocked });
+    this.createDraftControl(styleCard, "风格生成提示词", "textarea", this.draft?.visualStyle?.prompt, {
+      section: "visualStyle", field: "prompt",
+    }, { disabled: projectStyleLocked });
+    styleCard.createEl("p", { cls: "mangosteen-replica-muted", text: "人物、产品、场景、首帧和视频都会自动继承这里的风格。" });
     const grid = parent.createDiv({ cls: "mangosteen-replica-asset-grid" });
     const character = this.draft?.character || {};
     const characterCard = grid.createDiv({ cls: "mangosteen-replica-card" });
@@ -603,6 +623,7 @@ function createVideoReplicaWorkbenchView(ItemView) {
           dialogue: shot.dialogue,
           voiceProfile: this.draft?.character?.voiceProfile,
           voiceDirection: shot.voiceDirection,
+          visualStyle: this.draft?.visualStyle,
         });
       } catch (error) {
         preview.value = `时间轴待修正：${String(error?.message || error)}`;
@@ -747,7 +768,7 @@ function createVideoReplicaWorkbenchView(ItemView) {
         this.syncSaveState();
         if (target.section === "timeline") this.refreshPromptPreview(target.shotIndex);
         else if (target.section === "shot" && target.field === "duration") this.refreshPromptPreview(target.index);
-        else if (target.section === "character" && target.field === "voiceProfile") this.refreshAllPromptPreviews();
+        else if ((target.section === "character" && target.field === "voiceProfile") || target.section === "visualStyle") this.refreshAllPromptPreviews();
         this.renderSignature = this.buildRenderSignature();
         if (typeof options.onChange === "function") await options.onChange(nextValue, control);
       } catch (error) {
@@ -771,6 +792,7 @@ function createVideoReplicaWorkbenchView(ItemView) {
         dialogue: shot.dialogue,
         voiceProfile: this.draft?.character?.voiceProfile,
         voiceDirection: shot.voiceDirection,
+        visualStyle: this.draft?.visualStyle,
       });
     } catch (error) {
       preview.value = `时间轴待修正：${String(error?.message || error)}`;

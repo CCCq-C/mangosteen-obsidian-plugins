@@ -124,8 +124,9 @@ assert.strictEqual(
 );
 
 const request = {
-  version: 4,
+  version: 5,
   confirmed: false,
+  visualStyle: { category: "真人写实", prompt: "真人电影质感，自然皮肤纹理，暖色电影光影。" },
   character: { id: "hero", prompt: "短发人物，蓝色工装", voiceProfile: "年轻清亮女声，轻微四川口音" },
   products: [{ id: "phone", prompt: "银色手机" }],
   scenes: [{ id: "room", prompt: "明亮摄影棚" }],
@@ -347,6 +348,13 @@ function createView(plugin) {
   ));
   assert(voiceProfileInput, "stable character voice profile should be editable in the workbench");
   assert.strictEqual(voiceProfileInput.value, "年轻清亮女声，轻微四川口音");
+  const stylePromptInput = view.contentEl.find((element) => (
+    element.tagName === "TEXTAREA"
+      && element.dataset.section === "visualStyle"
+      && element.dataset.field === "prompt"
+  ));
+  assert(stylePromptInput, "project visual style must be editable once for every asset and shot");
+  assert.strictEqual(stylePromptInput.value, "真人电影质感，自然皮肤纹理，暖色电影光影。");
   await view.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "分镜").dispatch("click");
 
   plugin.snapshot.request.shots[0].title = "外部改名";
@@ -444,7 +452,8 @@ function createView(plugin) {
   await overrideView.onOpen();
   await overrideView.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "分镜").dispatch("click");
   const overridePreview = overrideView.contentEl.find((element) => element.attributes["aria-label"] === "最终视频提示词预览");
-  assert.strictEqual(overridePreview.value, "旧项目保留的最终视频提示词。", "preview and paid submission must resolve the same final prompt");
+  assert.match(overridePreview.value, /旧项目保留的最终视频提示词。/, "preview and paid submission must resolve the same final prompt");
+  assert.match(overridePreview.value, /【项目视觉风格】/);
   await overrideView.onClose();
 
   const v1Request = {
@@ -471,10 +480,10 @@ function createView(plugin) {
   const v1View = createView(v1Plugin);
   await v1View.onOpen();
   assert.strictEqual(v1View.dirty, true, "an in-memory legacy migration must be saved before previewing paid generation");
-  assert.strictEqual(v1View.draft.version, 4, "v1 drafts must migrate in memory before the timeline editor opens");
+  assert.strictEqual(v1View.draft.version, 5, "v1 drafts must migrate in memory before the timeline editor opens");
   assert.strictEqual(v1View.draft.shots[0].timeline.length, 1);
   assert.strictEqual(v1View.draft.shots[0].sceneId, "legacy-scene-001");
-  assert.strictEqual(v1View.draft.shots[0].legacyFrameMode, true, "migrated legacy drafts must preserve their original frame-generation route");
+  assert.strictEqual(v1View.draft.shots[0].legacyFrameMode, false, "migrated drafts must use the simplified timeline generation route");
   assert.strictEqual(v1View.draft.shots[0].imagePrompt, "人物在明亮客厅走入画面");
   assert.strictEqual(v1View.draft.shots[0].videoPrompt, "人物走入画面");
   await v1View.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "分镜").dispatch("click");
@@ -492,8 +501,8 @@ function createView(plugin) {
   const v1DirectView = createView(v1DirectPlugin);
   await v1DirectView.onOpen();
   assert.strictEqual(await v1DirectView.generateShots(["001"]), true);
-  assert.strictEqual(v1DirectPlugin.saveCalls.length, 1, "direct generation must persist the migrated v4 draft first");
-  assert.strictEqual(v1DirectPlugin.saveCalls[0].request.version, 4);
+  assert.strictEqual(v1DirectPlugin.saveCalls.length, 1, "direct generation must persist the migrated v5 draft first");
+  assert.strictEqual(v1DirectPlugin.saveCalls[0].request.version, 5);
   assert.strictEqual(v1DirectPlugin.queueCalls.length, 1);
   await v1DirectView.onClose();
 
@@ -730,6 +739,11 @@ function createView(plugin) {
   assert.strictEqual(partialGenerateButtons[0].disabled, true, "the processing shot generation button must stay locked");
   assert.strictEqual(partialGenerateButtons[1].disabled, false, "an unqueued shot must be appendable to the running queue");
   assert(partialLockView.contentEl.find((element) => element.textContent.includes("镜头 001")), "the active shot progress must be visible in the workbench");
+  await partialLockView.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "资产").dispatch("click");
+  const lockedStylePrompt = partialLockView.contentEl.find((element) => (
+    element.dataset.section === "visualStyle" && element.dataset.field === "prompt"
+  ));
+  assert.strictEqual(lockedStylePrompt.disabled, true, "project style must stay locked while any shot is queued or processing");
   await partialLockView.onClose();
 
   const emptyView = createView(createPlugin({ project: {}, request: {}, generationState: {} }, []));

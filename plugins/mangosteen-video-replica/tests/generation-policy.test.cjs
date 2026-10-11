@@ -33,16 +33,22 @@ const timelinePrompt = composeVideoPrompt({
   timeline,
   duration: 6,
   voiceProfile: "年轻清亮的中文女声。",
+  visualStyle: { category: "真人写实", prompt: "真人电影质感，自然皮肤纹理，暖色电影光影。" },
 });
+assert.match(timelinePrompt, /【项目视觉风格】/);
+assert.match(timelinePrompt, /真人电影质感/);
+assert.strictEqual((timelinePrompt.match(/【项目视觉风格】/g) || []).length, 1);
 assert(timelinePrompt.indexOf("【0～2.5 秒】") < timelinePrompt.indexOf("【2.5～6 秒】"));
 assert.match(timelinePrompt, /人物台词：就是这款。/);
 assert.strictEqual((timelinePrompt.match(/年轻清亮的中文女声/g) || []).length, 1);
-assert.strictEqual(composeVideoPrompt({
+const silentPrompt = composeVideoPrompt({
   videoPrompt: "港口空镜，海浪轻拍岸边。",
   dialogue: "",
   voiceProfile: "年轻女声",
   voiceDirection: "兴奋",
-}), "港口空镜，海浪轻拍岸边。", "silent shots must not invent speech");
+});
+assert.match(silentPrompt, /港口空镜，海浪轻拍岸边/);
+assert.doesNotMatch(silentPrompt, /【角色对白】|画面中的角色完整说出/, "silent shots must not invent speech");
 
 assert.strictEqual(resolveVideoPrompt({
   videoPrompt: "自动视觉描述",
@@ -50,7 +56,8 @@ assert.strictEqual(resolveVideoPrompt({
   voiceProfile: "自动声音",
   voiceDirection: "自动语气",
   videoPromptOverride: "用户编辑后的完整提示词",
-}), "用户编辑后的完整提示词", "explicit complete prompt must bypass automatic composition");
+  visualStyle: { category: "动漫", prompt: "日系二维动画，赛璐璐上色。" },
+}), "【项目视觉风格】\n类型：动漫\n日系二维动画，赛璐璐上色。\n\n用户编辑后的完整提示词", "explicit complete prompt must retain project style");
 assert.match(resolveVideoPrompt({
   videoPrompt: "自动视觉描述",
   dialogue: "自动台词",
@@ -161,6 +168,7 @@ for (const model of ["KlingO3", "wan3.0-r2v-k1", "future-video-model"]) {
 }
 
 const fingerprintInput = {
+  visualStyle: { category: "真人写实", prompt: "真人电影质感，自然皮肤纹理。" },
   character: { id: "hero-v1", prompt: "短发女性，蓝色工装", contentHash: "sha256:character-a" },
   scene: { id: "harbor-v1", prompt: "海边集装箱码头", contentHash: "sha256:scene-a" },
   products: [{ id: "headphones-v1", prompt: "白色头戴式耳机", contentHash: "sha256:product-a" }],
@@ -185,6 +193,7 @@ for (const changed of [
   { scene: { ...fingerprintInput.scene, prompt: "白色摄影棚" } },
   { scene: { ...fingerprintInput.scene, contentHash: "sha256:scene-b" } },
   { products: [{ ...fingerprintInput.products[0], contentHash: "sha256:product-b" }] },
+  { visualStyle: { category: "动漫", prompt: "日系二维动画，赛璐璐上色。" } },
   { shot: { ...fingerprintInput.shot, imagePrompt: "人物坐在集装箱前" } },
   { shot: { ...fingerprintInput.shot, lastImagePrompt: "" } },
   { shot: { ...fingerprintInput.shot, duration: 5, timeline: [{ ...fingerprintInput.shot.timeline[0], end: 5 }] } },

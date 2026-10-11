@@ -24,10 +24,13 @@ try {
     "replica-editor.cjs",
     "replica-ui-state.cjs",
     "replica-workbench.cjs",
+    "shot-timeline.cjs",
+    "visual-style.cjs",
     "tests/plugin-load.test.cjs",
     "tests/replica-editor.test.cjs",
     "tests/replica-ui-state.test.cjs",
     "tests/replica-workbench.test.cjs",
+    "tests/visual-style.test.cjs",
   ]) assert(fs.statSync(path.join(target, file), { throwIfNoEntry: false })?.isFile(), `missing synced allowlist file: ${file}`);
   assert.strictEqual(fs.readFileSync(path.join(target, "user-owned-sentinel.txt"), "utf8"), "keep", "sync must not delete user files");
 

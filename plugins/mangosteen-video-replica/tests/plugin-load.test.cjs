@@ -1069,7 +1069,8 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
       assert.strictEqual(completed.sceneAssets.length, 1, `${family}: one scene asset must be retained`);
       assert(fs.existsSync(path.join(caseVault, ...completed.sceneAssets[0].imagePath.split("/"))), `${family}: scene asset file must exist`);
       assert.strictEqual(generatedTextPrompts.length, 2, `${family}: exactly one character and one scene asset must be generated`);
-      assert.strictEqual(generatedTextPrompts[0], "固定人物参考板", `${family}: character board must keep its source prompt`);
+      assert.match(generatedTextPrompts[0], /固定人物参考板/, `${family}: character board must keep its source prompt`);
+      assert.match(generatedTextPrompts[0], /【项目视觉风格】/, `${family}: character board must inherit the project style`);
       assert.match(generatedTextPrompts[1], /固定摄影棚场景/, `${family}: scene asset must keep the environment description`);
       assert.match(generatedTextPrompts[1], /纯环境空镜/, `${family}: scene assets must be generated without people`);
       assert(generatedImageModels.every((value) => value === "gpt-image-2-w"), `${family}: every image call must use the selected image model`);
@@ -1088,7 +1089,8 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
       assert.match(submittedOptions[0].prompt, /你们好呀/, `${family}: dialogue must reach the video prompt`);
       assert.match(submittedOptions[0].prompt, /轻微四川口音/, `${family}: stable voice profile must reach the video prompt`);
       assert.match(submittedOptions[0].prompt, /亲切，语速中等/, `${family}: per-shot delivery must reach the video prompt`);
-      assert.strictEqual(submittedOptions[1].prompt, "镜头缓慢推进", `${family}: silent shots must not invent dialogue instructions`);
+      assert.match(submittedOptions[1].prompt, /镜头缓慢推进/, `${family}: silent shots must retain the visual instruction`);
+      assert.doesNotMatch(submittedOptions[1].prompt, /【角色对白】|画面中的角色完整说出/, `${family}: silent shots must not invent dialogue instructions`);
       const expectedResolution = family === "minimax-h3" ? "768p" : "720p";
       assert.deepStrictEqual(submittedOptions.map((options) => options.resolution), [
         expectedResolution,
@@ -1302,18 +1304,19 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   await plugin.runGeneration(generatedV2Folder, requestV2, 456);
 
   assert.strictEqual(generatedTextPrompts.length, 3, "the legacy people-containing scene asset must be regenerated");
-  assert.strictEqual(generatedTextPrompts[0], "固定人物参考板");
+  assert.match(generatedTextPrompts[0], /固定人物参考板/);
+  assert.match(generatedTextPrompts[0], /【项目视觉风格】/);
   assert.match(generatedTextPrompts[1], /纯环境空镜[\s\S]*海边集装箱场景/);
   assert.match(generatedTextPrompts[2], /纯环境空镜[\s\S]*摄影棚场景/);
   assert.strictEqual(editCalls.length, 3);
   assert.deepStrictEqual(editCalls.map((call) => call.references), [
-    ["text:固定人物参考板", `text:${generatedTextPrompts[1]}`],
-    ["text:固定人物参考板", `text:${generatedTextPrompts[2]}`],
-    ["text:固定人物参考板", `text:${generatedTextPrompts[2]}`],
+    [`text:${generatedTextPrompts[0]}`, `text:${generatedTextPrompts[1]}`],
+    [`text:${generatedTextPrompts[0]}`, `text:${generatedTextPrompts[2]}`],
+    [`text:${generatedTextPrompts[0]}`, `text:${generatedTextPrompts[2]}`],
   ]);
-  assert.match(editCalls[0].prompt, /^人物走在港口\n/);
-  assert.match(editCalls[1].prompt, /^人物走入摄影棚\n/);
-  assert.match(editCalls[2].prompt, /^人物停在灯光下\n/);
+  assert.match(editCalls[0].prompt, /【项目视觉风格】[\s\S]*人物走在港口/);
+  assert.match(editCalls[1].prompt, /【项目视觉风格】[\s\S]*人物走入摄影棚/);
+  assert.match(editCalls[2].prompt, /【项目视觉风格】[\s\S]*人物停在灯光下/);
   assert(editCalls.every((call) => !call.references.includes("source-frame-must-not-be-used")));
   assert(editCalls.every((call) => /参考图1是人物设定板/.test(call.prompt)));
   assert(editCalls.every((call) => /参考图2是纯环境场景板/.test(call.prompt)));
@@ -1484,7 +1487,11 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   const sceneStarted = new Promise((resolve) => { markSceneStarted = resolve; });
   const concurrentImage = generationImage({
     generateText: async (prompt) => {
-      const promptKey = prompt.includes("并发场景参考图") ? "并发场景参考图" : prompt;
+      const promptKey = prompt.includes("并发场景参考图")
+        ? "并发场景参考图"
+        : prompt.includes("并发人物参考板")
+          ? "并发人物参考板"
+          : prompt;
       concurrentPrompts[promptKey] += 1;
       const count = concurrentPrompts[promptKey];
       if (promptKey === "并发人物参考板" && count === 1) {

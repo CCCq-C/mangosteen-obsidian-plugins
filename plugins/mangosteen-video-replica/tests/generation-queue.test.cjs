@@ -52,7 +52,8 @@ function draft() {
 
 function timelineDraft() {
   const value = draft();
-  value.version = 4;
+  value.version = 5;
+  value.visualStyle = { category: "真人写实", prompt: "真人电影质感，自然皮肤纹理，暖色电影光影。" };
   value.shots = [{
     id: "001",
     title: "时间轴开场",
@@ -81,7 +82,8 @@ assert.deepStrictEqual(plan.selectedShotIds, ["001", "003"], "selected shots mus
 assert.deepStrictEqual(plan.shots.map((shot) => shot.id), ["001", "003"]);
 assert.match(plan.shots[0].effectiveVideoPrompt, /你们看这是什么/);
 assert.match(plan.shots[0].effectiveVideoPrompt, /年轻清亮的中文女声/);
-assert.strictEqual(plan.shots[1].effectiveVideoPrompt, "用户编辑后的完整海边镜头提示词。");
+assert.match(plan.shots[1].effectiveVideoPrompt, /用户编辑后的完整海边镜头提示词。/);
+assert.match(plan.shots[1].effectiveVideoPrompt, /【项目视觉风格】/);
 assert.deepStrictEqual(plan.scenes.map((scene) => scene.id), ["room", "harbor"]);
 assert.deepStrictEqual(plan.products.map((product) => product.id), ["headphones"]);
 assert.strictEqual(Object.isFrozen(plan), true);
@@ -102,13 +104,18 @@ assert.strictEqual(confirmed.planId, plan.planId);
 assert.strictEqual(Object.isFrozen(confirmed), true);
 
 const timelinePlan = prepareGenerationPlan(timelineDraft(), ["001"]);
-assert.strictEqual(timelinePlan.requestVersion, 4);
+assert.strictEqual(timelinePlan.requestVersion, 5);
+assert.deepStrictEqual(timelinePlan.visualStyle, timelineDraft().visualStyle);
+assert.match(timelinePlan.shots[0].effectiveVideoPrompt, /【项目视觉风格】/);
 assert.match(timelinePlan.shots[0].effectiveVideoPrompt, /【0～2\.5 秒】/);
 assert.match(timelinePlan.shots[0].effectiveVideoPrompt, /人物台词：就是这款。/);
 assert.strictEqual((timelinePlan.shots[0].effectiveVideoPrompt.match(/年轻清亮的中文女声/g) || []).length, 1);
 const editedTimelineRequest = timelineDraft();
 editedTimelineRequest.shots[0].timeline[1].action = "女主放下耳机";
 assert.throws(() => confirmGenerationPlan(timelinePlan, editedTimelineRequest), /草案已变化.*重新确认/);
+const editedStyleRequest = timelineDraft();
+editedStyleRequest.visualStyle.prompt = "改成日系二维动画。";
+assert.throws(() => confirmGenerationPlan(timelinePlan, editedStyleRequest), /草案已变化.*重新确认/);
 
 const tamperedPlan = JSON.parse(JSON.stringify(plan));
 tamperedPlan.shots[0].effectiveVideoPrompt = "没有经过用户确认的替换提示词";

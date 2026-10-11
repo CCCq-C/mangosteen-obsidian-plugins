@@ -90,7 +90,8 @@ function request() {
 
   const plan = await plugin.previewWorkbenchGeneration(folder, ["002", "001"]);
   assert.deepStrictEqual(plan.selectedShotIds, ["001", "002"], "preview must preserve draft order");
-  assert.strictEqual(plan.shots[1].effectiveVideoPrompt, "用户确认后的完整视频提示词。");
+  assert.match(plan.shots[1].effectiveVideoPrompt, /用户确认后的完整视频提示词。/);
+  assert.match(plan.shots[1].effectiveVideoPrompt, /【项目视觉风格】/);
   assert.strictEqual(JSON.parse(fs.readFileSync(path.join(root, "generation-request.json"))).confirmed, false);
 
   const submitted = [];
@@ -120,7 +121,8 @@ function request() {
   assert.strictEqual(queued.status, "idle", "enqueue must return before long-running generation completes");
   await plugin.queueRuns.get(folder);
   assert.deepStrictEqual(submitted.map((item) => item.id), ["001", "002"]);
-  assert.strictEqual(submitted[1].prompt, "用户确认后的完整视频提示词。");
+  assert.match(submitted[1].prompt, /用户确认后的完整视频提示词。/);
+  assert.match(submitted[1].prompt, /【项目视觉风格】/);
   const persistedQueue = JSON.parse(fs.readFileSync(path.join(root, ".work/generation-queue.json")));
   assert.strictEqual(persistedQueue.status, "completed");
   assert.strictEqual(JSON.parse(fs.readFileSync(path.join(root, "generation-request.json"))).confirmed, false, "queue generation must never set confirmed=true");
@@ -153,7 +155,8 @@ function request() {
   await plugin.queueRuns.get(folder);
   assert.deepStrictEqual(appendedSubmissions.map((item) => item.id), ["001", "002"]);
   assert.notStrictEqual(appendedSubmissions[0].planId, appendedSubmissions[1].planId, "each submission must retain its own confirmed plan snapshot");
-  assert.strictEqual(appendedSubmissions[1].prompt, "用户确认后的完整视频提示词。");
+  assert.match(appendedSubmissions[1].prompt, /用户确认后的完整视频提示词。/);
+  assert.match(appendedSubmissions[1].prompt, /【项目视觉风格】/);
 
   const stalePlan = await plugin.previewWorkbenchGeneration(folder, ["001"]);
   let releaseStaleValidation;
@@ -332,7 +335,8 @@ function request() {
   fs.writeFileSync(path.join(root, "project.json"), JSON.stringify(duringVideo));
   releaseVideoWait();
   const directResult = await directRun;
-  assert.strictEqual(submittedVideoOptions[0].prompt, "用户确认后的完整视频提示词。");
+  assert.match(submittedVideoOptions[0].prompt, /用户确认后的完整视频提示词。/);
+  assert.match(submittedVideoOptions[0].prompt, /【项目视觉风格】/);
   assert.match(directResult.videoPath, /镜头-002/);
   assert.strictEqual(
     JSON.parse(fs.readFileSync(path.join(root, "project.json"))).shots.find((shot) => shot.id === "001").title,
@@ -445,8 +449,9 @@ function request() {
   assert.strictEqual(legacySeedanceCalls.frames, 2, "legacy Seedance queues must keep their confirmed first and last frame flow");
   assert.strictEqual(legacySeedanceCalls.options.referenceImageFiles.length, 2);
   const migratedLegacyCalls = await runLegacyReferenceCase("MiniMax-H3", 4, true);
-  assert.strictEqual(migratedLegacyCalls.frames, 2, "migrated v4 legacy shots must retain their original first/last frame semantics");
-  assert(migratedLegacyCalls.options.lastImageFile);
+  assert.strictEqual(migratedLegacyCalls.frames, 1, "migrated v4 shots must drop the unnecessary last-frame generation");
+  assert(migratedLegacyCalls.options.firstImageFile);
+  assert.strictEqual(Object.hasOwn(migratedLegacyCalls.options, "lastImageFile"), false);
   plugin.resolveQueueGenerationRuntime = directRuntimeResolver;
 
   const recoverProject = JSON.parse(fs.readFileSync(path.join(root, "project.json")));

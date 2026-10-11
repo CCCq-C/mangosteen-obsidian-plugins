@@ -23,9 +23,12 @@ assert.strictEqual(scene.imagePath, "山竹视频资产库/场景/harbor/场景�
 assert.strictEqual(scene.metadataPath, "山竹视频资产库/场景/harbor/scene.json");
 assert.strictEqual(scene.exists, false);
 
-const emptySceneSpec = assets.createGenerationSpec(scene, "海边集装箱场景。女主在前景，男主坐在后方。关键物件为白色耳机盒。");
-assert.strictEqual(emptySceneSpec.policyVersion, 3);
+const visualStyle = { category: "真人写实", prompt: "真人电影质感，自然皮肤纹理，傍晚暖光，低饱和写实摄影。" };
+const emptySceneSpec = assets.createGenerationSpec(scene, "海边集装箱场景。女主在前景，男主坐在后方。关键物件为白色耳机盒。", visualStyle);
+assert.strictEqual(emptySceneSpec.policyVersion, 4);
 assert.match(emptySceneSpec.generationPrompt, /纯环境空镜/);
+assert.match(emptySceneSpec.generationPrompt, /【项目视觉风格】/);
+assert.match(emptySceneSpec.generationPrompt, /真人电影质感/);
 assert.match(emptySceneSpec.generationPrompt, /海边集装箱场景/);
 assert.doesNotMatch(emptySceneSpec.generationPrompt, /关键物件为白色耳机盒|耳机盒/);
 assert.doesNotMatch(emptySceneSpec.generationPrompt, /女主在前景|男主坐在后方/);
@@ -36,10 +39,14 @@ assert.strictEqual(product.folderPath, "山竹视频资产库/产品/headphones"
 assert.strictEqual(product.imagePath, "山竹视频资产库/产品/headphones/产品参考板.png");
 assert.strictEqual(product.metadataPath, "山竹视频资产库/产品/headphones/product.json");
 assert.strictEqual(product.exists, false);
-const productSpec = assets.createGenerationSpec(product, "白色索尼 WH-1000XM5 头戴式耳机和白色包装盒，产品外观固定。");
+const productSpec = assets.createGenerationSpec(product, "白色索尼 WH-1000XM5 头戴式耳机和白色包装盒，产品外观固定。", visualStyle);
 assert.match(productSpec.generationPrompt, /纯产品参考板/);
 assert.match(productSpec.generationPrompt, /正面、侧面、背面/);
 assert.match(productSpec.generationPrompt, /禁止出现人物|不得出现人物/);
+
+const characterSpec = assets.createGenerationSpec(character, "年轻女性三视图，固定五官、发型和服装。", visualStyle);
+assert.match(characterSpec.generationPrompt, /【项目视觉风格】/);
+assert.match(characterSpec.generationPrompt, /真人电影质感/);
 
 fs.mkdirSync(path.dirname(path.join(vault, ...scene.imagePath.split("/"))), { recursive: true });
 fs.writeFileSync(path.join(vault, ...scene.imagePath.split("/")), "scene");
@@ -75,6 +82,23 @@ assert.strictEqual(
   assets.assetMatchesGenerationSpec(assets.resolveSceneAsset(vault, "harbor"), emptySceneSpec),
   true,
   "scene asset must be reused only when its source prompt and generation policy match",
+);
+const compatibilitySceneSpec = assets.createGenerationSpec(scene, emptySceneSpec.sourcePrompt);
+assets.writeAssetMetadata(vault, resolvedScene, {
+  prompt: compatibilitySceneSpec.sourcePrompt,
+  sourcePrompt: compatibilitySceneSpec.sourcePrompt,
+  generationPrompt: "旧版纯环境空镜提示词",
+  generationPolicyVersion: 3,
+});
+assert.strictEqual(
+  assets.assetMatchesGenerationSpec(assets.resolveSceneAsset(vault, "harbor"), compatibilitySceneSpec),
+  true,
+  "old safe assets must be reused when a migrated project inherits its existing visual style",
+);
+assert.strictEqual(
+  assets.assetMatchesGenerationSpec(assets.resolveSceneAsset(vault, "harbor"), emptySceneSpec),
+  false,
+  "choosing an explicit new style must invalidate the inherited legacy asset",
 );
 
 fs.mkdirSync(path.dirname(path.join(vault, ...product.imagePath.split("/"))), { recursive: true });

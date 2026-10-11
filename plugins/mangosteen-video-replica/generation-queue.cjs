@@ -26,6 +26,7 @@ function planSnapshot(plan) {
   return {
     version: Number(plan?.version),
     requestVersion: Number(plan?.requestVersion),
+    visualStyle: clone(plan?.visualStyle),
     character: clone(plan?.character),
     products: clone(plan?.products || []),
     scenes: clone(plan?.scenes || []),
@@ -65,6 +66,7 @@ function prepareGenerationPlan(request, selectedShotIds) {
       dialogue: shot.dialogue,
       voiceProfile: normalized.character.voiceProfile,
       voiceDirection: shot.voiceDirection,
+      visualStyle: normalized.visualStyle,
     }),
   }));
   const sceneIds = new Set(shots.map((shot) => shot.sceneId));
@@ -72,6 +74,7 @@ function prepareGenerationPlan(request, selectedShotIds) {
   const snapshot = {
     version: 1,
     requestVersion: normalized.version,
+    visualStyle: clone(normalized.visualStyle),
     character: clone(normalized.character),
     products: clone((normalized.products || []).filter((product) => productIds.has(product.id))),
     scenes: clone((normalized.scenes || []).filter((scene) => sceneIds.has(scene.id))),
@@ -108,6 +111,7 @@ function generationContext(plan) {
   return {
     planId: String(plan.planId),
     requestVersion: Number(plan.requestVersion),
+    visualStyle: clone(plan.visualStyle),
     character: clone(plan.character),
     products: clone(plan.products || []),
     scenes: clone(plan.scenes || []),
@@ -165,6 +169,7 @@ function createGenerationQueue(confirmedPlan, { activeQueues = [], now = new Dat
     status: "idle",
     stopRequested: false,
     character: clone(confirmedPlan.character),
+    visualStyle: clone(confirmedPlan.visualStyle),
     products: clone(confirmedPlan.products || []),
     scenes: clone(confirmedPlan.scenes || []),
     settings: clone(confirmedPlan.settings),
@@ -229,6 +234,7 @@ async function runGenerationQueue(queue, runShot, { onUpdate = null } = {}) {
       verifyQueuedShot(shot);
       const shotContext = shot.generationContext || {
         planId: queue.planId,
+        visualStyle: queue.visualStyle,
         character: queue.character,
         products: queue.products || [],
         scenes: queue.scenes || [],

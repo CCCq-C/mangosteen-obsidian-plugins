@@ -1,10 +1,12 @@
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const { DEFAULT_VISUAL_STYLE, applyVisualStyle, normalizeVisualStyle } = require("./visual-style.cjs");
 
 const ROOT = "山竹视频资产库";
-const SCENE_GENERATION_POLICY_VERSION = 3;
-const PRODUCT_GENERATION_POLICY_VERSION = 1;
+const CHARACTER_GENERATION_POLICY_VERSION = 2;
+const SCENE_GENERATION_POLICY_VERSION = 4;
+const PRODUCT_GENERATION_POLICY_VERSION = 2;
 const WINDOWS_RESERVED_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
 const SAFE_ID = /^[\p{L}\p{N}][\p{L}\p{N}_-]{0,63}$/u;
 const HUMAN_CLAUSE = /(女主|男主|人物|两人|二人|女孩|男孩|女子|男子|女生|男生|哥哥|妹妹|情侣|行人|人群|模特|角色)/;
@@ -37,35 +39,40 @@ function environmentOnlyDescription(value) {
   return clauses.join("，").replace(/，([。！？；;])/gu, "$1").trim();
 }
 
-function createGenerationSpec(asset, prompt) {
+function createGenerationSpec(asset, prompt, visualStyle) {
   const sourcePrompt = cleanPrompt(prompt);
   const kind = KIND_CONFIG[asset?.kind] ? asset.kind : "character";
+  const normalizedStyle = normalizeVisualStyle(visualStyle);
+  const compatibilityMode = normalizedStyle.category === DEFAULT_VISUAL_STYLE.category
+    && normalizedStyle.prompt === DEFAULT_VISUAL_STYLE.prompt;
   if (!sourcePrompt) throw new Error(`${KIND_CONFIG[kind].label}资产缺少生成提示词。`);
   if (kind === "character") {
-    return { sourcePrompt, generationPrompt: sourcePrompt, policyVersion: 1 };
+    return { sourcePrompt, generationPrompt: applyVisualStyle(sourcePrompt, normalizedStyle), policyVersion: CHARACTER_GENERATION_POLICY_VERSION, compatibilityMode };
   }
   if (kind === "product") {
     return {
       sourcePrompt,
       policyVersion: PRODUCT_GENERATION_POLICY_VERSION,
-      generationPrompt: [
+      compatibilityMode,
+      generationPrompt: applyVisualStyle([
         "纯产品参考板。使用简洁中性背景，禁止出现人物、手、身体、生活场景或无关道具。",
         "在同一张图中清楚展示产品正面、侧面、背面和关键细节，固定外形、颜色、材质、比例、包装与明确写出的品牌标识位置。",
         sourcePrompt,
         "这是后续镜头复用的产品身份板，不要改变产品型号，不要添加原描述没有的配件、文字或装饰。",
-      ].join("\n"),
+      ].join("\n"), visualStyle),
     };
   }
   const environment = environmentOnlyDescription(sourcePrompt) || "保留原描述中的建筑、陈设、自然环境、光线、道具与空间关系。";
   return {
     sourcePrompt,
     policyVersion: SCENE_GENERATION_POLICY_VERSION,
-    generationPrompt: [
+    compatibilityMode,
+    generationPrompt: applyVisualStyle([
       "纯环境空镜参考图。画面中禁止出现任何人、人体、脸、手、剪影、倒影或人物照片。",
       "只生成建筑、自然环境、固定陈设、光线、天气与空间布局；忽略人物以及可单独引用的核心产品、品牌包装和产品位置。",
       environment,
       "这是后续合成人物使用的干净场景板，保持写实、空间清楚、光线统一。",
-    ].join("\n"),
+    ].join("\n"), visualStyle),
   };
 }
 
@@ -73,10 +80,13 @@ function assetMatchesGenerationSpec(asset, spec) {
   if (!asset?.exists || !asset.metadata || !spec) return false;
   const storedSource = cleanPrompt(asset.metadata.sourcePrompt || asset.metadata.prompt);
   if (storedSource !== spec.sourcePrompt) return false;
-  if (asset.kind === "scene" || asset.kind === "product") {
-    return Number(asset.metadata.generationPolicyVersion) === Number(spec.policyVersion);
+  if (spec.compatibilityMode) {
+    const previousSafeVersion = { character: 1, product: 1, scene: 3 }[asset.kind] || Infinity;
+    const storedVersion = Number(asset.metadata.generationPolicyVersion || (asset.kind === "character" ? 1 : 0));
+    return storedVersion >= previousSafeVersion;
   }
-  return true;
+  return Number(asset.metadata.generationPolicyVersion) === Number(spec.policyVersion)
+    && cleanPrompt(asset.metadata.generationPrompt) === cleanPrompt(spec.generationPrompt);
 }
 
 function isInside(root, target) {

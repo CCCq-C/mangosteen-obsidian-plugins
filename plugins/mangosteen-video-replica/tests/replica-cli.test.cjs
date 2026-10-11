@@ -28,7 +28,11 @@ assert.match(promptForVoiceAnalysis, /背景歌曲歌词不得当成人物对白
 assert.match(promptForVoiceAnalysis, /画外背景歌曲/);
 assert.match(promptForVoiceAnalysis, /根据剧情节点动态划分/);
 assert.match(promptForVoiceAnalysis, /时间段必须连续/);
+assert.match(promptForVoiceAnalysis, /visualStyle/);
+assert.match(promptForVoiceAnalysis, /全项目统一视觉风格/);
 const analysisSchema = JSON.parse(fs.readFileSync(path.resolve(__dirname, "../video-analysis-schema.json"), "utf8"));
+assert(analysisSchema.required.includes("visualStyle"));
+assert.deepStrictEqual(analysisSchema.properties.visualStyle.required, ["category", "prompt"]);
 const shotSchema = analysisSchema.properties.shots.items;
 assert(shotSchema.required.includes("timeline"));
 assert(!shotSchema.required.includes("imagePrompt"));
@@ -94,6 +98,7 @@ assert.strictEqual(Object.hasOwn(resolveRuntimes(path.resolve(__dirname, "..")),
   }));
 
   const analysis = {
+  visualStyle: { category: "真人写实", prompt: "真人电影质感，自然皮肤纹理，暖色夕阳光，低饱和写实摄影。" },
   character: { id: "hero", prompt: "短黑发人物三视图，固定五官和服装。", voiceProfile: "年轻清亮的中文女声，普通话。" },
   scenes: [{ id: "studio", prompt: "明亮摄影棚，固定白色背景和柔光灯。" }],
   shots: [{
@@ -116,7 +121,8 @@ fs.writeFileSync(output, "joined-video");
   try {
     const analyzed = applyAnalysis({ projectFolder, vaultPath: vault, analysis, settings: { videoModel: "MiniMax-H3", resolution: "768p" } });
     assert.strictEqual(analyzed.request.confirmed, false);
-    assert.strictEqual(analyzed.request.version, 4);
+    assert.strictEqual(analyzed.request.version, 5);
+    assert.strictEqual(analyzed.request.visualStyle.category, "真人写实");
     assert.strictEqual(analyzed.project.status, "analysis_ready");
     assert.strictEqual(analyzed.project.shots[0].status, "等待确认");
     assert.strictEqual(analyzed.request.character.voiceProfile, "年轻清亮的中文女声，普通话。");

@@ -10,8 +10,9 @@ const {
 } = require("../replica-editor.cjs");
 
 const draft = {
-  version: 4,
+  version: 5,
   confirmed: false,
+  visualStyle: { category: "真人写实", prompt: "真人电影质感，自然光影。" },
   character: { id: "hero", prompt: "原人物", voiceProfile: "原声音" },
   products: [],
   scenes: [{ id: "room", prompt: "原场景" }],
@@ -38,6 +39,8 @@ assert.strictEqual(draft.settings.videoModel, "MiniMax-H3");
 
 const draftWithProduct = { ...draft, products: [{ id: "phone", prompt: "原产品" }] };
 const supportedEdits = [
+  [{ section: "visualStyle", field: "category" }, "二次元写实", (value) => value.visualStyle.category],
+  [{ section: "visualStyle", field: "prompt" }, "二次元写实角色，真实电影光影。", (value) => value.visualStyle.prompt],
   [{ section: "character", field: "prompt" }, "新人物", (value) => value.character.prompt],
   [{ section: "character", field: "voiceProfile" }, "年轻女声，四川口音", (value) => value.character.voiceProfile],
   [{ section: "product", index: 0, field: "prompt" }, "新产品", (value) => value.products[0].prompt],

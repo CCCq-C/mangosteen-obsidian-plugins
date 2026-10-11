@@ -9,6 +9,7 @@ let referenceAssets;
 let replicaEditor;
 let replicaLogicApi;
 let shotTimeline;
+let visualStyle;
 let workflow;
 
 const ROOT = "山竹视频复刻";
@@ -221,6 +222,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     core = require(path.join(pluginRoot, "replica-core.cjs"));
     generationPolicy = require(path.join(pluginRoot, "generation-policy.cjs"));
     shotTimeline = require(path.join(pluginRoot, "shot-timeline.cjs"));
+    visualStyle = require(path.join(pluginRoot, "visual-style.cjs"));
     referenceAssets = require(path.join(pluginRoot, "reference-assets.cjs"));
     replicaEditor = require(path.join(pluginRoot, "replica-editor.cjs"));
     replicaLogicApi = require(path.join(pluginRoot, "replica-logic-api.cjs"));
@@ -828,6 +830,9 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     const lockedIds = new Set(api.lockedShotIds(queue));
     if (lockedIds.size) {
       const normalizedCurrent = core.normalizeGenerationRequest({ ...currentRequest, confirmed: true });
+      if (JSON.stringify(normalizedCurrent.visualStyle) !== JSON.stringify(savedRequest.visualStyle)) {
+        throw new Error("项目统一视觉风格正在被生成队列使用，完成或停止后才能修改。");
+      }
       const currentById = new Map(normalizedCurrent.shots.map((shot) => [String(shot.id), shot]));
       const nextById = new Map(savedRequest.shots.map((shot) => [String(shot.id), shot]));
       for (const id of lockedIds) {
@@ -1536,9 +1541,9 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     }
   }
 
-  async ensureReferenceAsset(imagePlugin, asset, prompt, imageModel = "") {
+  async ensureReferenceAsset(imagePlugin, asset, prompt, imageModel = "", projectVisualStyle = null) {
     this.referenceAssetPromises ||= new Map();
-    const generationSpec = referenceAssets.createGenerationSpec(asset, prompt);
+    const generationSpec = referenceAssets.createGenerationSpec(asset, prompt, projectVisualStyle);
     const promptFingerprint = crypto.createHash("sha256").update(JSON.stringify(generationSpec)).digest("hex");
     const key = `${asset.kind}:${asset.id}:${promptFingerprint}`;
     const pending = this.referenceAssetPromises.get(key);
@@ -1738,7 +1743,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         : kind === "scene"
           ? referenceAssets.resolveSceneAsset
           : referenceAssets.resolveProductAsset;
-      const resolved = await this.ensureReferenceAsset(image, resolver(this.vaultPath(), source.id), source.prompt, imageModel);
+      const resolved = await this.ensureReferenceAsset(image, resolver(this.vaultPath(), source.id), source.prompt, imageModel, context.visualStyle);
       this.updateProjectShot(paths.folder, shot.id, { status: `${label}参考图已就绪 · ${String(source.id || "")}` });
       return {
         id: resolved.id,
@@ -1778,6 +1783,8 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       return { source, asset };
     });
     const fingerprint = generationPolicy.createGenerationFingerprint({
+      requestVersion: context.requestVersion,
+      visualStyle: context.visualStyle,
       character: { ...context.character, contentHash: characterAsset.contentHash },
       scene: { ...sceneSource, contentHash: sceneAsset.contentHash },
       products: productSources.map(({ source, asset }) => ({ ...source, contentHash: asset.contentHash })),
@@ -1788,7 +1795,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     });
     const latestProject = this.readJson(paths.projectPath);
     const existing = (latestProject.shots || []).find((item) => String(item.id) === String(shot.id)) || {};
-    const structuredTimeline = Number(context.requestVersion) >= 4 && shot.legacyFrameMode !== true
+    const structuredTimeline = Number(context.requestVersion) >= 4
       && Array.isArray(shot.timeline) && shot.timeline.length > 0;
     const modelFamily = generationPolicy.classifyModel(model);
     const directReferenceMode = structuredTimeline && modelFamily === "seedance";
@@ -1846,7 +1853,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         this.assertWorkbenchQueueRunnerLock(paths.folder, context.queueId);
         this.updateProjectShot(paths.folder, shot.id, { status: "正在生成首帧" });
         const framePrompt = structuredTimeline ? shotTimeline.firstFramePrompt(shot.timeline) : String(shot.imagePrompt || "");
-        const candidate = await this.generateImageMulti(image, framePrompt + "\n" + continuity, referencePaths, imageModel);
+        const candidate = await this.generateImageMulti(image, visualStyle.applyVisualStyle(framePrompt + "\n" + continuity, context.visualStyle), referencePaths, imageModel);
         currentFirstImagePath = await this.saveImageCandidate(image, candidate, firstImagePath);
         this.updateProjectShot(paths.folder, shot.id, {
           firstImagePath: currentFirstImagePath,
@@ -1857,7 +1864,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       if (!videoTaskId && needsLastFrame && !currentLastImagePath) {
         this.assertWorkbenchQueueRunnerLock(paths.folder, context.queueId);
         this.updateProjectShot(paths.folder, shot.id, { status: "正在生成尾帧" });
-        const candidate = await this.generateImageMulti(image, shot.lastImagePrompt + "\n" + continuity, referencePaths, imageModel);
+        const candidate = await this.generateImageMulti(image, visualStyle.applyVisualStyle(shot.lastImagePrompt + "\n" + continuity, context.visualStyle), referencePaths, imageModel);
         currentLastImagePath = await this.saveImageCandidate(image, candidate, lastImagePath);
         this.updateProjectShot(paths.folder, shot.id, { lastImagePath: currentLastImagePath, status: "尾帧已完成" });
       }
@@ -1869,7 +1876,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         try {
           task = await video.submitVideo(generationPolicy.buildVideoOptions({
             model,
-            prompt: String(shot.effectiveVideoPrompt || ""),
+            prompt: visualStyle.applyVisualStyle(String(shot.effectiveVideoPrompt || ""), context.visualStyle),
             duration: shot.duration,
             ratio: context.settings.ratio,
             resolution,
@@ -1964,6 +1971,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       referenceAssets.resolveCharacterAsset(this.vaultPath(), request.character.id),
       request.character.prompt,
       imageModel,
+      request.visualStyle,
     );
     project.characterAsset = {
       id: character.id,
@@ -1984,6 +1992,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         referenceAssets.resolveProductAsset(this.vaultPath(), product.id),
         product.prompt,
         imageModel,
+        request.visualStyle,
       );
       project.productAssets.push({
         id: resolved.id,
@@ -2005,6 +2014,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         referenceAssets.resolveSceneAsset(this.vaultPath(), scene.id),
         scene.prompt,
         imageModel,
+        request.visualStyle,
       );
       project.sceneAssets.push({
         id: resolved.id,
@@ -2031,6 +2041,8 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         return { ...productRequest, contentHash: productAsset.contentHash };
       });
       const generationFingerprint = generationPolicy.createGenerationFingerprint({
+        requestVersion: request.version,
+        visualStyle: request.visualStyle,
         character: { ...request.character, contentHash: project.characterAsset.contentHash },
         scene: { ...sceneRequest, contentHash: sceneAsset.contentHash },
         products: shotProducts,
@@ -2099,7 +2111,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
             ? "将参考图1中的人物和产品设定板中的产品自然放入参考图2的环境，保持全片人物、产品与场景连续。"
             : "将参考图1中的人物自然放入参考图2的环境，保持全片人物与场景连续。",
         ].join("\n");
-        const firstPrompt = `${shot.imagePrompt}\n${continuity}`;
+        const firstPrompt = visualStyle.applyVisualStyle(`${shot.imagePrompt}\n${continuity}`, request.visualStyle);
         if (!shot.firstImagePath) {
           this.assertGenerationActive(projectFolder, requestMtimeMs);
           const firstCandidate = await this.generateImageMulti(image, firstPrompt, referencePaths, imageModel);
@@ -2115,7 +2127,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
           this.assertGenerationActive(projectFolder, requestMtimeMs);
           shot.status = "正在生成尾帧";
           this.saveProject(projectFolder, project);
-          const lastCandidate = await this.generateImageMulti(image, `${shot.lastImagePrompt}\n${continuity}`, referencePaths, imageModel);
+          const lastCandidate = await this.generateImageMulti(image, visualStyle.applyVisualStyle(`${shot.lastImagePrompt}\n${continuity}`, request.visualStyle), referencePaths, imageModel);
           shot.lastImagePath = await this.saveImageCandidate(
             image,
             lastCandidate,
@@ -2136,6 +2148,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
               dialogue: shot.dialogue,
               voiceProfile: request.character.voiceProfile,
               voiceDirection: shot.voiceDirection,
+              visualStyle: request.visualStyle,
             }),
             duration: shot.duration,
             ratio: request.settings.ratio,
@@ -2201,7 +2214,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     this.saveProject(projectFolder, project);
 
     this.assertGenerationActive(projectFolder, requestMtimeMs);
-    const characterCandidate = await this.generateImage(image, request.character.prompt, "", imageModel);
+    const characterCandidate = await this.generateImage(image, visualStyle.applyVisualStyle(request.character.prompt, request.visualStyle), "", imageModel);
     project.characterImagePath = await this.saveImageCandidate(image, characterCandidate, `${projectFolder}/01-人物参考/人物三视图.png`);
     project.statusText = "人物参考完成，正在生成分镜";
     this.saveProject(projectFolder, project);
@@ -2215,7 +2228,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       this.saveProject(projectFolder, project);
       try {
         this.assertGenerationActive(projectFolder, requestMtimeMs);
-        const imagePrompt = `${shot.imagePrompt}\n保持参考人物的脸部、发型、服装和年龄一致。`;
+        const imagePrompt = visualStyle.applyVisualStyle(`${shot.imagePrompt}\n保持参考人物的脸部、发型、服装和年龄一致。`, request.visualStyle);
         const shotCandidate = await this.generateImage(image, imagePrompt, project.characterImagePath, imageModel);
         shot.imagePath = await this.saveImageCandidate(image, shotCandidate, `${projectFolder}/02-分镜脚本/镜头-${shot.id}-${core.safeSegment(shot.title)}.png`);
         shot.status = "正在生成视频";
@@ -2231,6 +2244,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
               dialogue: shot.dialogue,
               voiceProfile: request.character.voiceProfile,
               voiceDirection: shot.voiceDirection,
+              visualStyle: request.visualStyle,
             }),
             duration: shot.duration,
             ratio: request.settings.ratio,

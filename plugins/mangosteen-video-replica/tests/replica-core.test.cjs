@@ -133,6 +133,7 @@ assert.throws(
 );
 
 const analysisDraft = core.buildGenerationDraft({ width: 1080, height: 1920 }, {
+  visualStyle: { category: "真人写实", prompt: "真人电影质感，自然皮肤纹理，傍晚暖光，低饱和写实摄影。" },
   character: {
     id: "main-hero",
     prompt: "固定人物三视图，短黑发、米白夹克、深蓝工装裤，保持五官和服装一致。",
@@ -147,7 +148,11 @@ const analysisDraft = core.buildGenerationDraft({ width: 1080, height: 1920 }, {
   }],
 }, { videoModel: "MiniMax-H3", resolution: "768p" });
 assert.strictEqual(analysisDraft.confirmed, false);
-assert.strictEqual(analysisDraft.version, 4);
+assert.strictEqual(analysisDraft.version, 5);
+assert.deepStrictEqual(analysisDraft.visualStyle, {
+  category: "真人写实",
+  prompt: "真人电影质感，自然皮肤纹理，傍晚暖光，低饱和写实摄影。",
+});
 assert.strictEqual(analysisDraft.settings.ratio, "9:16");
 assert.strictEqual(analysisDraft.shots[0].duration, 4);
 assert.deepStrictEqual(analysisDraft.shots[0].productIds, ["headphones"]);
@@ -187,6 +192,16 @@ assert.match(storyboard, /产品参考提示词/);
 assert.match(storyboard, /headphones/);
 assert.match(storyboard, /人物声音设定/);
 assert.match(storyboard, /轻松打招呼/);
+assert.match(storyboard, /统一视觉风格/);
+assert.match(storyboard, /真人电影质感/);
+
+const compatibleV4 = core.normalizeGenerationRequest({
+  ...analysisDraft,
+  version: 4,
+  confirmed: true,
+  visualStyle: undefined,
+});
+assert.match(compatibleV4.visualStyle.prompt, /保持现有人物、场景和产品参考图/);
 
 const markdown = core.dashboardMarkdown({
   folder: "山竹视频复刻/测试项目",
