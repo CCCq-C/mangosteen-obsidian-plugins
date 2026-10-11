@@ -2,7 +2,7 @@ const fs = require("fs");
 const path = require("path");
 const { classifyModel, normalizeVideoDuration } = require("./generation-policy.cjs");
 const { assertAssetId } = require("./reference-assets.cjs");
-const { legacyTimeline, normalizeTimeline } = require("./shot-timeline.cjs");
+const { fitTimelineDuration, legacyTimeline, normalizeTimeline } = require("./shot-timeline.cjs");
 
 const ALLOWED_VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".m4v"]);
 const WINDOWS_RESERVED_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
@@ -277,15 +277,7 @@ function buildGenerationDraft(project, analysis, settings = {}) {
       const rawDuration = Number(shot?.endTime) - Number(shot?.startTime) || Number(shot?.duration) || 4;
       const duration = normalizeVideoDuration(rawDuration, videoModel);
       let timeline = Array.isArray(shot?.timeline) ? shot.timeline.map((segment) => ({ ...segment })) : legacyTimeline({ ...shot, duration });
-      const timelineEnd = Number(timeline.at(-1)?.end);
-      if (timeline.length && Number.isFinite(timelineEnd) && timelineEnd > 0 && Math.abs(timelineEnd - duration) > 0.001) {
-        const scale = duration / timelineEnd;
-        timeline = timeline.map((segment, index) => ({
-          ...segment,
-          start: Number((Number(segment.start) * scale).toFixed(3)),
-          end: index === timeline.length - 1 ? duration : Number((Number(segment.end) * scale).toFixed(3)),
-        }));
-      }
+      timeline = fitTimelineDuration(timeline, duration);
       timeline = normalizeTimeline(timeline, duration);
       return {
         title: cleanText(shot?.title),

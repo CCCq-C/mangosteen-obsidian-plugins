@@ -497,6 +497,30 @@ function createView(plugin) {
   assert.strictEqual(v1DirectPlugin.queueCalls.length, 1);
   await v1DirectView.onClose();
 
+  const fractionalV3Request = {
+    version: 3,
+    confirmed: false,
+    character: { id: "hero", prompt: "旧版固定人物", voiceProfile: "固定女声" },
+    products: [],
+    scenes: [{ id: "meadow", prompt: "夕阳草地" }],
+    settings: { imageModel: "gpt-image-2", videoModel: "MiniMax-H3", ratio: "9:16", resolution: "768p" },
+    shots: [{
+      id: "001", title: "旧版小数时长", sceneId: "meadow", productIds: [], duration: 13.5,
+      dialogue: "测试台词", voiceDirection: "自然", plot: "人物说话", environment: "夕阳草地", camera: "中景",
+      imagePrompt: "人物站在夕阳草地", lastImagePrompt: "", videoPrompt: "人物在夕阳草地说话",
+    }],
+  };
+  const fractionalV3View = createView(createPlugin({
+    ...clone(readySnapshot),
+    request: fractionalV3Request,
+    project: { ...clone(readySnapshot.project), shots: [{ id: "001", title: "旧版小数时长", status: "失败" }] },
+  }));
+  await fractionalV3View.onOpen();
+  assert.strictEqual(fractionalV3View.draft.shots[0].duration, 14, "legacy fractional durations must migrate to a provider-supported integer");
+  assert.strictEqual(fractionalV3View.draft.shots[0].timeline.at(-1).end, 14, "timeline end must follow the migrated duration");
+  assert.strictEqual(await fractionalV3View.saveDraft(), true, "a migrated fractional legacy draft must save without manual timing repair");
+  await fractionalV3View.onClose();
+
   const duplicateIdentityRequest = {
     ...clone(request),
     shots: [

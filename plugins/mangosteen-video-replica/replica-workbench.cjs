@@ -1,6 +1,6 @@
 const { normalizeGenerationRequest } = require("./replica-core.cjs");
 const { normalizeVideoDuration, resolveVideoPrompt, videoDurationRange } = require("./generation-policy.cjs");
-const { legacyTimeline } = require("./shot-timeline.cjs");
+const { fitTimelineDuration, legacyTimeline } = require("./shot-timeline.cjs");
 const {
   addTimelineSegment,
   isDraftLocked,
@@ -58,20 +58,27 @@ function editableRequest(request) {
         sceneId: next.scenes[index].id,
         productIds: [],
         duration,
-        timeline: legacyTimeline({ ...shot, duration }),
+        timeline: fitTimelineDuration(legacyTimeline({ ...shot, duration }), duration),
         legacyFrameMode: true,
       };
     });
   } else if (version >= 2 && version < 4 && Array.isArray(next.scenes)) {
+    const videoModel = text(next.settings?.videoModel, "MiniMax-H3");
     next.version = 4;
     next.confirmed = false;
     if (!Array.isArray(next.products)) next.products = [];
-    next.shots = list(next.shots).map((shot) => ({
-      ...shot,
-      productIds: Array.isArray(shot.productIds) ? shot.productIds : [],
-      timeline: Array.isArray(shot.timeline) && shot.timeline.length ? shot.timeline : legacyTimeline(shot),
-      legacyFrameMode: true,
-    }));
+    next.settings = { ...(next.settings || {}), videoModel };
+    next.shots = list(next.shots).map((shot) => {
+      const duration = normalizeVideoDuration(shot?.duration, videoModel);
+      const sourceTimeline = Array.isArray(shot.timeline) && shot.timeline.length ? shot.timeline : legacyTimeline(shot);
+      return {
+        ...shot,
+        productIds: Array.isArray(shot.productIds) ? shot.productIds : [],
+        duration,
+        timeline: fitTimelineDuration(sourceTimeline, duration),
+        legacyFrameMode: true,
+      };
+    });
   }
   return next;
 }

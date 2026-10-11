@@ -1,6 +1,7 @@
 const assert = require("assert");
 const {
   compileTimelinePrompt,
+  fitTimelineDuration,
   firstFramePrompt,
   legacyTimeline,
   normalizeTimeline,
@@ -37,6 +38,10 @@ const timeline = [
 ];
 
 assert.deepStrictEqual(normalizeTimeline(timeline, 14), timeline);
+assert.deepStrictEqual(
+  fitTimelineDuration([{ start: 0, end: 10 }, { start: 10, end: 20 }], 15),
+  [{ start: 0, end: 7.5 }, { start: 7.5, end: 15 }],
+);
 assert.throws(
   () => normalizeTimeline([{ ...timeline[0], start: 1 }], 2.5),
   /必须从 0 秒开始/,
@@ -99,7 +104,7 @@ assert.doesNotMatch(opening, /你们看这个/);
 
 assert.deepStrictEqual(
   Object.keys(require("../shot-timeline.cjs")).sort(),
-  ["compileTimelinePrompt", "firstFramePrompt", "legacyTimeline", "normalizeTimeline"],
+  ["compileTimelinePrompt", "firstFramePrompt", "fitTimelineDuration", "legacyTimeline", "normalizeTimeline"],
 );
 
 console.log("shot-timeline: ok");

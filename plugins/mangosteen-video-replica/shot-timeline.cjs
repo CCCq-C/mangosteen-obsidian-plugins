@@ -52,6 +52,21 @@ function legacyTimeline(shot = {}) {
   }];
 }
 
+function fitTimelineDuration(timeline, duration) {
+  const total = Number(duration);
+  if (!Array.isArray(timeline) || !timeline.length || !Number.isFinite(total) || total <= 0) return timeline;
+  const end = Number(timeline[timeline.length - 1]?.end);
+  if (!Number.isFinite(end) || end <= 0 || Math.abs(end - total) <= EPSILON) {
+    return timeline.map((segment) => ({ ...segment }));
+  }
+  const scale = total / end;
+  return timeline.map((segment, index) => ({
+    ...segment,
+    start: Number((Number(segment.start) * scale).toFixed(3)),
+    end: index === timeline.length - 1 ? total : Number((Number(segment.end) * scale).toFixed(3)),
+  }));
+}
+
 function compileTimelinePrompt(timeline, { duration, voiceProfile = "" } = {}) {
   const segments = normalizeTimeline(timeline, duration);
   const lines = [
@@ -88,6 +103,7 @@ function firstFramePrompt(timeline) {
 
 module.exports = {
   compileTimelinePrompt,
+  fitTimelineDuration,
   firstFramePrompt,
   legacyTimeline,
   normalizeTimeline,
