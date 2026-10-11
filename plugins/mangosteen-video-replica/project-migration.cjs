@@ -4,6 +4,9 @@ const path = require("path");
 const ACTIVE_RUN_STATUSES = new Set(["queued", "processing", "stopping"]);
 const PROVIDER_SAVING_STATUSES = new Set(["saving", "provider-saving"]);
 const TERMINAL_RUN_STATUSES = new Set(["completed", "completed_with_errors", "partial-failure", "failed", "stopped"]);
+const MIGRATION_TYPE = "legacy-project-migration";
+const MIGRATION_VERSION = 2;
+const MIGRATION_SCHEMA_VERSION = 1;
 
 function clone(value) {
   if (Array.isArray(value)) return value.map(clone);
@@ -147,14 +150,29 @@ function normalizedShotId(value, index) {
 
 function projectMigrationPlanId(plan) {
   return sha256(JSON.stringify({
+    type: plan.type,
+    version: plan.version,
+    schemaVersion: plan.schemaVersion,
     projectFolder: plan.projectFolder,
+    journalPath: plan.journalPath,
+    destination: plan.destination,
     backupPath: plan.backupPath,
+    stageRoot: plan.stageRoot,
     operations: plan.operations,
     writes: plan.writes,
     moves: plan.moves,
+    backupManifest: plan.backupManifest,
     project: plan.project,
     request: plan.request,
   }));
+}
+
+function projectMaintenanceLockPath(projectFolder) {
+  return `${normalizeProjectFolder(projectFolder)}/.mangosteen/maintenance.lock`;
+}
+
+function derivedProjectJournalPath(projectFolder, plannedAt) {
+  return `${normalizeProjectFolder(projectFolder)}/.mangosteen/history/.migration-journal-${migrationTimestamp(plannedAt)}.json`;
 }
 
 function planLegacyProjectMigration(input = {}) {
@@ -176,8 +194,10 @@ function planLegacyProjectMigration(input = {}) {
   const stamp = migrationTimestamp(plannedAt);
   const destination = `${projectFolder}/.mangosteen`;
   const backupPath = `${destination}/history/migration-${stamp}`;
-  const journalPath = `${destination}/history/.migration-journal-${stamp}.json`;
-  if ([...files.keys()].some((filePath) => filePath === destination || filePath.startsWith(`${destination}/`))) {
+  const journalPath = derivedProjectJournalPath(projectFolder, plannedAt);
+  const stageRoot = `${destination}/history/.migration-stage-${stamp}`;
+  const maintenanceLockPath = projectMaintenanceLockPath(projectFolder);
+  if ([...files.keys()].some((filePath) => (filePath === destination || filePath.startsWith(`${destination}/`)) && filePath !== maintenanceLockPath)) {
     reasons.push("版本 6 目标或迁移备份已存在，已拒绝覆盖。");
   }
 
@@ -247,7 +267,12 @@ function planLegacyProjectMigration(input = {}) {
   const writes = [
     { type: "write", path: `${destination}/project.json`, content: `${JSON.stringify(migratedProject, null, 2)}\n` },
     { type: "write", path: `${destination}/draft.json`, content: `${JSON.stringify(migratedRequest, null, 2)}\n` },
-  ].map((item) => ({ ...item, size: Buffer.byteLength(item.content), sha256: sha256(item.content) }));
+  ].map((item) => ({
+    ...item,
+    stagePath: `${stageRoot}/${path.posix.basename(item.path)}`,
+    size: Buffer.byteLength(item.content),
+    sha256: sha256(item.content),
+  }));
   for (const write of writes) if (files.has(write.path)) reasons.push(`版本 6 文档目标已存在，已拒绝覆盖：${write.path}`);
 
   const moveSources = new Set(operations.map((item) => item.from));
@@ -268,6 +293,12 @@ function planLegacyProjectMigration(input = {}) {
       sha256: source?.sha256 || "",
     };
   });
+  const backupManifest = moves.map((operation) => ({
+    relativePath: operation.from.slice(projectFolder.length + 1),
+    size: operation.size,
+    sha256: operation.sha256,
+    type: "file",
+  }));
   for (const move of moves) if (files.has(move.to)) reasons.push(`迁移备份目标已存在，已拒绝覆盖：${move.to}`);
 
   const uniqueReasons = [...new Set(reasons)];
@@ -276,19 +307,23 @@ function planLegacyProjectMigration(input = {}) {
   const effectiveWrites = blocked ? [] : writes;
   const effectiveMoves = blocked ? [] : moves;
   const plan = {
-    version: 1,
-    type: "legacy-project-migration",
+    version: MIGRATION_VERSION,
+    schemaVersion: MIGRATION_SCHEMA_VERSION,
+    type: MIGRATION_TYPE,
     planId: "",
     plannedAt,
     projectFolder,
     destination,
     backupPath,
     journalPath,
+    stageRoot,
+    maintenanceLockPath,
     blocked,
     reasons: uniqueReasons,
     operations: effectiveOperations,
     writes: effectiveWrites,
     moves: effectiveMoves,
+    backupManifest: blocked ? [] : backupManifest,
     deletes: [],
     project: migratedProject,
     request: migratedRequest,
@@ -311,14 +346,17 @@ function planLegacyProjectMigration(input = {}) {
 function createProjectMigrationJournal(plan) {
   if (!plan?.planId) throw new Error("迁移计划缺少 planId。");
   return {
-    version: 1,
-    type: "legacy-project-migration-journal",
+    version: MIGRATION_VERSION,
+    type: `${MIGRATION_TYPE}-journal`,
     planId: plan.planId,
+    journalPath: plan.journalPath,
     projectFolder: plan.projectFolder,
     state: "planned",
     inFlight: null,
-    completed: { copies: [], bundle: false, moves: [] },
+    completed: { copies: [], staged: [], exposed: [], moves: [], stageCleaned: [] },
+    rollback: { moves: [], exposed: [], copies: [], stages: [] },
     error: "",
+    rollbackError: "",
     planSnapshot: { ...clone(plan), journal: null },
   };
 }
@@ -334,157 +372,317 @@ async function missingAsNull(hash, filePath) {
   catch (error) { if (error?.code === "ENOENT") return null; throw error; }
 }
 
+function validateProjectPlan(plan) {
+  if (!plan || plan.blocked) throw new Error(`迁移计划已阻止：${plan?.reasons?.join("；") || "计划不可用"}`);
+  if (plan.type !== MIGRATION_TYPE || plan.version !== MIGRATION_VERSION || plan.schemaVersion !== MIGRATION_SCHEMA_VERSION) {
+    throw failClosed("迁移计划类型或版本无效。");
+  }
+  if (plan.journalPath !== derivedProjectJournalPath(plan.projectFolder, plan.plannedAt)) {
+    throw failClosed("迁移 journal 路径不属于固定项目迁移目录。");
+  }
+  if (plan.maintenanceLockPath !== projectMaintenanceLockPath(plan.projectFolder)) {
+    throw failClosed("项目维护锁路径不属于固定目录。");
+  }
+  if (projectMigrationPlanId(plan) !== plan.planId) throw failClosed("迁移计划内容已变更，与 planId 不一致，已拒绝执行。");
+}
+
 async function persistJournal(atomicWrite, plan, journal) {
   await atomicWrite({ type: "journal", path: plan.journalPath, value: clone(journal) });
 }
 
-async function rollbackProjectMigration({ journal, plan, move, removeNew, hash }) {
-  const moveIndexes = new Set(journal.completed?.moves || []);
-  if (journal.inFlight?.type === "move") moveIndexes.add(journal.inFlight.index);
-  for (const index of [...moveIndexes].sort((left, right) => right - left)) {
-    const operation = plan.moves[index];
-    if (!operation) continue;
-    if (typeof hash === "function") {
-      const sourceHash = await missingAsNull(hash, operation.from);
-      const backupHash = await missingAsNull(hash, operation.to);
-      if (sourceHash === operation.sha256 && backupHash === null) continue;
-      if (sourceHash !== null || backupHash !== operation.sha256) {
-        throw failClosed(`回滚文件状态不一致，已停止：${operation.from}`);
-      }
-    }
-    try { await move(operation.to, operation.from, { exclusive: true, rollback: true }); }
-    catch (error) { if (error?.code !== "ENOENT") throw error; }
-  }
-  if (journal.completed?.bundle || journal.inFlight?.type === "bundle") {
-    for (const write of [...plan.writes].reverse()) await removeNew(write, { rollback: true });
-  }
-  const copyIndexes = new Set(journal.completed?.copies || []);
-  if (journal.inFlight?.type === "copy") copyIndexes.add(journal.inFlight.index);
-  for (const index of [...copyIndexes].sort((left, right) => right - left)) {
-    const operation = plan.operations[index];
-    if (operation) await removeNew(operation, { rollback: true });
-  }
-  journal.inFlight = null;
-  journal.completed = { copies: [], bundle: false, moves: [] };
-  journal.state = "rolled-back";
-  return journal;
+async function verifyProjectMove(hash, operation, direction = "forward") {
+  const sourceHash = await missingAsNull(hash, operation.from);
+  const backupHash = await missingAsNull(hash, operation.to);
+  return direction === "forward"
+    ? sourceHash === null && backupHash === operation.sha256
+    : sourceHash === operation.sha256 && backupHash === null;
 }
 
-async function executeProjectMigration({ plan, copy, move, hash, atomicWrite, removeNew }) {
-  if (!plan || plan.blocked) throw new Error(`迁移计划已阻止：${plan?.reasons?.join("；") || "计划不可用"}`);
+async function verifyProjectFinal({ plan, hash }) {
+  for (const operation of plan.operations) {
+    if (await missingAsNull(hash, operation.to) !== operation.sha256) throw failClosed(`迁移目标哈希不一致：${operation.to}`);
+  }
+  for (const write of plan.writes) {
+    if (await missingAsNull(hash, write.path) !== write.sha256) throw failClosed(`版本 6 文档哈希不一致：${write.path}`);
+    if (await missingAsNull(hash, write.stagePath) !== null) throw failClosed(`版本 6 暂存文件尚未清理：${write.stagePath}`);
+  }
+  for (const operation of plan.moves) {
+    if (!await verifyProjectMove(hash, operation, "forward")) throw failClosed(`迁移备份状态不一致：${operation.from}`);
+  }
+}
+
+function projectCompletedIndexes(journal, key, length, label) {
+  const values = journal?.completed?.[key];
+  if (!Array.isArray(values) || values.some((index) => !Number.isInteger(index) || index < 0 || index >= length)
+      || new Set(values).size !== values.length) throw failClosed(`迁移 journal 的${label}记录无效。`);
+  return values;
+}
+
+async function verifyProjectForwardProgress({ plan, journal, hash }) {
+  for (const index of projectCompletedIndexes(journal, "copies", plan.operations.length, "复制完成")) {
+    const operation = plan.operations[index];
+    if (await missingAsNull(hash, operation.to) !== operation.sha256) throw failClosed(`已记录的迁移目标哈希不一致：${operation.to}`);
+  }
+  const staged = projectCompletedIndexes(journal, "staged", plan.writes.length, "暂存完成");
+  const exposed = projectCompletedIndexes(journal, "exposed", plan.writes.length, "bundle 暴露完成");
+  const cleaned = projectCompletedIndexes(journal, "stageCleaned", plan.writes.length, "暂存清理完成");
+  for (const index of cleaned) {
+    if (!staged.includes(index) || !exposed.includes(index)) throw failClosed(`已记录的暂存清理步骤缺少前置状态：${plan.writes[index].stagePath}`);
+  }
+  for (const index of staged) {
+    const write = plan.writes[index];
+    if (!cleaned.includes(index) && await missingAsNull(hash, write.stagePath) !== write.sha256) throw failClosed(`已记录的暂存文件哈希不一致：${write.stagePath}`);
+  }
+  for (const index of exposed) {
+    const write = plan.writes[index];
+    if (await missingAsNull(hash, write.path) !== write.sha256) throw failClosed(`已记录的版本 6 文档哈希不一致：${write.path}`);
+  }
+  for (const index of cleaned) {
+    const write = plan.writes[index];
+    if (await missingAsNull(hash, write.stagePath) !== null) throw failClosed(`已记录清理的暂存文件仍存在：${write.stagePath}`);
+  }
+  for (const index of projectCompletedIndexes(journal, "moves", plan.moves.length, "备份移动完成")) {
+    const operation = plan.moves[index];
+    if (!await verifyProjectMove(hash, operation, "forward")) throw failClosed(`已记录的备份移动状态不一致：${operation.from}`);
+  }
+}
+
+async function rollbackProjectMigration(context) {
+  const { journal, plan, move, removeNew, hash, atomicWrite } = context;
+  journal.state = "rolling-back";
+  await persistJournal(atomicWrite, plan, journal);
+  try {
+    const moved = new Set(journal.completed.moves);
+    if (journal.inFlight?.type === "move") moved.add(journal.inFlight.index);
+    for (const index of [...moved].sort((left, right) => right - left)) {
+      const operation = plan.moves[index];
+      if (journal.rollback.moves.includes(index)) {
+        if (!await verifyProjectMove(hash, operation, "rollback")) throw failClosed(`已记录的文件回滚状态不一致：${operation.from}`);
+        continue;
+      }
+      const sourceHash = await missingAsNull(hash, operation.from);
+      const backupHash = await missingAsNull(hash, operation.to);
+      if (sourceHash === null && backupHash === operation.sha256) await move(operation.to, operation.from, { exclusive: true, rollback: true });
+      else if (sourceHash !== operation.sha256 || backupHash !== null) throw failClosed(`回滚文件状态不一致：${operation.from}`);
+      if (!await verifyProjectMove(hash, operation, "rollback")) throw failClosed(`文件回滚后校验失败：${operation.from}`);
+      journal.rollback.moves.push(index);
+      await persistJournal(atomicWrite, plan, journal);
+    }
+
+    const exposed = new Set(journal.completed.exposed);
+    if (journal.inFlight?.type === "bundle-expose") exposed.add(journal.inFlight.index);
+    for (const index of [...exposed].sort((left, right) => right - left)) {
+      const write = plan.writes[index];
+      if (journal.rollback.exposed.includes(index)) {
+        if (await missingAsNull(hash, write.path) !== null) throw failClosed(`已记录的版本 6 文档回滚状态不一致：${write.path}`);
+        continue;
+      }
+      const targetHash = await missingAsNull(hash, write.path);
+      const ownedMismatch = journal.inFlight?.type === "bundle-expose" && journal.inFlight.index === index && journal.inFlight.created === true;
+      if (targetHash === write.sha256 || (targetHash !== null && ownedMismatch)) {
+        await removeNew(write, { rollback: true, owned: ownedMismatch, kind: "bundle-target" });
+      } else if (targetHash !== null) throw failClosed(`版本 6 文档回滚目标不一致：${write.path}`);
+      if (await missingAsNull(hash, write.path) !== null) throw failClosed(`版本 6 文档回滚后仍存在：${write.path}`);
+      journal.rollback.exposed.push(index);
+      await persistJournal(atomicWrite, plan, journal);
+    }
+
+    const copied = new Set(journal.completed.copies);
+    if (journal.inFlight?.type === "copy") copied.add(journal.inFlight.index);
+    for (const index of [...copied].sort((left, right) => right - left)) {
+      const operation = plan.operations[index];
+      if (journal.rollback.copies.includes(index)) {
+        if (await missingAsNull(hash, operation.to) !== null) throw failClosed(`已记录的复制回滚状态不一致：${operation.to}`);
+        continue;
+      }
+      const targetHash = await missingAsNull(hash, operation.to);
+      const ownedMismatch = journal.inFlight?.type === "copy" && journal.inFlight.index === index && journal.inFlight.created === true;
+      if (targetHash === operation.sha256 || (targetHash !== null && ownedMismatch)) {
+        await removeNew(operation, { rollback: true, owned: ownedMismatch, kind: "copy" });
+      } else if (targetHash !== null) throw failClosed(`复制回滚目标不一致：${operation.to}`);
+      if (await missingAsNull(hash, operation.to) !== null) throw failClosed(`复制回滚后目标仍存在：${operation.to}`);
+      journal.rollback.copies.push(index);
+      await persistJournal(atomicWrite, plan, journal);
+    }
+
+    const staged = new Set(journal.completed.staged);
+    if (journal.inFlight?.type === "bundle-stage") staged.add(journal.inFlight.index);
+    for (const index of [...staged].sort((left, right) => right - left)) {
+      const write = plan.writes[index];
+      if (journal.rollback.stages.includes(index)) {
+        if (await missingAsNull(hash, write.stagePath) !== null) throw failClosed(`已记录的暂存回滚状态不一致：${write.stagePath}`);
+        continue;
+      }
+      const stageHash = await missingAsNull(hash, write.stagePath);
+      const ownedMismatch = journal.inFlight?.type === "bundle-stage" && journal.inFlight.index === index && journal.inFlight.created === true;
+      if (stageHash === write.sha256 || (stageHash !== null && ownedMismatch)) {
+        await removeNew({ ...write, path: write.stagePath }, { rollback: true, owned: ownedMismatch, kind: "bundle-stage" });
+      } else if (stageHash !== null) throw failClosed(`暂存回滚目标不一致：${write.stagePath}`);
+      if (await missingAsNull(hash, write.stagePath) !== null) throw failClosed(`暂存回滚后仍存在：${write.stagePath}`);
+      journal.rollback.stages.push(index);
+      await persistJournal(atomicWrite, plan, journal);
+    }
+
+    journal.inFlight = null;
+    journal.state = "rolled-back";
+    await persistJournal(atomicWrite, plan, journal);
+    return journal;
+  } catch (error) {
+    journal.state = "rollback-failed";
+    journal.rollbackError = String(error?.message || error);
+    await persistJournal(atomicWrite, plan, journal);
+    throw error;
+  }
+}
+
+async function executeProjectMigration(context) {
+  const { plan, copy, move, hash, atomicWrite, removeNew } = context;
   for (const [name, callback] of Object.entries({ copy, move, hash, atomicWrite, removeNew })) {
     if (typeof callback !== "function") throw new Error(`迁移执行器缺少 ${name}。`);
   }
-  if (projectMigrationPlanId(plan) !== plan.planId) throw failClosed("迁移计划内容已变更，与 planId 不一致，已拒绝执行。");
+  validateProjectPlan(plan);
   const journal = plan.journal ? clone(plan.journal) : createProjectMigrationJournal(plan);
-  if (journal.planId !== plan.planId) throw failClosed("迁移 journal 与计划不一致，已 fail-closed。 ");
-  if (["blocked", "rollback-failed"].includes(journal.state)) throw failClosed(journal.error || "迁移 journal 已阻止，需人工核对。");
-  if (journal.state === "completed") {
-    for (const operation of plan.operations) if (await hash(operation.to) !== operation.sha256) throw failClosed(`已完成迁移的目标哈希不一致：${operation.to}`);
-    for (const write of plan.writes) if (await hash(write.path) !== write.sha256) throw failClosed(`已完成迁移的版本 6 文档哈希不一致：${write.path}`);
-    for (const operation of plan.moves) {
-      if (await missingAsNull(hash, operation.from) !== null || await hash(operation.to) !== operation.sha256) throw failClosed(`已完成迁移的备份状态不一致：${operation.from}`);
-    }
-    return journal;
+  if (journal.planId !== plan.planId || journal.journalPath !== plan.journalPath || journal.type !== `${MIGRATION_TYPE}-journal`) {
+    throw failClosed("迁移 journal 与计划不一致，已 fail-closed。");
   }
-  journal.state = "running";
-  await persistJournal(atomicWrite, plan, journal);
+  if (["rolling-back", "rollback-failed"].includes(journal.state)) {
+    await rollbackProjectMigration({ ...context, journal });
+    throw new Error("项目迁移回滚完成；未恢复正向迁移。");
+  }
+  if (journal.state === "rolled-back") throw new Error("项目迁移已回滚，需重新生成计划。");
+  if (journal.state === "completed") { await verifyProjectFinal({ plan, hash }); return journal; }
+  if (!["planned", "forward"].includes(journal.state)) throw failClosed(`迁移 journal 状态无效：${journal.state}`);
 
+  journal.state = "forward";
+  await persistJournal(atomicWrite, plan, journal);
   try {
+    await verifyProjectForwardProgress({ plan, journal, hash });
     for (const [index, operation] of plan.operations.entries()) {
       if (journal.completed.copies.includes(index)) {
-        if (await missingAsNull(hash, operation.to) !== operation.sha256) throw failClosed(`已记录的迁移目标哈希不一致，拒绝继续：${operation.to}`);
+        if (await missingAsNull(hash, operation.to) !== operation.sha256) throw failClosed(`已记录的迁移目标哈希不一致：${operation.to}`);
         continue;
       }
-      const replaying = journal.inFlight?.type === "copy" && journal.inFlight.index === index;
       const existingHash = await missingAsNull(hash, operation.to);
       if (existingHash !== null) {
-        if (!replaying || existingHash !== operation.sha256) throw failClosed(`迁移目标存在且内容不一致，拒绝覆盖：${operation.to}`);
-        journal.completed.copies.push(index);
-        journal.inFlight = null;
+        if (journal.inFlight?.type !== "copy" || journal.inFlight.index !== index || existingHash !== operation.sha256) {
+          throw failClosed(`迁移目标存在且内容不一致：${operation.to}`);
+        }
+      } else {
+        journal.inFlight = { type: "copy", index, created: false };
         await persistJournal(atomicWrite, plan, journal);
-        continue;
+        await copy(operation.from, operation.to, { exclusive: true });
+        journal.inFlight.created = true;
+        await persistJournal(atomicWrite, plan, journal);
       }
-      journal.inFlight = { type: "copy", index };
-      await persistJournal(atomicWrite, plan, journal);
-      await copy(operation.from, operation.to, { exclusive: true });
       if (await hash(operation.to) !== operation.sha256) throw new Error(`复制后 SHA-256 哈希不一致：${operation.to}`);
       journal.completed.copies.push(index);
       journal.inFlight = null;
       await persistJournal(atomicWrite, plan, journal);
     }
 
-    if (!journal.completed.bundle) {
-      const replaying = journal.inFlight?.type === "bundle";
-      const hashes = await Promise.all(plan.writes.map((write) => missingAsNull(hash, write.path)));
-      if (hashes.some((value) => value !== null)) {
-        if (!replaying || hashes.some((value, index) => value !== plan.writes[index].sha256)) {
-          throw failClosed("版本 6 文档已部分存在或哈希不一致，拒绝覆盖。");
+    for (const [index, write] of plan.writes.entries()) {
+      if (journal.completed.stageCleaned.includes(index)) {
+        if (await missingAsNull(hash, write.stagePath) !== null || await missingAsNull(hash, write.path) !== write.sha256) {
+          throw failClosed(`已记录清理的暂存或版本 6 文档状态不一致：${write.path}`);
         }
-        journal.completed.bundle = true;
-        journal.inFlight = null;
-        await persistJournal(atomicWrite, plan, journal);
+        continue;
+      }
+      if (journal.completed.staged.includes(index)) {
+        if (await missingAsNull(hash, write.stagePath) !== write.sha256) throw new Error(`已记录的暂存文件哈希不一致：${write.stagePath}`);
+        continue;
+      }
+      const stageHash = await missingAsNull(hash, write.stagePath);
+      if (stageHash !== null) {
+        if (journal.inFlight?.type !== "bundle-stage" || journal.inFlight.index !== index || stageHash !== write.sha256) {
+          throw failClosed(`迁移暂存文件存在且内容不一致：${write.stagePath}`);
+        }
       } else {
-        journal.inFlight = { type: "bundle" };
+        journal.inFlight = { type: "bundle-stage", index, created: false };
         await persistJournal(atomicWrite, plan, journal);
-        await atomicWrite({ type: "bundle", writes: plan.writes.map(clone), exclusive: true });
-        const writtenHashes = await Promise.all(plan.writes.map((write) => hash(write.path)));
-        if (writtenHashes.some((value, index) => value !== plan.writes[index].sha256)) throw new Error("版本 6 文档写入后 SHA-256 哈希不一致。");
-        journal.completed.bundle = true;
-        journal.inFlight = null;
+        await atomicWrite({ type: "stage", write: clone(write), exclusive: true });
+        journal.inFlight.created = true;
         await persistJournal(atomicWrite, plan, journal);
       }
+      if (await hash(write.stagePath) !== write.sha256) throw new Error(`版本 6 暂存文件 SHA-256 不一致：${write.stagePath}`);
+      journal.completed.staged.push(index);
+      journal.inFlight = null;
+      await persistJournal(atomicWrite, plan, journal);
+    }
+
+    for (const [index, write] of plan.writes.entries()) {
+      if (journal.completed.exposed.includes(index)) {
+        if (await missingAsNull(hash, write.path) !== write.sha256) throw failClosed(`已记录的版本 6 文档哈希不一致：${write.path}`);
+        continue;
+      }
+      if (await missingAsNull(hash, write.stagePath) !== write.sha256) throw new Error(`暴露前暂存文件缺失或不一致：${write.stagePath}`);
+      const targetHash = await missingAsNull(hash, write.path);
+      if (targetHash !== null) {
+        if (journal.inFlight?.type !== "bundle-expose" || journal.inFlight.index !== index || targetHash !== write.sha256) {
+          throw failClosed(`版本 6 文档存在且内容不一致：${write.path}`);
+        }
+      } else {
+        journal.inFlight = { type: "bundle-expose", index, created: false };
+        await persistJournal(atomicWrite, plan, journal);
+        await atomicWrite({ type: "expose", write: clone(write), exclusive: true });
+        journal.inFlight.created = true;
+        await persistJournal(atomicWrite, plan, journal);
+      }
+      if (await hash(write.path) !== write.sha256) throw new Error(`版本 6 文档暴露后 SHA-256 不一致：${write.path}`);
+      journal.completed.exposed.push(index);
+      journal.inFlight = null;
+      await persistJournal(atomicWrite, plan, journal);
     }
 
     for (const [index, operation] of plan.moves.entries()) {
       if (journal.completed.moves.includes(index)) {
-        const sourceHash = await missingAsNull(hash, operation.from);
-        const backupHash = await missingAsNull(hash, operation.to);
-        if (sourceHash !== null || backupHash !== operation.sha256) throw failClosed(`已记录的备份移动状态不一致：${operation.from}`);
+        if (!await verifyProjectMove(hash, operation, "forward")) throw failClosed(`已记录的备份移动状态不一致：${operation.from}`);
         continue;
       }
-      const replaying = journal.inFlight?.type === "move" && journal.inFlight.index === index;
       const sourceHash = await missingAsNull(hash, operation.from);
       const backupHash = await missingAsNull(hash, operation.to);
-      if (replaying && sourceHash === null && backupHash === operation.sha256) {
+      if (journal.inFlight?.type === "move" && journal.inFlight.index === index && sourceHash === null && backupHash === operation.sha256) {
         journal.completed.moves.push(index);
         journal.inFlight = null;
         await persistJournal(atomicWrite, plan, journal);
         continue;
       }
-      if (sourceHash !== operation.sha256 || backupHash !== null) throw failClosed(`旧文件或备份状态已变化，拒绝移动：${operation.from}`);
+      if (sourceHash !== operation.sha256 || backupHash !== null) throw failClosed(`旧文件或备份状态已变化：${operation.from}`);
       journal.inFlight = { type: "move", index };
       await persistJournal(atomicWrite, plan, journal);
       await move(operation.from, operation.to, { exclusive: true });
-      if (await missingAsNull(hash, operation.from) !== null || await hash(operation.to) !== operation.sha256) {
-        throw new Error(`旧文件移动到备份后校验失败：${operation.from}`);
-      }
+      if (!await verifyProjectMove(hash, operation, "forward")) throw new Error(`旧文件移动到备份后校验失败：${operation.from}`);
       journal.completed.moves.push(index);
       journal.inFlight = null;
       await persistJournal(atomicWrite, plan, journal);
     }
+
+    for (const [index, write] of plan.writes.entries()) {
+      if (journal.completed.stageCleaned.includes(index)) {
+        if (await missingAsNull(hash, write.stagePath) !== null) throw failClosed(`已记录清理的暂存文件仍存在：${write.stagePath}`);
+        continue;
+      }
+      const stageHash = await missingAsNull(hash, write.stagePath);
+      if (stageHash !== write.sha256) throw failClosed(`清理前暂存文件哈希不一致：${write.stagePath}`);
+      journal.inFlight = { type: "stage-cleanup", index };
+      await persistJournal(atomicWrite, plan, journal);
+      await removeNew({ ...write, path: write.stagePath }, { kind: "bundle-stage", completed: true });
+      if (await missingAsNull(hash, write.stagePath) !== null) throw new Error(`暂存文件清理失败：${write.stagePath}`);
+      journal.completed.stageCleaned.push(index);
+      journal.inFlight = null;
+      await persistJournal(atomicWrite, plan, journal);
+    }
+
+    await verifyProjectFinal({ plan, hash });
     journal.state = "completed";
     journal.inFlight = null;
     await persistJournal(atomicWrite, plan, journal);
     return journal;
   } catch (error) {
     journal.error = String(error?.message || error);
-    if (error?.failClosed) {
-      journal.state = "blocked";
-      await persistJournal(atomicWrite, plan, journal);
+    try { await rollbackProjectMigration({ ...context, journal }); }
+    catch (rollbackError) {
+      error.message = `${error.message}；迁移回滚失败：${String(rollbackError?.message || rollbackError)}`;
       throw error;
-    }
-    journal.state = "rolling-back";
-    await persistJournal(atomicWrite, plan, journal);
-    try {
-      await rollbackProjectMigration({ journal, plan, move, removeNew, hash });
-      await persistJournal(atomicWrite, plan, journal);
-    } catch (rollbackError) {
-      journal.state = "rollback-failed";
-      journal.rollbackError = String(rollbackError?.message || rollbackError);
-      await persistJournal(atomicWrite, plan, journal);
-      error.rollbackError = rollbackError;
-      error.message = `${error.message}；迁移回滚失败：${journal.rollbackError}`;
     }
     throw error;
   }
@@ -492,8 +690,10 @@ async function executeProjectMigration({ plan, copy, move, hash, atomicWrite, re
 
 module.exports = {
   createProjectMigrationJournal,
+  derivedProjectJournalPath,
   executeProjectMigration,
   planLegacyProjectMigration,
+  projectMaintenanceLockPath,
   projectMigrationPlanId,
   projectMigrationSafetyReasons,
   rollbackProjectMigration,

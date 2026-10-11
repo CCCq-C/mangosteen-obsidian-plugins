@@ -1,6 +1,8 @@
 const assert = require("assert");
 const crypto = require("crypto");
+const fs = require("fs");
 const Module = require("module");
+const os = require("os");
 const path = require("path");
 
 const sha256 = (value) => crypto.createHash("sha256").update(value).digest("hex");
@@ -20,10 +22,16 @@ function task(overrides = {}) {
 function adapters(initial, options = {}) {
   const files = new Map(Object.entries(initial).map(([key, value]) => [key, Buffer.from(value)]));
   const events = [];
-  let savedTasks = null;
+  const journals = new Map();
+  let savedTasks = JSON.parse(JSON.stringify(options.initialTasks || [task()]));
+  let removeFailures = Number(options.failRemoveAt || 0);
+  let settingsFailures = Number(options.failSettingsAt || 0);
+  let sourceManifestReads = 0;
   return {
     files,
     events,
+    journals,
+    options,
     get savedTasks() { return savedTasks; },
     copy: async (from, to) => {
       events.push(`copy:${from}->${to}`);
@@ -48,11 +56,27 @@ function adapters(initial, options = {}) {
     },
     atomicWriteSettings: async (tasks) => {
       events.push("settings");
-      if (options.failSettings) throw new Error("injected settings failure");
       savedTasks = JSON.parse(JSON.stringify(tasks));
+      if (settingsFailures > 0) { settingsFailures -= 1; throw new Error("injected settings failure"); }
     },
-    writeJournal: async () => {},
-    removeNew: async (operation) => { files.delete(operation.to); },
+    writeJournal: async (journalPath, value) => { journals.set(journalPath, JSON.parse(JSON.stringify(value))); },
+    removeNew: async (operation) => {
+      if (removeFailures > 0) { removeFailures -= 1; throw new Error("injected rollback removal failure"); }
+      files.delete(operation.to);
+    },
+    readManifest: async (folder) => {
+      if (folder === "山竹视频/video-task-1") {
+        sourceManifestReads += 1;
+        if (sourceManifestReads === options.mutateManifestReadAt) files.set(`${folder}/late-race.tmp`, Buffer.from("late race"));
+      }
+      const entries = [...files.entries()]
+        .filter(([filePath]) => filePath.startsWith(`${folder}/`))
+        .map(([filePath, value]) => ({ relativePath: filePath.slice(folder.length + 1), size: value.length, sha256: sha256(value), type: "file" }))
+        .sort((left, right) => left.relativePath.localeCompare(right.relativePath));
+      return entries.length ? entries : null;
+    },
+    readSettings: async () => JSON.parse(JSON.stringify(savedTasks)),
+    clearFailures() { options.failMoveFrom = null; removeFailures = 0; settingsFailures = 0; },
   };
 }
 
@@ -77,6 +101,11 @@ function adapters(initial, options = {}) {
   assert.strictEqual(plan.deletes.length, 0);
   assert.match(plan.backupPath, /^\.mangosteen-video\/migration-backup\/migration-20261012-010203-004$/);
   assert.strictEqual(plan.nextTasks[0].localPath, plan.operations[0].to);
+  assert.deepStrictEqual(plan.moves[0].manifest, [
+    { relativePath: "provider.json", size: 7, sha256: sha256("keep me"), type: "file" },
+    { relativePath: "这是一段很长的提示词.mp4", size: 11, sha256: sha256("video bytes"), type: "file" },
+  ]);
+  assert.match(plan.journalPath, /^\.mangosteen-video\/migration-journal\/migration-/);
 
   for (const unsafeTask of [
     task({ status: "saving", saved: false }),
@@ -112,26 +141,87 @@ function adapters(initial, options = {}) {
 
   const tamperedPlan = { ...plan, nextTasks: plan.nextTasks.map((item) => ({ ...item, localPath: "山竹创作记录/视频/tampered.mp4" })) };
   await assert.rejects(migration.executeVideoHistoryMigration({ plan: tamperedPlan, ...adapters({ [source]: "video bytes" }) }), /计划.*变更|planId|不一致/);
+  const tamperedJournalPath = { ...plan, journalPath: "notes/do-not-overwrite.md" };
+  assert.notStrictEqual(migration.videoHistoryPlanId(tamperedJournalPath), plan.planId);
+  await assert.rejects(migration.executeVideoHistoryMigration({ plan: tamperedJournalPath, ...adapters({ [source]: "video bytes", [providerPath]: "keep me" }) }), /journal|计划.*变更|路径/);
+  for (const tampered of [{ ...plan, type: "other" }, { ...plan, version: 999 }, { ...plan, schemaVersion: 999 }]) {
+    assert.notStrictEqual(migration.videoHistoryPlanId(tampered), plan.planId);
+  }
+  assert.notStrictEqual(migration.videoHistoryPlanId({ ...plan, moves: plan.moves.map((item) => ({ ...item, manifest: [] })) }), plan.planId);
+
+  for (const mutation of ["added", "removed", "changed"]) {
+    const changed = adapters({ [source]: "video bytes", [providerPath]: "keep me" });
+    if (mutation === "added") changed.files.set("山竹视频/video-task-1/late.tmp", Buffer.from("late"));
+    if (mutation === "removed") changed.files.delete(providerPath);
+    if (mutation === "changed") changed.files.set(providerPath, Buffer.from("changed"));
+    await assert.rejects(migration.executeVideoHistoryMigration({ plan, ...changed }), /清单|manifest|变化|不一致/);
+    assert.strictEqual(changed.events.some((item) => /^(copy|settings|move):?/.test(item)), false, `${mutation} manifest drift must abort before copy/settings/move`);
+  }
+  const lateManifestRace = adapters({ [source]: "video bytes", [providerPath]: "keep me" }, { mutateManifestReadAt: 3 });
+  await assert.rejects(migration.executeVideoHistoryMigration({ plan, ...lateManifestRace }), /重命名前.*清单.*变化/);
+  assert.strictEqual(lateManifestRace.events.some((item) => item.startsWith("move:") || item === "settings"), false);
 
   const success = adapters({ [source]: "video bytes", [providerPath]: "keep me" });
   const completed = await migration.executeVideoHistoryMigration({ plan, ...success });
   assert.strictEqual(completed.state, "completed");
-  assert.deepStrictEqual(success.events.map((item) => item.split(":")[0]), ["copy", "settings", "move"]);
+  assert.deepStrictEqual(success.events.map((item) => item.split(":")[0]), ["copy", "move", "settings"]);
   assert.ok(success.files.has(plan.operations[0].to));
   assert.ok(success.files.has(`${plan.backupPath}/山竹视频/video-task-1/这是一段很长的提示词.mp4`));
   assert.ok(success.files.has(`${plan.backupPath}/山竹视频/video-task-1/provider.json`));
   assert.deepStrictEqual(success.savedTasks, plan.nextTasks);
 
-  const mismatch = adapters({ [source]: "video bytes" }, { hashMismatchPath: plan.operations[0].to });
+  const mismatch = adapters({ [source]: "video bytes", [providerPath]: "keep me" }, { hashMismatchPath: plan.operations[0].to });
   await assert.rejects(migration.executeVideoHistoryMigration({ plan, ...mismatch }), /SHA-256|哈希/);
   assert.ok(mismatch.files.has(source));
   assert.ok(!mismatch.files.has(plan.operations[0].to));
 
-  const moveFailure = adapters({ [source]: "video bytes" }, { failMoveFrom: "山竹视频/video-task-1" });
+  const moveFailure = adapters({ [source]: "video bytes", [providerPath]: "keep me" }, { failMoveFrom: "山竹视频/video-task-1" });
   await assert.rejects(migration.executeVideoHistoryMigration({ plan, ...moveFailure }), /injected move failure/);
   assert.ok(moveFailure.files.has(source));
   assert.ok(!moveFailure.files.has(plan.operations[0].to));
   assert.deepStrictEqual(moveFailure.savedTasks, plan.originalTasks);
+
+  const settingsFailure = adapters({ [source]: "video bytes", [providerPath]: "keep me" }, { failSettingsAt: 1 });
+  await assert.rejects(migration.executeVideoHistoryMigration({ plan, ...settingsFailure }), /settings failure/);
+  assert.deepStrictEqual(settingsFailure.savedTasks, plan.originalTasks);
+  assert.strictEqual(settingsFailure.journals.get(plan.journalPath).state, "rolled-back");
+
+  const interruptedRollback = adapters({ [source]: "video bytes", [providerPath]: "keep me" }, {
+    failMoveFrom: "山竹视频/video-task-1",
+    failRemoveAt: 1,
+  });
+  await assert.rejects(migration.executeVideoHistoryMigration({ plan, ...interruptedRollback }), /回滚|removal|injected/);
+  const rollbackFailed = interruptedRollback.journals.get(plan.journalPath);
+  assert.strictEqual(rollbackFailed.state, "rollback-failed");
+  const forwardEventsBeforeReplay = interruptedRollback.events.filter((item) => item.startsWith("copy:") || item === "settings").length;
+  interruptedRollback.clearFailures();
+  await assert.rejects(
+    migration.executeVideoHistoryMigration({ plan: { ...plan, journal: rollbackFailed }, ...interruptedRollback }),
+    /已回滚|回滚完成/,
+  );
+  assert.strictEqual(interruptedRollback.journals.get(plan.journalPath).state, "rolled-back");
+  assert.strictEqual(interruptedRollback.events.filter((item) => item.startsWith("copy:") || item === "settings").length, forwardEventsBeforeReplay);
+
+  const liedAboutCopy = migration.createVideoHistoryJournal(plan);
+  liedAboutCopy.state = "forward";
+  liedAboutCopy.completed.copies = [0];
+  const tamperedCompleted = adapters({ [source]: "video bytes", [providerPath]: "keep me" });
+  await assert.rejects(migration.executeVideoHistoryMigration({ plan: { ...plan, journal: liedAboutCopy }, ...tamperedCompleted }), /已记录|哈希|缺失|回滚/);
+  assert.strictEqual(tamperedCompleted.events.includes("settings"), false);
+
+  const liedAboutSettings = migration.createVideoHistoryJournal(plan);
+  liedAboutSettings.state = "forward";
+  liedAboutSettings.completed.copies = [0];
+  liedAboutSettings.completed.settings = true;
+  const falseSettings = adapters({ [source]: "video bytes", [providerPath]: "keep me", [plan.operations[0].to]: "video bytes" });
+  await assert.rejects(migration.executeVideoHistoryMigration({ plan: { ...plan, journal: liedAboutSettings }, ...falseSettings }), /settings.*不一致/);
+
+  const liedAboutMove = migration.createVideoHistoryJournal(plan);
+  liedAboutMove.state = "forward";
+  liedAboutMove.completed.moves = [0];
+  const falseMove = adapters({ [source]: "video bytes", [providerPath]: "keep me" });
+  await assert.rejects(migration.executeVideoHistoryMigration({ plan: { ...plan, journal: liedAboutMove }, ...falseMove }), /已记录.*备份|移动状态|不一致/);
+  assert.strictEqual(falseMove.events.some((item) => item.startsWith("copy:") || item === "settings" || item.startsWith("move:")), false, "a false completed move must be rejected before any forward action");
 
   const replanned = migration.planVideoHistoryMigration({ tasks: plan.nextTasks, submissionMarkers: [], files: [{ path: plan.operations[0].to, size: 11, sha256: sha256("video bytes") }], now: "2026-10-12T01:02:03.004Z" });
   assert.strictEqual(replanned.operations.length, 0);
@@ -182,6 +272,24 @@ function adapters(initial, options = {}) {
   plugin.confirmMigrationPlan = () => true;
   await command.callback();
   assert.strictEqual(executions, 0, "the command must revalidate task certainty after confirmation");
+  const journalVault = fs.mkdtempSync(path.join(os.tmpdir(), "mangosteen-video-journal-"));
+  plugin.app = { vault: { adapter: { getBasePath: () => journalVault } } };
+  const journalTarget = path.join(journalVault, ...plan.journalPath.split("/"));
+  fs.mkdirSync(path.dirname(journalTarget), { recursive: true });
+  fs.writeFileSync(journalTarget, "unrelated note");
+  assert.throws(() => plugin.writeMigrationJournal(plan.journalPath, migration.createVideoHistoryJournal(plan)), /无关|占用|journal|JSON/);
+  assert.strictEqual(fs.readFileSync(journalTarget, "utf8"), "unrelated note");
+  fs.mkdirSync(path.join(journalVault, "notes"), { recursive: true });
+  fs.writeFileSync(path.join(journalVault, "notes/project.md"), "keep project note");
+  assert.throws(() => plugin.writeMigrationJournal("notes/project.md", migration.createVideoHistoryJournal(plan)), /路径|journal/);
+  assert.strictEqual(fs.readFileSync(path.join(journalVault, "notes/project.md"), "utf8"), "keep project note");
+  fs.rmSync(path.join(journalVault, ".mangosteen-video"), { recursive: true, force: true });
+  const outsideJournal = fs.mkdtempSync(path.join(os.tmpdir(), "mangosteen-video-journal-outside-"));
+  fs.mkdirSync(path.join(journalVault, ".mangosteen-video"), { recursive: true });
+  fs.symlinkSync(outsideJournal, path.join(journalVault, ".mangosteen-video/migration-journal"));
+  assert.throws(() => plugin.writeMigrationJournal(plan.journalPath, migration.createVideoHistoryJournal(plan)), /符号链接|不安全/);
+  fs.rmSync(outsideJournal, { recursive: true, force: true });
+  fs.rmSync(journalVault, { recursive: true, force: true });
   global.window = originalWindow;
 
   console.log("history-migration-video: ok");

@@ -1,6 +1,8 @@
 const assert = require("assert");
 const crypto = require("crypto");
+const fs = require("fs");
 const Module = require("module");
+const os = require("os");
 const path = require("path");
 
 const sha256 = (value) => crypto.createHash("sha256").update(value).digest("hex");
@@ -21,7 +23,11 @@ function task(overrides = {}) {
 function adapters(initial, options = {}) {
   const files = new Map(Object.entries(initial).map(([key, value]) => [key, Buffer.from(value)]));
   const events = [];
-  let savedTasks = null;
+  const journals = new Map();
+  let savedTasks = JSON.parse(JSON.stringify(options.initialTasks || [task()]));
+  let removeFailures = Number(options.failRemoveAt || 0);
+  let settingsFailures = Number(options.failSettingsAt || 0);
+  let sourceManifestReads = 0;
   const copy = async (from, to) => {
     events.push(`copy:${from}->${to}`);
     if (files.has(to)) throw Object.assign(new Error("destination exists"), { code: "EEXIST" });
@@ -45,12 +51,31 @@ function adapters(initial, options = {}) {
   };
   const atomicWriteSettings = async (tasks) => {
     events.push("settings");
-    if (options.failSettings) throw new Error("injected settings failure");
     savedTasks = JSON.parse(JSON.stringify(tasks));
+    if (settingsFailures > 0) { settingsFailures -= 1; throw new Error("injected settings failure"); }
   };
-  const writeJournal = async () => {};
-  const removeNew = async (operation) => { files.delete(operation.to); };
-  return { files, events, copy, hash, move, atomicWriteSettings, writeJournal, removeNew, get savedTasks() { return savedTasks; } };
+  const writeJournal = async (journalPath, value) => { journals.set(journalPath, JSON.parse(JSON.stringify(value))); };
+  const removeNew = async (operation) => {
+    if (removeFailures > 0) { removeFailures -= 1; throw new Error("injected rollback removal failure"); }
+    files.delete(operation.to);
+  };
+  const readManifest = async (folder) => {
+    if (folder === "生图记录/2026-09-08-09-02-03") {
+      sourceManifestReads += 1;
+      if (sourceManifestReads === options.mutateManifestReadAt) files.set(`${folder}/late-race.tmp`, Buffer.from("late race"));
+    }
+    const entries = [...files.entries()]
+      .filter(([filePath]) => filePath.startsWith(`${folder}/`))
+      .map(([filePath, value]) => ({ relativePath: filePath.slice(folder.length + 1), size: value.length, sha256: sha256(value), type: "file" }))
+      .sort((left, right) => left.relativePath.localeCompare(right.relativePath));
+    return entries.length ? entries : null;
+  };
+  const readSettings = async () => JSON.parse(JSON.stringify(savedTasks));
+  return {
+    files, events, journals, options, copy, hash, move, atomicWriteSettings, writeJournal, removeNew, readManifest, readSettings,
+    get savedTasks() { return savedTasks; },
+    clearFailures() { options.failMoveFrom = null; removeFailures = 0; settingsFailures = 0; },
+  };
 }
 
 (async () => {
@@ -77,6 +102,11 @@ function adapters(initial, options = {}) {
   assert.match(plan.backupPath, /^\.mangosteen-image\/migration-backup\/migration-20261012-010203-004$/);
   assert.deepStrictEqual(plan.nextTasks[0].imagePaths, [plan.operations[0].to]);
   assert.strictEqual(plan.nextTasks[0].recordPath, null);
+  assert.deepStrictEqual(plan.moves[0].manifest, [
+    { relativePath: "note.txt", size: 7, sha256: sha256("keep me"), type: "file" },
+    { relativePath: "图片-1.png", size: 11, sha256: sha256("image bytes"), type: "file" },
+  ]);
+  assert.match(plan.journalPath, /^\.mangosteen-image\/migration-journal\/migration-/);
 
   const uncertain = migration.planImageHistoryMigration({
     tasks: [task()],
@@ -117,26 +147,87 @@ function adapters(initial, options = {}) {
 
   const tamperedPlan = { ...plan, nextTasks: plan.nextTasks.map((item) => ({ ...item, imagePaths: ["山竹创作记录/图片/tampered.png"] })) };
   await assert.rejects(migration.executeImageHistoryMigration({ plan: tamperedPlan, ...adapters({ [source]: "image bytes" }) }), /计划.*变更|planId|不一致/);
+  const tamperedJournalPath = { ...plan, journalPath: "notes/do-not-overwrite.md" };
+  assert.notStrictEqual(migration.imageHistoryPlanId(tamperedJournalPath), plan.planId);
+  await assert.rejects(migration.executeImageHistoryMigration({ plan: tamperedJournalPath, ...adapters({ [source]: "image bytes", [notePath]: "keep me" }) }), /journal|计划.*变更|路径/);
+  for (const tampered of [{ ...plan, type: "other" }, { ...plan, version: 999 }, { ...plan, schemaVersion: 999 }]) {
+    assert.notStrictEqual(migration.imageHistoryPlanId(tampered), plan.planId);
+  }
+  assert.notStrictEqual(migration.imageHistoryPlanId({ ...plan, moves: plan.moves.map((item) => ({ ...item, manifest: [] })) }), plan.planId);
+
+  for (const mutation of ["added", "removed", "changed"]) {
+    const changed = adapters({ [source]: "image bytes", [notePath]: "keep me" });
+    if (mutation === "added") changed.files.set("生图记录/2026-09-08-09-02-03/late.tmp", Buffer.from("late"));
+    if (mutation === "removed") changed.files.delete(notePath);
+    if (mutation === "changed") changed.files.set(notePath, Buffer.from("changed"));
+    await assert.rejects(migration.executeImageHistoryMigration({ plan, ...changed }), /清单|manifest|变化|不一致/);
+    assert.strictEqual(changed.events.some((item) => /^(copy|settings|move):?/.test(item)), false, `${mutation} manifest drift must abort before copy/settings/move`);
+  }
+  const lateManifestRace = adapters({ [source]: "image bytes", [notePath]: "keep me" }, { mutateManifestReadAt: 3 });
+  await assert.rejects(migration.executeImageHistoryMigration({ plan, ...lateManifestRace }), /重命名前.*清单.*变化/);
+  assert.strictEqual(lateManifestRace.events.some((item) => item.startsWith("move:") || item === "settings"), false, "last-moment manifest drift must not move a directory or write settings");
 
   const success = adapters({ [source]: "image bytes", [notePath]: "keep me" });
   const completed = await migration.executeImageHistoryMigration({ plan, ...success });
   assert.strictEqual(completed.state, "completed");
-  assert.deepStrictEqual(success.events.map((item) => item.split(":")[0]), ["copy", "settings", "move"]);
+  assert.deepStrictEqual(success.events.map((item) => item.split(":")[0]), ["copy", "move", "settings"]);
   assert.ok(success.files.has(plan.operations[0].to));
   assert.ok(success.files.has(`${plan.backupPath}/生图记录/2026-09-08-09-02-03/图片-1.png`));
   assert.ok(success.files.has(`${plan.backupPath}/生图记录/2026-09-08-09-02-03/note.txt`), "the whole legacy task folder must move to backup");
   assert.deepStrictEqual(success.savedTasks, plan.nextTasks);
 
-  const mismatch = adapters({ [source]: "image bytes" }, { hashMismatchPath: plan.operations[0].to });
+  const mismatch = adapters({ [source]: "image bytes", [notePath]: "keep me" }, { hashMismatchPath: plan.operations[0].to });
   await assert.rejects(migration.executeImageHistoryMigration({ plan, ...mismatch }), /SHA-256|哈希/);
   assert.ok(mismatch.files.has(source));
   assert.ok(!mismatch.files.has(plan.operations[0].to));
 
-  const moveFailure = adapters({ [source]: "image bytes" }, { failMoveFrom: "生图记录/2026-09-08-09-02-03" });
+  const moveFailure = adapters({ [source]: "image bytes", [notePath]: "keep me" }, { failMoveFrom: "生图记录/2026-09-08-09-02-03" });
   await assert.rejects(migration.executeImageHistoryMigration({ plan, ...moveFailure }), /injected move failure/);
   assert.ok(moveFailure.files.has(source), "failed folder move must leave the legacy source in place");
   assert.ok(!moveFailure.files.has(plan.operations[0].to), "failed folder move must remove the verified new copy");
   assert.deepStrictEqual(moveFailure.savedTasks, plan.originalTasks, "failed folder move must restore settings paths");
+
+  const settingsFailure = adapters({ [source]: "image bytes", [notePath]: "keep me" }, { failSettingsAt: 1 });
+  await assert.rejects(migration.executeImageHistoryMigration({ plan, ...settingsFailure }), /settings failure/);
+  assert.deepStrictEqual(settingsFailure.savedTasks, plan.originalTasks, "a write-then-throw settings failure must be detected and rolled back");
+  assert.strictEqual(settingsFailure.journals.get(plan.journalPath).state, "rolled-back");
+
+  const interruptedRollback = adapters({ [source]: "image bytes", [notePath]: "keep me" }, {
+    failMoveFrom: "生图记录/2026-09-08-09-02-03",
+    failRemoveAt: 1,
+  });
+  await assert.rejects(migration.executeImageHistoryMigration({ plan, ...interruptedRollback }), /回滚|removal|injected/);
+  const rollbackFailed = interruptedRollback.journals.get(plan.journalPath);
+  assert.strictEqual(rollbackFailed.state, "rollback-failed");
+  const forwardEventsBeforeReplay = interruptedRollback.events.filter((item) => item.startsWith("copy:") || item === "settings").length;
+  interruptedRollback.clearFailures();
+  await assert.rejects(
+    migration.executeImageHistoryMigration({ plan: { ...plan, journal: rollbackFailed }, ...interruptedRollback }),
+    /已回滚|回滚完成/,
+  );
+  assert.strictEqual(interruptedRollback.journals.get(plan.journalPath).state, "rolled-back");
+  assert.strictEqual(interruptedRollback.events.filter((item) => item.startsWith("copy:") || item === "settings").length, forwardEventsBeforeReplay, "rollback replay must never re-enter forward execution");
+
+  const liedAboutCopy = migration.createImageHistoryJournal(plan);
+  liedAboutCopy.state = "forward";
+  liedAboutCopy.completed.copies = [0];
+  const tamperedCompleted = adapters({ [source]: "image bytes", [notePath]: "keep me" });
+  await assert.rejects(migration.executeImageHistoryMigration({ plan: { ...plan, journal: liedAboutCopy }, ...tamperedCompleted }), /已记录|哈希|缺失|回滚/);
+  assert.strictEqual(tamperedCompleted.events.includes("settings"), false, "a false completed marker must be checked before settings are changed");
+
+  const liedAboutSettings = migration.createImageHistoryJournal(plan);
+  liedAboutSettings.state = "forward";
+  liedAboutSettings.completed.copies = [0];
+  liedAboutSettings.completed.settings = true;
+  const falseSettings = adapters({ [source]: "image bytes", [notePath]: "keep me", [plan.operations[0].to]: "image bytes" });
+  await assert.rejects(migration.executeImageHistoryMigration({ plan: { ...plan, journal: liedAboutSettings }, ...falseSettings }), /settings.*不一致/);
+
+  const liedAboutMove = migration.createImageHistoryJournal(plan);
+  liedAboutMove.state = "forward";
+  liedAboutMove.completed.moves = [0];
+  const falseMove = adapters({ [source]: "image bytes", [notePath]: "keep me" });
+  await assert.rejects(migration.executeImageHistoryMigration({ plan: { ...plan, journal: liedAboutMove }, ...falseMove }), /已记录.*备份|移动状态|不一致/);
+  assert.strictEqual(falseMove.events.some((item) => item.startsWith("copy:") || item === "settings" || item.startsWith("move:")), false, "a false completed move must be rejected before any forward action");
 
   const replanned = migration.planImageHistoryMigration({ tasks: plan.nextTasks, submissionMarkers: [], files: [{ path: plan.operations[0].to, size: 11, sha256: sha256("image bytes") }], now: "2026-10-12T01:02:03.004Z" });
   assert.strictEqual(replanned.operations.length, 0, "a completed migration must replan idempotently");
@@ -187,6 +278,24 @@ function adapters(initial, options = {}) {
   plugin.confirmMigrationPlan = () => true;
   await command.callback();
   assert.strictEqual(executions, 0, "the command must revalidate task certainty after confirmation");
+  const journalVault = fs.mkdtempSync(path.join(os.tmpdir(), "mangosteen-image-journal-"));
+  plugin.app = { vault: { adapter: { getBasePath: () => journalVault } } };
+  const journalTarget = path.join(journalVault, ...plan.journalPath.split("/"));
+  fs.mkdirSync(path.dirname(journalTarget), { recursive: true });
+  fs.writeFileSync(journalTarget, "unrelated note");
+  assert.throws(() => plugin.writeMigrationJournal(plan.journalPath, migration.createImageHistoryJournal(plan)), /无关|占用|journal|JSON/);
+  assert.strictEqual(fs.readFileSync(journalTarget, "utf8"), "unrelated note", "journal writer must not clobber an unrelated file");
+  fs.mkdirSync(path.join(journalVault, "notes"), { recursive: true });
+  fs.writeFileSync(path.join(journalVault, "notes/project.md"), "keep project note");
+  assert.throws(() => plugin.writeMigrationJournal("notes/project.md", migration.createImageHistoryJournal(plan)), /路径|journal/);
+  assert.strictEqual(fs.readFileSync(path.join(journalVault, "notes/project.md"), "utf8"), "keep project note");
+  fs.rmSync(path.join(journalVault, ".mangosteen-image"), { recursive: true, force: true });
+  const outsideJournal = fs.mkdtempSync(path.join(os.tmpdir(), "mangosteen-image-journal-outside-"));
+  fs.mkdirSync(path.join(journalVault, ".mangosteen-image"), { recursive: true });
+  fs.symlinkSync(outsideJournal, path.join(journalVault, ".mangosteen-image/migration-journal"));
+  assert.throws(() => plugin.writeMigrationJournal(plan.journalPath, migration.createImageHistoryJournal(plan)), /符号链接|不安全/);
+  fs.rmSync(outsideJournal, { recursive: true, force: true });
+  fs.rmSync(journalVault, { recursive: true, force: true });
   global.window = originalWindow;
 
   console.log("history-migration-image: ok");
