@@ -18,6 +18,24 @@ const ImagePlugin = require("../main.js");
 const imageApi = require("../image-api.cjs");
 Module._load = originalLoad;
 
+function createVault(initialFiles = {}) {
+  const files = new Map(Object.entries(initialFiles).map(([filePath, value]) => [filePath, Buffer.from(value)]));
+  const folders = [];
+  const createdBinaryPaths = [];
+  const modifiedBinaryPaths = [];
+  const vault = {
+    adapter: { exists: async (filePath) => files.has(filePath) || folders.includes(filePath) },
+    createFolder: async (folderPath) => { folders.push(folderPath); },
+    getAbstractFileByPath: (filePath) => files.has(filePath) ? { path: filePath } : null,
+    create: async (filePath, value) => { files.set(filePath, Buffer.from(value)); return { path: filePath }; },
+    read: async (file) => files.get(file.path).toString("utf8"),
+    modify: async (file, value) => { files.set(file.path, Buffer.from(value)); },
+    createBinary: async (filePath, value) => { createdBinaryPaths.push(filePath); files.set(filePath, Buffer.from(value)); },
+    modifyBinary: async (file, value) => { modifiedBinaryPaths.push(file.path); files.set(file.path, Buffer.from(value)); },
+  };
+  return { vault, files, folders, createdBinaryPaths, modifiedBinaryPaths };
+}
+
 (async () => {
   const plugin = new ImagePlugin();
   let polls = 0;
@@ -76,13 +94,15 @@ Module._load = originalLoad;
     responseLostPosts += 1;
     throw new Error("socket closed after upload");
   };
+  const firstOutputTarget = { owner: "video-replica", destinationPath: "山竹视频复刻/project-1/03-分镜/001/首帧.png" };
+  const secondOutputTarget = { owner: "video-replica", destinationPath: "山竹视频复刻/project-1/03-分镜/002/首帧.png" };
   await assert.rejects(
-    responseLostPlugin.generateText("safe prompt", 1),
+    responseLostPlugin.generateText("safe prompt", 1, "single", { outputTarget: firstOutputTarget }),
     /提交结果待核对.*不会自动重复提交/,
   );
   assert.strictEqual(responseLostPosts, 1);
   assert.strictEqual(responseLostPlugin.settings.submissionMarkers[0].status, "uncertain");
-  await assert.rejects(responseLostPlugin.generateText("safe prompt", 1), /已阻止重复提交/);
+  await assert.rejects(responseLostPlugin.generateText("safe prompt", 1, "single", { outputTarget: secondOutputTarget }), /已阻止重复提交/);
   assert.strictEqual(responseLostPosts, 1, "response-lost retry must not issue another paid POST");
 
   const saveFailurePlugin = new ImagePlugin();
@@ -138,6 +158,100 @@ Module._load = originalLoad;
   assert.strictEqual(overrideRequestModel, "gpt-image-2-w");
   assert.strictEqual(overrideResponse.task.model, "gpt-image-2-w");
   assert.strictEqual(overridePlugin.settings.model, "gpt-image-2-adobe", "per-request model must not mutate the standalone image setting");
+
+  const outputTarget = {
+    owner: "video-replica",
+    projectId: "project-1",
+    shotId: "008",
+    assetType: "first-frame",
+    destinationPath: "山竹视频复刻/project-1/03-分镜/008/首帧.png",
+  };
+  const targetPlugin = new ImagePlugin();
+  targetPlugin.api = imageApi;
+  targetPlugin.settings = { model: "gpt-image-2", size: "1024x1024", imageTasks: [], submissionMarkers: [] };
+  targetPlugin.saveSettings = async () => {};
+  let remoteJsonPayload;
+  targetPlugin.postJsonResponse = async (_path, payload) => {
+    remoteJsonPayload = payload;
+    return { status: 200, json: { id: "persisted-project-task" } };
+  };
+  targetPlugin.waitForImageTask = async (task) => ({ task });
+  const targetResponse = await targetPlugin.generateText("project frame", 1, "shot-008", { outputTarget });
+  assert.ok(!Object.prototype.hasOwnProperty.call(remoteJsonPayload, "outputTarget"), "outputTarget must stay out of remote JSON");
+  assert.deepStrictEqual(targetResponse.task.outputTarget, { ...outputTarget, overwrite: "replace-current" });
+
+  const synchronousPlugin = new ImagePlugin();
+  synchronousPlugin.api = imageApi;
+  synchronousPlugin.settings = { model: "gpt-image-2", size: "1024x1024", imageTasks: [], submissionMarkers: [] };
+  synchronousPlugin.saveSettings = async () => {};
+  synchronousPlugin.postJsonResponse = async () => ({ status: 200, json: { data: [{ b64_json: Buffer.from("sync image").toString("base64") }] } });
+  const synchronousResponse = await synchronousPlugin.generateText("synchronous project frame", 1, "shot-008-sync", { outputTarget });
+  assert.deepStrictEqual(synchronousResponse.__mangosteenOutputTarget, { ...outputTarget, overwrite: "replace-current" });
+  assert.deepStrictEqual(synchronousPlugin.settings.imageTasks[0].outputTarget, synchronousResponse.__mangosteenOutputTarget, "sync and async tasks must persist the same normalized destination");
+
+  const editPlugin = new ImagePlugin();
+  editPlugin.api = imageApi;
+  editPlugin.settings = { model: "gpt-image-2", size: "1024x1024", imageTasks: [], submissionMarkers: [] };
+  editPlugin.saveSettings = async () => {};
+  editPlugin.refreshAgentAccess = async () => {};
+  editPlugin.requireKey = () => {};
+  let remoteMultipartFields;
+  editPlugin.postMultipart = async (_path, fields) => {
+    remoteMultipartFields = fields;
+    return { status: 200, json: { id: "persisted-edit-task" } };
+  };
+  editPlugin.waitForImageTask = async (task) => ({ task });
+  const editResponse = await editPlugin.generateEditMulti("edit project frame", [{ name: "ref.png", type: "image/png", buffer: Buffer.from("ref") }], "shot-008", { outputTarget });
+  assert.ok(!Object.prototype.hasOwnProperty.call(remoteMultipartFields, "outputTarget"), "outputTarget must stay out of multipart fields");
+  assert.deepStrictEqual(editResponse.task.outputTarget, { ...outputTarget, overwrite: "replace-current" });
+
+  const persistedSettings = JSON.parse(JSON.stringify(targetPlugin.settings));
+  const projectVault = createVault({ [outputTarget.destinationPath]: "old image" });
+  const restartedPlugin = new ImagePlugin();
+  restartedPlugin.api = imageApi;
+  restartedPlugin.settings = persistedSettings;
+  restartedPlugin.app = { vault: projectVault.vault, plugins: {} };
+  restartedPlugin.fetchImageTask = async () => ({ data: [{ b64_json: Buffer.from("new image").toString("base64") }] });
+  restartedPlugin.saveSettings = async () => {};
+  restartedPlugin.refreshImageTaskViews = () => {};
+  await restartedPlugin.refreshImageTasksNow();
+  const restoredTask = restartedPlugin.settings.imageTasks.find((task) => task.id === "persisted-project-task");
+  assert.strictEqual(restoredTask.saved, true);
+  assert.deepStrictEqual(restoredTask.imagePaths, [outputTarget.destinationPath]);
+  assert.deepStrictEqual(projectVault.modifiedBinaryPaths, [outputTarget.destinationPath], "existing project images must be replaced with modifyBinary");
+  assert.ok(![...projectVault.files.keys()].some((filePath) => filePath.endsWith("任务记录.md")), "project tasks must not append the global history record");
+  assert.ok(![...projectVault.files.keys()].some((filePath) => filePath.startsWith("山竹创作记录/图片/")), "project tasks must not create a global history copy");
+  assert.strictEqual(restartedPlugin.settings.submissionMarkers.length, 0, "saved project output must reconcile its paid submission marker");
+
+  const standaloneVault = createVault();
+  const standalonePlugin = new ImagePlugin();
+  standalonePlugin.api = imageApi;
+  standalonePlugin.settings = { model: "gpt-image-2", size: "1024x1024", imageTasks: [], submissionMarkers: [] };
+  standalonePlugin.app = { vault: standaloneVault.vault, plugins: {} };
+  standalonePlugin.toSelectedImage = async (_candidate, index) => ({ name: `image-${index}.png`, type: "image/png", buffer: Buffer.from(`image-${index}`) });
+  for (let index = 1; index <= 10; index += 1) {
+    await standalonePlugin.persistGeneration({
+      candidates: [{ kind: "base64", value: "" }],
+      prompt: `standalone ${index}`,
+      mode: "文生图",
+      cost: null,
+      taskId: `task-${index}`,
+    });
+  }
+  const standaloneImagePaths = standaloneVault.createdBinaryPaths.filter((filePath) => /\.(?:png|jpe?g|webp)$/i.test(filePath));
+  assert.strictEqual(standaloneImagePaths.length, 10);
+  assert.strictEqual(new Set(standaloneImagePaths.map((filePath) => filePath.split("/").slice(0, -1).join("/"))).size, 1, "standalone images must share one monthly directory");
+  assert.ok(standaloneImagePaths.every((filePath) => /^山竹创作记录\/图片\/\d{4}-\d{2}\/[^/]+\.png$/.test(filePath)), "standalone images must not create one directory per task");
+
+  const multiSaved = await standalonePlugin.persistGeneration({
+    candidates: [{ kind: "base64", value: "" }, { kind: "base64", value: "" }],
+    prompt: "standalone multi-image task",
+    mode: "文生图",
+    cost: null,
+    taskId: "task-multi",
+  });
+  assert.match(multiSaved.imagePaths[0], /-task-multi-01\.png$/);
+  assert.match(multiSaved.imagePaths[1], /-task-multi-02\.png$/);
 
   console.log("image-plugin: ok");
 })().catch((error) => {

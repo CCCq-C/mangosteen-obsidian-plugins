@@ -1,5 +1,6 @@
 const { Plugin, Modal, Notice, requestUrl } = require("obsidian");
 const path = require("path");
+const { normalizeImageOutputTarget, standaloneImagePath } = require("./output-storage.cjs");
 
 const API_BASE = "https://apimodel.aihubkit.com";
 const HISTORY_ROOT = "生图记录";
@@ -279,6 +280,7 @@ class ImageModal extends Modal {
       mode: this.mode === "text" ? "文生图" : "图生图",
       cost: costPerRequest,
       requestedCount: Number(item?.__mangosteenRequestedCount || 1),
+      outputTarget: item?.__mangosteenOutputTarget,
     }))).catch(() => new Notice("图片已生成，但部分本地记录保存失败。"));
     this.draftPrompt = "";
     this.render();
@@ -530,29 +532,35 @@ module.exports = class MangosteenImagePlugin extends Plugin {
     if (!file) file = await this.app.vault.create(path, "# 山竹生图任务记录\n");
     return file;
   }
-  async persistGeneration({ candidates, prompt, mode, cost, model = this.settings.model }) {
+  async persistGeneration({ candidates, prompt, mode, cost, model = this.settings.model, taskId, outputTarget }) {
     const now = new Date();
     const taskName = now.toISOString().replace(/[T:.Z]/g, "-");
-    const root = await this.ensureHistoryFolder();
-    const taskFolder = `${root}/${taskName}`;
-    await this.app.vault.createFolder(taskFolder);
+    const normalizedOutputTarget = normalizeImageOutputTarget(outputTarget);
     const imagePaths = [];
     for (const [index, candidate] of candidates.entries()) {
       const image = await this.toSelectedImage(candidate, index + 1);
       const extension = /jpe?g/i.test(image.type) ? "jpg" : /webp/i.test(image.type) ? "webp" : "png";
-      const imagePath = `${taskFolder}/图片-${index + 1}.${extension}`;
-      await this.app.vault.createBinary(imagePath, image.buffer);
+      const imagePath = normalizedOutputTarget
+        ? normalizedOutputTarget.destinationPath
+        : standaloneImagePath({ now, taskId: taskId || taskName, index: index + 1, extension });
+      const parentPath = imagePath.split("/").slice(0, -1).join("/");
+      if (!await this.app.vault.adapter.exists(parentPath)) await this.app.vault.createFolder(parentPath);
+      const existing = this.app.vault.getAbstractFileByPath(imagePath);
+      if (existing) await this.app.vault.modifyBinary(existing, image.buffer);
+      else await this.app.vault.createBinary(imagePath, image.buffer);
       imagePaths.push(imagePath);
     }
-    const record = await this.historyRecordFile();
     const createdAt = now.toLocaleString("zh-CN", { hour12: false }).replaceAll("/", "-");
+    if (normalizedOutputTarget) return { recordPath: null, imagePaths, createdAt, taskName };
+    const record = await this.historyRecordFile();
     const entry = this.api.createHistoryEntry({ createdAt, mode, model, prompt, cost, imagePaths });
     await this.app.vault.modify(record, `${await this.app.vault.read(record)}${entry}`);
     return { recordPath: record.path, imagePaths, createdAt, taskName };
   }
-  async saveImageResult({ taskId, submissionFingerprint, candidates, prompt, mode, cost, requestedCount, model = this.settings.model }) {
-    const saved = await this.persistGeneration({ candidates, prompt, mode, cost, model });
+  async saveImageResult({ taskId, submissionFingerprint, candidates, prompt, mode, cost, requestedCount, model = this.settings.model, outputTarget }) {
     let task = (this.settings.imageTasks || []).find((item) => item.id === taskId);
+    const normalizedOutputTarget = normalizeImageOutputTarget(outputTarget || task?.outputTarget);
+    const saved = await this.persistGeneration({ candidates, prompt, mode, cost, model, taskId, outputTarget: normalizedOutputTarget });
     if (!task) {
       task = { id: taskId || saved.taskName, accountUserId: String(this.agentImageAccess?.accountUserId || ""), createdAt: new Date().toISOString() };
       this.settings.imageTasks = [task, ...(this.settings.imageTasks || [])].slice(0, 50);
@@ -562,7 +570,7 @@ module.exports = class MangosteenImagePlugin extends Plugin {
       size: task.size || this.settings.size,
       requestedCount: Number(task.requestedCount || requestedCount || (mode === "文生图" ? this.settings.count : 1)),
       outputCount: candidates.length,
-      imagePaths: saved.imagePaths, recordPath: saved.recordPath, status: "completed", progress: 100, saved: true,
+      imagePaths: saved.imagePaths, recordPath: saved.recordPath, outputTarget: normalizedOutputTarget, status: "completed", progress: 100, saved: true,
     });
     const fingerprint = submissionFingerprint || task.submissionFingerprint;
     const previousMarkers = (this.settings.submissionMarkers || []).map((item) => ({ ...item }));
@@ -583,8 +591,8 @@ module.exports = class MangosteenImagePlugin extends Plugin {
   async openHistory() {
     new ImageHistoryModal(this).open();
   }
-  async rememberImageTask({ id, taskPath, mode, prompt, model, group, size, requestedCount, submissionFingerprint }) {
-    const task = { id, taskPath, mode, prompt, model, group, size, requestedCount, submissionFingerprint, accountUserId: String(this.agentImageAccess?.accountUserId || ""), createdAt: new Date().toISOString(), status: "processing", progress: null, saved: false };
+  async rememberImageTask({ id, taskPath, mode, prompt, model, group, size, requestedCount, submissionFingerprint, outputTarget }) {
+    const task = { id, taskPath, mode, prompt, model, group, size, requestedCount, submissionFingerprint, outputTarget: normalizeImageOutputTarget(outputTarget), accountUserId: String(this.agentImageAccess?.accountUserId || ""), createdAt: new Date().toISOString(), status: "processing", progress: null, saved: false };
     const previousTasks = this.settings.imageTasks || [];
     const previousMarkers = (this.settings.submissionMarkers || []).map((item) => ({ ...item }));
     const marker = submissionFingerprint ? this.submissionMarker(submissionFingerprint) : null;
@@ -666,6 +674,7 @@ module.exports = class MangosteenImagePlugin extends Plugin {
         this.refreshImageTaskViews();
         response.__mangosteenTaskId = task.id;
         response.__mangosteenSubmissionFingerprint = task.submissionFingerprint;
+        response.__mangosteenOutputTarget = task.outputTarget;
         return response;
       }
       const state = this.api.readImageTaskState(response);
@@ -713,7 +722,7 @@ module.exports = class MangosteenImagePlugin extends Plugin {
           task.usageLogDetail = "";
         }
         task.status = "saving";
-        await this.saveImageResult({ taskId: task.id, submissionFingerprint: task.submissionFingerprint, candidates: results, prompt: task.prompt, mode: task.mode, cost: task.cost ?? null, model: task.model });
+        await this.saveImageResult({ taskId: task.id, submissionFingerprint: task.submissionFingerprint, candidates: results, prompt: task.prompt, mode: task.mode, cost: task.cost ?? null, model: task.model, outputTarget: task.outputTarget });
       } catch (error) {
         const saving = task.status === "saving";
         task.status = "retrying";
@@ -756,8 +765,9 @@ module.exports = class MangosteenImagePlugin extends Plugin {
     if (response.status >= 400) throw this.remoteImageError(response.json, response.status, model);
     return response.json;
   }
-  async submitImageTask({ taskPath, fallbackPath, mode, prompt, model = this.settings.model, requestedCount = 1, submissionFingerprint, requestShape, submit, fallbackSubmit }) {
+  async submitImageTask({ taskPath, fallbackPath, mode, prompt, model = this.settings.model, requestedCount = 1, submissionFingerprint, requestShape, outputTarget, submit, fallbackSubmit }) {
     if (!Array.isArray(this.settings.submissionMarkers)) this.settings.submissionMarkers = [];
+    const normalizedOutputTarget = normalizeImageOutputTarget(outputTarget);
     await this.prepareSubmissionMarker(submissionFingerprint, requestShape);
     let response;
     try {
@@ -773,22 +783,24 @@ module.exports = class MangosteenImagePlugin extends Plugin {
     }
     if (this.extractResults(response.json).length) {
       const id = `sync-${submissionFingerprint.slice(-16)}-${Date.now()}`;
-      const task = await this.rememberImageTask({ id, taskPath, mode, prompt, model, group: response.__mangosteenGroup, size: this.settings.size, requestedCount, submissionFingerprint });
+      const task = await this.rememberImageTask({ id, taskPath, mode, prompt, model, group: response.__mangosteenGroup, size: this.settings.size, requestedCount, submissionFingerprint, outputTarget: normalizedOutputTarget });
       response.json.__mangosteenTaskId = task.id;
       response.json.__mangosteenSubmissionFingerprint = submissionFingerprint;
+      response.json.__mangosteenOutputTarget = task.outputTarget;
       return response.json;
     }
     const id = this.api.extractImageTaskId(response.json);
     if (!id) return this.markSubmissionUncertain(submissionFingerprint, "TASK_ID_MISSING");
-    const task = await this.rememberImageTask({ id, taskPath, mode, prompt, model, group: response.__mangosteenGroup, size: this.settings.size, requestedCount, submissionFingerprint });
+    const task = await this.rememberImageTask({ id, taskPath, mode, prompt, model, group: response.__mangosteenGroup, size: this.settings.size, requestedCount, submissionFingerprint, outputTarget: normalizedOutputTarget });
     return this.waitForImageTask(task);
   }
   async generateText(prompt, count = this.settings.count, submissionSlot = "single", options = {}) {
     const model = String(options?.model || this.settings.model || "").trim();
+    const outputTarget = options?.outputTarget;
     const requestedCount = Math.max(1, Math.min(7, Number.parseInt(count, 10) || 1));
     const payload = this.api.createTextToImagePayload({ model, prompt, size: this.settings.size, count: requestedCount });
     const submissionFingerprint = this.api.createSubmissionFingerprint({ kind: "text-to-image", submissionSlot, payload });
-    const response = await this.submitImageTask({ taskPath: "/v1/images/generations/tasks", fallbackPath: "/v1/images/generations", mode: "文生图", prompt, model, requestedCount, submissionFingerprint, requestShape: { version: 1, mode: "text-to-image", model: payload.model, size: payload.size, count: requestedCount }, submit: (path) => this.postJsonResponse(path, payload, model), fallbackSubmit: (path) => this.postJsonResponse(path, payload, model) });
+    const response = await this.submitImageTask({ taskPath: "/v1/images/generations/tasks", fallbackPath: "/v1/images/generations", mode: "文生图", prompt, model, requestedCount, submissionFingerprint, requestShape: { version: 1, mode: "text-to-image", model: payload.model, size: payload.size, count: requestedCount }, outputTarget, submit: (path) => this.postJsonResponse(path, payload, model), fallbackSubmit: (path) => this.postJsonResponse(path, payload, model) });
     response.__mangosteenRequestedCount = requestedCount;
     return response;
   }
@@ -797,6 +809,7 @@ module.exports = class MangosteenImagePlugin extends Plugin {
   }
   async generateEditMulti(prompt, images, submissionSlot = "single", options = {}) {
     const model = String(options?.model || this.settings.model || "").trim();
+    const outputTarget = options?.outputTarget;
     await this.refreshAgentAccess();
     this.requireKey(this.getImageKey(model));
     if (!String(prompt || "").trim()) throw new Error("请先输入如何修改图片");
@@ -805,7 +818,7 @@ module.exports = class MangosteenImagePlugin extends Plugin {
     const fields = { model, prompt: String(prompt).trim(), images, size: this.settings.size, quality: "high", output_format: "png" };
     const fingerprintImages = images.map((image) => ({ name: image.name, type: image.type, buffer: image.buffer }));
     const submissionFingerprint = this.api.createSubmissionFingerprint({ kind: "image-edit", submissionSlot, fields: { ...fields, images: fingerprintImages } });
-    return this.submitImageTask({ taskPath: "/v1/images/edits/tasks", fallbackPath: "/v1/images/edits", mode: "图生图", prompt: fields.prompt, model, submissionFingerprint, requestShape: { version: 1, mode: "image-edit", model: fields.model, size: fields.size, referenceImageCount: images.length }, submit: (path) => this.postMultipart(path, fields, model), fallbackSubmit: (path) => this.postMultipart(path, fields, model) });
+    return this.submitImageTask({ taskPath: "/v1/images/edits/tasks", fallbackPath: "/v1/images/edits", mode: "图生图", prompt: fields.prompt, model, submissionFingerprint, requestShape: { version: 1, mode: "image-edit", model: fields.model, size: fields.size, referenceImageCount: images.length }, outputTarget, submit: (path) => this.postMultipart(path, fields, model), fallbackSubmit: (path) => this.postMultipart(path, fields, model) });
   }
   async runGenerationBatch(count, generate) {
     const total = Math.max(1, Math.min(7, Number.parseInt(count, 10) || 1));
