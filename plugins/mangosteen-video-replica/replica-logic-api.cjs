@@ -8,7 +8,7 @@ const {
   runGenerationQueue,
 } = require("./generation-queue.cjs");
 
-function createReplicaLogicApi({ activeQueues = [], saveQueue = async () => {}, runShot = null } = {}) {
+function createReplicaLogicApi({ activeQueues = [], saveQueue = async () => {}, saveStop = null, runShot = null, isStopRequested = null } = {}) {
   if (typeof saveQueue !== "function") throw new Error("saveQueue 必须是函数。");
   if (!Array.isArray(activeQueues)) throw new Error("activeQueues 必须是数组。");
   const knownQueues = [...activeQueues];
@@ -62,13 +62,19 @@ function createReplicaLogicApi({ activeQueues = [], saveQueue = async () => {}, 
 
     async stop(queue) {
       requestQueueStop(queue);
-      await saveQueue(queue);
+      const saved = typeof saveStop === "function"
+        ? await saveStop(queue)
+        : await saveQueue(queue);
+      if (saved && saved !== queue && typeof saved === "object") {
+        for (const key of Object.keys(queue)) delete queue[key];
+        Object.assign(queue, saved);
+      }
       return queue;
     },
 
     async run(queue, runner = runShot) {
       if (typeof runner !== "function") throw new Error("缺少单镜头运行器。");
-      return runGenerationQueue(queue, runner, { onUpdate: saveQueue });
+      return runGenerationQueue(queue, runner, { onUpdate: saveQueue, isStopRequested });
     },
   };
 }

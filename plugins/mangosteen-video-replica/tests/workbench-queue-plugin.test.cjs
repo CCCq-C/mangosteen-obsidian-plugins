@@ -472,6 +472,43 @@ function request() {
   assert.strictEqual(Object.hasOwn(migratedLegacyCalls.options, "lastImageFile"), false);
   plugin.resolveQueueGenerationRuntime = directRuntimeResolver;
 
+  const paidBoundaryFolder = "山竹视频复刻/持久化停止边界";
+  const paidBoundaryRoot = path.join(vault, ...paidBoundaryFolder.split("/"));
+  fs.mkdirSync(path.join(paidBoundaryRoot, ".work"), { recursive: true });
+  fs.writeFileSync(path.join(paidBoundaryRoot, "project.json"), JSON.stringify({
+    folder: paidBoundaryFolder,
+    title: "持久化停止边界",
+    status: "analysis_ready",
+    shots: request().shots.map((shot) => ({ ...shot, status: "等待生成" })),
+  }));
+  fs.writeFileSync(path.join(paidBoundaryRoot, "generation-request.json"), JSON.stringify(request()));
+  fs.writeFileSync(path.join(paidBoundaryRoot, ".work/generation-queue.json"), JSON.stringify({}));
+  const originalEnsureReferenceAsset = plugin.ensureReferenceAsset;
+  let paidBoundaryCalls = 0;
+  plugin.ensureReferenceAsset = async (...args) => {
+    paidBoundaryCalls += 1;
+    return originalEnsureReferenceAsset(...args);
+  };
+  try {
+    await assert.rejects(
+      () => plugin.runWorkbenchQueueShot(paidBoundaryFolder, directPlan.shots[0], {
+        queueId: "persisted-stop-boundary",
+        planId: directPlan.planId,
+        requestVersion: directPlan.requestVersion,
+        character: directPlan.character,
+        products: directPlan.products,
+        scenes: directPlan.scenes,
+        settings: directPlan.settings,
+        assertPaidSubmissionAllowed: async () => false,
+      }),
+      /用户已停止生成/,
+      "the workbench runner must await the persisted stop check immediately before paid provider work",
+    );
+  } finally {
+    plugin.ensureReferenceAsset = originalEnsureReferenceAsset;
+  }
+  assert.strictEqual(paidBoundaryCalls, 0, "a persisted stop must prevent the next paid provider call");
+
   const recoverProject = JSON.parse(fs.readFileSync(path.join(root, "project.json")));
   const recoverShot = recoverProject.shots.find((shot) => shot.id === "002");
   recoverShot.videoPath = "";
@@ -601,8 +638,18 @@ function request() {
       status: "video-processing",
       stage: "provider-generation",
       taskId: `v6-task-${shot.id}`,
-      progress: null,
+      progress: shot.id === "001" ? 37 : null,
       elapsedMs: 1200,
+      error: shot.id === "001" ? {
+        code: "PROVIDER_QUERY_RETRY",
+        source: "video-provider",
+        stage: "provider-generation",
+        message: "上一次查询结果不确定",
+        action: "继续查询同一任务",
+        retryable: true,
+        paidTaskSubmitted: true,
+      } : null,
+      recoveryContext: shot.id === "001" ? { pollAttempt: 3, lastProviderStatus: "unknown" } : null,
     });
     if (shot.id === "001") {
       v6AcceptedTaskReached();
@@ -610,23 +657,32 @@ function request() {
     }
     return { videoPath: `${v6Folder}/03-分镜/${shot.id}/视频.mp4` };
   };
-  await plugin.startWorkbenchGeneration(v6Folder, v6Plan);
+  const v6QueuedSnapshot = await plugin.startWorkbenchGeneration(v6Folder, v6Plan);
   await v6AcceptedTaskStarted;
   const activeRunPath = path.join(v6MetadataRoot, "active-run.json");
   assert.strictEqual(fs.existsSync(activeRunPath), true, "version 6 queues must persist only to active-run.json");
   const acceptedActiveRun = JSON.parse(fs.readFileSync(activeRunPath, "utf8"));
   assert.strictEqual(acceptedActiveRun.shots["001"].taskId, "v6-task-001");
   assert.strictEqual(acceptedActiveRun.shots["001"].paidTaskSubmitted, true);
-  assert.strictEqual(acceptedActiveRun.shots["001"].progress, null, "missing provider progress must remain null");
+  assert.strictEqual(acceptedActiveRun.shots["001"].progress, 37);
   const loadedV6 = plugin.loadWorkbenchProject(v6Folder);
   assert.strictEqual(loadedV6.currentRun.status, "processing", "active-run must override a stale legacy stopped state");
   assert.strictEqual(loadedV6.generationQueue.status, "processing", "the UI compatibility view must come from selectCurrentRun");
   assert.strictEqual(loadedV6.generationQueue.shots[0].status, "processing", "the compatibility view must keep the active shot locked without interpreting provider stages");
   assert.deepStrictEqual(loadedV6.generationState, {}, "the UI must not compare the raw stale generation state itself");
+  plugin.activeQueueObjects.set(v6Folder, JSON.parse(JSON.stringify(v6QueuedSnapshot)));
   await plugin.stopWorkbenchGeneration(v6Folder);
   const stoppingActiveRun = JSON.parse(fs.readFileSync(activeRunPath, "utf8"));
   assert.strictEqual(stoppingActiveRun.status, "stopping");
   assert.strictEqual(stoppingActiveRun.shots["001"].taskId, "v6-task-001", "stop must retain accepted provider recovery data");
+  assert.strictEqual(stoppingActiveRun.shots["001"].paidTaskSubmitted, true);
+  assert.strictEqual(stoppingActiveRun.shots["001"].progress, 37, "a stale window stop must not regress provider progress");
+  assert.strictEqual(stoppingActiveRun.shots["001"].error.code, "PROVIDER_QUERY_RETRY", "a stale window stop must preserve normalized errors");
+  assert.deepStrictEqual(
+    stoppingActiveRun.shots["001"].recoveryContext,
+    { pollAttempt: 3, lastProviderStatus: "unknown" },
+    "a stale window stop must preserve recovery context",
+  );
   releaseV6AcceptedTask();
   await plugin.queueRuns.get(v6Folder);
   assert.deepStrictEqual(v6Submitted, ["001"], "stop must block only the future paid submission");
@@ -652,6 +708,47 @@ function request() {
     "2026-10-12T00:00:00.000Z",
   );
   assert.strictEqual(fs.existsSync(activeRunPath), false, "an archive retry must clear a pointer left behind after a successful archive write");
+
+  const v6RecoveryPreview = await plugin.previewWorkbenchGeneration(v6Folder, ["001"]);
+  const v6RecoveryPlan = confirmGenerationPlan(
+    v6RecoveryPreview,
+    JSON.parse(fs.readFileSync(path.join(v6MetadataRoot, "draft.json"), "utf8")),
+  );
+  const v6RecoveryRun = createGenerationQueue(v6RecoveryPlan, { now: "2026-10-12T00:00:01.000Z" });
+  v6RecoveryRun.queueId = "v6-active-run-recovery";
+  v6RecoveryRun.runId = "v6-active-run-recovery";
+  v6RecoveryRun.status = "processing";
+  v6RecoveryRun.activeShotId = "001";
+  v6RecoveryRun.shots["001"].status = "video-processing";
+  v6RecoveryRun.shots["001"].stage = "provider-generation";
+  v6RecoveryRun.shots["001"].taskId = "active-run-only-task";
+  v6RecoveryRun.shots["001"].paidTaskSubmitted = true;
+  const v6RecoveryProject = JSON.parse(fs.readFileSync(path.join(v6MetadataRoot, "project.json"), "utf8"));
+  const v6RecoveryProjectShot = v6RecoveryProject.shots.find((shot) => shot.id === "001");
+  v6RecoveryProjectShot.videoPath = "";
+  v6RecoveryProjectShot.videoTaskId = "";
+  v6RecoveryProjectShot.videoTaskPlanId = "";
+  fs.writeFileSync(path.join(v6MetadataRoot, "project.json"), JSON.stringify(v6RecoveryProject));
+  fs.writeFileSync(activeRunPath, JSON.stringify(v6RecoveryRun));
+  plugin.queueApis.delete(v6Folder);
+  plugin.activeQueueObjects.delete(v6Folder);
+  plugin.runWorkbenchQueueShot = realRunWorkbenchQueueShot;
+  let recoveredActiveRunTaskId = "";
+  const paidSubmissionsBeforeActiveRunRecovery = submittedVideoOptions.length;
+  plugin.waitForVideo = async (_videoPlugin, taskId) => {
+    recoveredActiveRunTaskId = taskId;
+    return { localPath: "山竹视频资产库/recovered-active-run.mp4" };
+  };
+  assert.strictEqual(await plugin.recoverWorkbenchQueue(v6Folder), true, "v6 recovery must trust its confirmed active-run task ID");
+  await plugin.queueRuns.get(v6Folder);
+  assert.strictEqual(recoveredActiveRunTaskId, "active-run-only-task");
+  assert.strictEqual(submittedVideoOptions.length, paidSubmissionsBeforeActiveRunRecovery, "active-run task recovery must not resubmit paid work");
+  const recoveredArchive = fs.readdirSync(path.join(v6MetadataRoot, "runs"))
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => JSON.parse(fs.readFileSync(path.join(v6MetadataRoot, "runs", name), "utf8")))
+    .find((run) => run.runId === "v6-active-run-recovery");
+  assert(recoveredArchive, "the recovered active run must archive after the existing task completes");
+  assert.notStrictEqual(recoveredArchive.shots["001"].error?.code, "UNSAFE_PAID_TASK_RECOVERY");
 
   plugin.queueApis.delete(v6Folder);
   const archiveFailurePlan = await plugin.previewWorkbenchGeneration(v6Folder, ["001"]);

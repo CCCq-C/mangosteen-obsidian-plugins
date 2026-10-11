@@ -259,28 +259,53 @@ for (const changed of [
   assert.deepStrictEqual(lockedShotIds(stopQueue), []);
 
   const acceptedTaskQueue = createGenerationQueue(firstOnly, { now: "2026-10-11T00:00:03.000Z" });
-  await runGenerationQueue(acceptedTaskQueue, async (_shot, context) => {
-    await context.updateState({
-      status: "video-processing",
-      stage: "provider-generation",
-      taskId: "provider-task-1",
-      progress: null,
-      elapsedMs: 5000,
-    });
-    requestQueueStop(acceptedTaskQueue);
-    throw Object.assign(new Error("查询暂时失败"), { code: "PROVIDER_QUERY_FAILED", retryable: true });
-  });
+  await assert.rejects(
+    runGenerationQueue(acceptedTaskQueue, async (_shot, context) => {
+      await context.updateState({
+        status: "video-processing",
+        stage: "provider-generation",
+        taskId: "provider-task-1",
+        progress: null,
+        elapsedMs: 5000,
+      });
+      throw Object.assign(new Error("查询暂时失败"), { code: "PROVIDER_QUERY_FAILED", retryable: true });
+    }),
+    /查询暂时失败/,
+    "an uncertain query error must leave the accepted task available for safe recovery",
+  );
   assert.strictEqual(acceptedTaskQueue.shots["001"].taskId, "provider-task-1");
   assert.strictEqual(acceptedTaskQueue.shots["001"].paidTaskSubmitted, true);
   assert.strictEqual(acceptedTaskQueue.shots["001"].progress, null, "queue state must not fabricate provider progress");
   assert.strictEqual(acceptedTaskQueue.shots["001"].error.code, "PROVIDER_QUERY_FAILED");
   assert.strictEqual(acceptedTaskQueue.shots["001"].error.paidTaskSubmitted, true);
+  assert.strictEqual(acceptedTaskQueue.shots["001"].status, "recovery-pending");
+  assert.deepStrictEqual(lockedShotIds(acceptedTaskQueue), ["001"], "an accepted task with uncertain status must remain locked");
+  assert.throws(
+    () => createGenerationQueue(firstOnly, { activeQueues: [acceptedTaskQueue] }),
+    /镜头 001.*已经在生成队列/,
+    "an uncertain accepted task must reject a second paid queue",
+  );
+
+  const terminalTaskQueue = createGenerationQueue(firstOnly, { now: "2026-10-11T00:00:03.500Z" });
+  await runGenerationQueue(terminalTaskQueue, async (_shot, context) => {
+    await context.updateState({
+      status: "video-processing",
+      stage: "provider-generation",
+      taskId: "provider-task-terminal",
+    });
+    throw Object.assign(new Error("平台已确认任务失败"), {
+      code: "VIDEO_TASK_FAILED",
+      terminalTaskFailure: true,
+    });
+  });
+  assert.strictEqual(terminalTaskQueue.shots["001"].status, "failed");
+  assert.deepStrictEqual(lockedShotIds(terminalTaskQueue), [], "only an explicit terminal provider failure may unlock the shot");
 
   const stoppedBeforePaidQueue = createGenerationQueue(firstOnly, { now: "2026-10-11T00:00:04.000Z" });
   let paidAfterStop = 0;
   await runGenerationQueue(stoppedBeforePaidQueue, async (_shot, context) => {
     requestQueueStop(stoppedBeforePaidQueue);
-    context.assertPaidSubmissionAllowed();
+    await context.assertPaidSubmissionAllowed();
     paidAfterStop += 1;
     return { videoPath: "must-not-run.mp4" };
   });
@@ -288,6 +313,25 @@ for (const changed of [
   assert.strictEqual(stoppedBeforePaidQueue.shots["001"].status, "stopped");
   assert.strictEqual(stoppedBeforePaidQueue.shots["001"].paidTaskSubmitted, false);
   assert.strictEqual(stoppedBeforePaidQueue.status, "stopped");
+
+  const persistedStopQueue = createGenerationQueue(firstOnly, { now: "2026-10-11T00:00:05.000Z" });
+  const persistedState = { stopRequested: false };
+  let paidAfterPersistedStop = 0;
+  await runGenerationQueue(persistedStopQueue, async (_shot, context) => {
+    await context.updateState({ status: "video-submitting", stage: "provider-submission" });
+    persistedState.stopRequested = true;
+    await context.assertPaidSubmissionAllowed();
+    paidAfterPersistedStop += 1;
+    return { videoPath: "must-not-run-after-persisted-stop.mp4" };
+  }, {
+    isStopRequested: async () => {
+      await Promise.resolve();
+      return persistedState.stopRequested;
+    },
+  });
+  assert.strictEqual(paidAfterPersistedStop, 0, "the paid boundary must await the authoritative persisted stop check");
+  assert.strictEqual(persistedStopQueue.stopRequested, true);
+  assert.strictEqual(persistedStopQueue.shots["001"].status, "stopped");
 
   console.log("generation-queue: ok");
 })().catch((error) => {

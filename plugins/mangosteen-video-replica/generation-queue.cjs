@@ -4,6 +4,7 @@ const { normalizeGenerationRequest } = require("./replica-core.cjs");
 const {
   createActiveRun,
   normalizeGenerationError,
+  requestRunStop,
   updateShotState,
 } = require("./run-state.cjs");
 
@@ -221,23 +222,7 @@ function appendGenerationPlan(queue, confirmedPlan) {
 
 function requestQueueStop(queue) {
   if (!queue || typeof queue !== "object") throw new Error("生成队列格式错误。");
-  queue.stopRequested = true;
-  queue.updatedAt = new Date().toISOString();
-  if (queue.status === "queued") {
-    for (const id of queue.queue || []) {
-      if (queue.shots?.[id]?.status === "queued") replaceRun(queue, updateShotState(queue, id, {
-        status: "stopped",
-        stage: "stopped",
-        now: queue.updatedAt,
-      }));
-    }
-    queue.status = "stopped";
-    queue.activeShotId = null;
-    queue.completedAt ||= queue.updatedAt;
-  } else if (queue.status === "processing") {
-    queue.status = "stopping";
-  }
-  return queue;
+  return replaceRun(queue, requestRunStop(queue));
 }
 
 function replaceRun(target, replacement) {
@@ -246,7 +231,7 @@ function replaceRun(target, replacement) {
   return target;
 }
 
-async function runGenerationQueue(queue, runShot, { onUpdate = null } = {}) {
+async function runGenerationQueue(queue, runShot, { onUpdate = null, isStopRequested = null } = {}) {
   if (!queue || !Array.isArray(queue.queue) || !queue.shots || Array.isArray(queue.shots)) throw new Error("生成队列格式错误。");
   if (typeof runShot !== "function") throw new Error("缺少单镜头运行器。");
   if (queue.status !== "queued") throw new Error(`生成队列当前状态不能运行：${String(queue.status)}`);
@@ -259,6 +244,10 @@ async function runGenerationQueue(queue, runShot, { onUpdate = null } = {}) {
   queue.startedAt = new Date().toISOString();
   await notify();
   for (let index = 0; index < queue.queue.length; index += 1) {
+    if (queue.stopRequested !== true && typeof isStopRequested === "function"
+      && await isStopRequested({ queueId: queue.queueId, runId: queue.runId }) === true) {
+      replaceRun(queue, requestRunStop(queue));
+    }
     const shotId = String(queue.queue[index]);
     let shot = queue.shots[shotId];
     if (!shot) continue;
@@ -291,7 +280,13 @@ async function runGenerationQueue(queue, runShot, { onUpdate = null } = {}) {
         await notify();
         return clone(queue.shots[shotId]);
       };
-      const assertPaidSubmissionAllowed = () => {
+      const assertPaidSubmissionAllowed = async () => {
+        const persistedStopRequested = typeof isStopRequested === "function"
+          ? await isStopRequested({ queueId: queue.queueId, runId: queue.runId })
+          : false;
+        if (persistedStopRequested === true && queue.stopRequested !== true) {
+          replaceRun(queue, requestRunStop(queue));
+        }
         if (queue.stopRequested !== true) return true;
         const stopped = new Error("用户已停止生成；不会再提交新的付费任务。");
         stopped.code = "GENERATION_STOPPED";
@@ -301,6 +296,8 @@ async function runGenerationQueue(queue, runShot, { onUpdate = null } = {}) {
         queueId: queue.queueId,
         runId: queue.runId,
         ...clone(shotContext),
+        recoveryTaskId: String(shot.taskId || "").trim() || null,
+        recoveryPaidTaskSubmitted: shot.paidTaskSubmitted === true,
         updateState,
         assertPaidSubmissionAllowed,
       });
@@ -315,7 +312,13 @@ async function runGenerationQueue(queue, runShot, { onUpdate = null } = {}) {
       }));
     } catch (error) {
       shot = queue.shots[shotId];
-      if (error?.code === "GENERATION_STOPPED" && queue.stopRequested === true) {
+      const errorTaskId = String(error?.taskId || error?.videoTaskId || "").trim();
+      const acceptedTaskId = errorTaskId || String(shot?.taskId || "").trim();
+      const acceptedTask = Boolean(acceptedTaskId)
+        && (shot?.paidTaskSubmitted === true || error?.paidTaskSubmitted === true || Boolean(errorTaskId));
+      const terminalTaskFailure = error?.terminalTaskFailure === true || error?.code === "VIDEO_TASK_FAILED";
+      let recoverableFailure = false;
+      if (error?.code === "GENERATION_STOPPED" && queue.stopRequested === true && !acceptedTask) {
         replaceRun(queue, updateShotState(queue, shotId, {
           status: "stopped",
           stage: "stopped",
@@ -323,8 +326,25 @@ async function runGenerationQueue(queue, runShot, { onUpdate = null } = {}) {
           error: null,
           now: new Date().toISOString(),
         }));
+      } else if (acceptedTask && !terminalTaskFailure) {
+        replaceRun(queue, updateShotState(queue, shotId, {
+          status: "recovery-pending",
+          stage: shot?.stage || "provider-generation",
+          result: null,
+          taskId: acceptedTaskId,
+          paidTaskSubmitted: true,
+          error: normalizeGenerationError(error, {
+            source: error?.source || "video-replica",
+            stage: shot?.stage || "provider-generation",
+            taskId: acceptedTaskId,
+            paidTaskSubmitted: true,
+            retryable: error?.retryable === true,
+            now: new Date().toISOString(),
+          }),
+          now: new Date().toISOString(),
+        }));
+        recoverableFailure = true;
       } else {
-        const errorTaskId = String(error?.taskId || error?.videoTaskId || "").trim();
         replaceRun(queue, updateShotState(queue, shotId, {
           status: "failed",
           result: null,
@@ -340,6 +360,10 @@ async function runGenerationQueue(queue, runShot, { onUpdate = null } = {}) {
           }),
           now: new Date().toISOString(),
         }));
+      }
+      if (recoverableFailure) {
+        await notify();
+        throw error;
       }
     }
     await notify();

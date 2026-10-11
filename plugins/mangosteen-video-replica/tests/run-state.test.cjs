@@ -6,6 +6,7 @@ const {
   createActiveRun,
   isRunActive,
   normalizeGenerationError,
+  requestRunStop,
   selectCurrentRun,
   updateShotState,
 } = require("../run-state.cjs");
@@ -100,6 +101,21 @@ const stopping = { ...processing, status: "stopping", stopRequested: true };
 const stoppedShot = updateShotState(stopping, "008", { status: "stopped", stage: "stopped" });
 assert.strictEqual(stoppedShot.shots["008"].taskId, "task-1", "stop must not erase an accepted provider task ID");
 assert.strictEqual(stoppedShot.shots["008"].paidTaskSubmitted, true);
+
+const recoverableProcessing = updateShotState(processing, "008", {
+  progress: 71,
+  error: structuredError,
+  recoveryContext: { pollAttempt: 4, lastProviderStatus: "unknown" },
+});
+const monotonicStop = requestRunStop(recoverableProcessing, "2026-10-11T15:08:00.000Z");
+assert.strictEqual(monotonicStop.status, "stopping");
+assert.strictEqual(monotonicStop.stopRequested, true);
+assert.strictEqual(monotonicStop.shots["008"].taskId, "task-1");
+assert.strictEqual(monotonicStop.shots["008"].paidTaskSubmitted, true);
+assert.strictEqual(monotonicStop.shots["008"].progress, 71);
+assert.deepStrictEqual(monotonicStop.shots["008"].error, structuredError);
+assert.deepStrictEqual(monotonicStop.shots["008"].recoveryContext, { pollAttempt: 4, lastProviderStatus: "unknown" });
+assert.strictEqual(recoverableProcessing.stopRequested, false, "the monotonic stop transition must not mutate its authoritative input");
 
 assert.strictEqual(
   selectCurrentRun({ activeRun: processing, legacyState: { status: "stopped" } }).status,

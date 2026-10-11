@@ -155,6 +155,32 @@ function deriveRunStatus(run) {
   return "completed";
 }
 
+function requestRunStop(activeRun, now) {
+  if (!activeRun || typeof activeRun !== "object" || Array.isArray(activeRun)) throw new Error("活动运行格式错误。");
+  const next = clone(activeRun);
+  const stoppedAt = timestamp(now) || new Date().toISOString();
+  next.stopRequested = true;
+  next.updatedAt = stoppedAt;
+  if (next.status === "queued") {
+    for (const id of next.queue || []) {
+      const shot = next.shots?.[id];
+      if (!shot || shot.status !== "queued" || shot.paidTaskSubmitted === true || String(shot.taskId || "").trim()) continue;
+      shot.status = "stopped";
+      shot.stage = "stopped";
+      shot.updatedAt = stoppedAt;
+    }
+  }
+  next.status = deriveRunStatus(next);
+  if (ACTIVE_RUN_STATUSES.has(next.status)) {
+    next.status = "stopping";
+    next.completedAt = null;
+  } else {
+    next.activeShotId = null;
+    next.completedAt ||= stoppedAt;
+  }
+  return next;
+}
+
 function updateShotState(activeRun, shotId, patch = {}) {
   if (!activeRun || typeof activeRun !== "object" || Array.isArray(activeRun)) throw new Error("活动运行格式错误。");
   const id = String(shotId ?? "").trim();
@@ -348,6 +374,7 @@ module.exports = {
   createActiveRun,
   isRunActive,
   normalizeGenerationError,
+  requestRunStop,
   selectCurrentRun,
   updateShotState,
 };
