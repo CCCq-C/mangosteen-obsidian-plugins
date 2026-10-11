@@ -21,11 +21,17 @@ const promptForVoiceAnalysis = analysisPrompt({
   transcriptPath: "山竹视频复刻/测试/02-分镜脚本/台词转写.md",
 }, "四川话：你莫急嘛。");
 assert.match(promptForVoiceAnalysis, /voiceProfile/);
-assert.match(promptForVoiceAnalysis, /voiceDirection/);
+assert.match(promptForVoiceAnalysis, /performance/);
 assert.match(promptForVoiceAnalysis, /无法实际听到原声音频/);
 assert.match(promptForVoiceAnalysis, /口音/);
 assert.match(promptForVoiceAnalysis, /背景歌曲歌词不得当成人物对白/);
 assert.match(promptForVoiceAnalysis, /画外背景歌曲/);
+assert.match(promptForVoiceAnalysis, /根据剧情节点动态划分/);
+assert.match(promptForVoiceAnalysis, /时间段必须连续/);
+const analysisSchema = JSON.parse(fs.readFileSync(path.resolve(__dirname, "../video-analysis-schema.json"), "utf8"));
+const shotSchema = analysisSchema.properties.shots.items;
+assert(shotSchema.required.includes("timeline"));
+assert(!shotSchema.required.includes("imagePrompt"));
 
 const whisperRoot = fs.mkdtempSync(path.join(os.tmpdir(), "mangosteen-whisper-priority-"));
 fs.mkdirSync(path.join(whisperRoot, "models"), { recursive: true });
@@ -92,8 +98,8 @@ assert.strictEqual(Object.hasOwn(resolveRuntimes(path.resolve(__dirname, "..")),
   scenes: [{ id: "studio", prompt: "明亮摄影棚，固定白色背景和柔光灯。" }],
   shots: [{
     title: "打招呼", sceneId: "studio", startTime: 0, endTime: 4,
-    dialogue: "你好", voiceDirection: "亲切，语速中等，句尾上扬。", plot: "人物抬手打招呼", environment: "摄影棚", camera: "中景固定",
-    imagePrompt: "人物面对镜头抬手。", lastImagePrompt: "人物放下手。", videoPrompt: "人物自然挥手后放下。"
+    productIds: [],
+    timeline: [{ start: 0, end: 4, action: "人物抬手打招呼", dialogue: "你好", performance: "亲切，语速中等，句尾上扬。", camera: "中景固定", environment: "摄影棚" }],
   }],
   };
 
@@ -110,11 +116,12 @@ fs.writeFileSync(output, "joined-video");
   try {
     const analyzed = applyAnalysis({ projectFolder, vaultPath: vault, analysis, settings: { videoModel: "MiniMax-H3", resolution: "768p" } });
     assert.strictEqual(analyzed.request.confirmed, false);
+    assert.strictEqual(analyzed.request.version, 4);
     assert.strictEqual(analyzed.project.status, "analysis_ready");
     assert.strictEqual(analyzed.project.shots[0].status, "等待确认");
     assert.strictEqual(analyzed.request.character.voiceProfile, "年轻清亮的中文女声，普通话。");
-    assert.strictEqual(analyzed.request.shots[0].voiceDirection, "亲切，语速中等，句尾上扬。");
-    assert.match(fs.readFileSync(path.join(storyboardRoot, "分镜脚本.md"), "utf8"), /人物自然挥手后放下/);
+    assert.strictEqual(analyzed.request.shots[0].timeline[0].performance, "亲切，语速中等，句尾上扬。");
+    assert.match(fs.readFileSync(path.join(storyboardRoot, "分镜脚本.md"), "utf8"), /人物抬手打招呼/);
 
     const clipOne = `${projectFolder}/03-视频片段/镜头-001.mp4`;
     const clipTwo = `${projectFolder}/03-视频片段/镜头-002.mp4`;

@@ -2,6 +2,7 @@ const fs = require("fs");
 const path = require("path");
 const { classifyModel, normalizeVideoDuration } = require("./generation-policy.cjs");
 const { assertAssetId } = require("./reference-assets.cjs");
+const { legacyTimeline, normalizeTimeline } = require("./shot-timeline.cjs");
 
 const ALLOWED_VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".m4v"]);
 const WINDOWS_RESERVED_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
@@ -83,7 +84,7 @@ function normalizeGenerationRequest(input) {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw validationError("生成任务格式错误。", "request");
   if (input.confirmed !== true) throw validationError("生成任务尚未确认，不会调用付费算力。", "confirmed");
   const version = input.version === undefined ? 1 : Number(input.version);
-  if (![1, 2, 3].includes(version)) throw validationError(`不支持生成任务版本：${String(input.version)}`, "version");
+  if (![1, 2, 3, 4].includes(version)) throw validationError(`不支持生成任务版本：${String(input.version)}`, "version");
   const characterPrompt = cleanText(input.character?.prompt);
   if (!characterPrompt) throw validationError("缺少人物参考图提示词。", "character.prompt");
   const inputShots = Array.isArray(input.shots) ? input.shots : [];
@@ -149,6 +150,18 @@ function normalizeGenerationRequest(input) {
           }
         }
         const title = safeSegment(shot?.title, `镜头-${id}`);
+        const duration = normalizeVideoDuration(shot?.duration, model);
+        if (version >= 4) {
+          return {
+            id,
+            title,
+            sceneId,
+            productIds: shotProductIds,
+            duration,
+            timeline: withValidationPath(`shots.${index}.timeline`, () => normalizeTimeline(shot?.timeline, duration)),
+            videoPromptOverride: cleanText(shot?.videoPromptOverride),
+          };
+        }
         const imagePrompt = cleanText(shot?.imagePrompt || shot?.prompt);
         const videoPrompt = cleanText(shot?.videoPrompt || shot?.prompt);
         if (!imagePrompt || !videoPrompt) {
@@ -162,7 +175,8 @@ function normalizeGenerationRequest(input) {
           title,
           sceneId,
           ...(version >= 3 ? { productIds: shotProductIds } : {}),
-          duration: normalizeVideoDuration(shot?.duration, model),
+          duration,
+          timeline: normalizeTimeline(legacyTimeline({ ...shot, duration }), duration),
           dialogue: cleanText(shot?.dialogue),
           voiceDirection: cleanText(shot?.voiceDirection),
           plot: cleanText(shot?.plot),
@@ -198,10 +212,12 @@ function normalizeGenerationRequest(input) {
           `shots.${index}.${!imagePrompt ? "imagePrompt" : "videoPrompt"}`,
         );
       }
+      const duration = normalizeVideoDuration(shot?.duration, input.settings?.videoModel);
       return {
         id,
         title,
-        duration: normalizeVideoDuration(shot?.duration, input.settings?.videoModel),
+        duration,
+        timeline: normalizeTimeline(legacyTimeline({ ...shot, duration }), duration),
         dialogue: cleanText(shot?.dialogue),
         voiceDirection: cleanText(shot?.voiceDirection),
         plot: cleanText(shot?.plot),
@@ -229,8 +245,9 @@ function buildGenerationDraft(project, analysis, settings = {}) {
   }));
   if (!scenes.length || scenes.some((scene) => !scene.prompt)) throw new Error("AI 分析没有生成有效场景资产。");
   const rawShots = Array.isArray(analysis.shots) ? analysis.shots.slice(0, 12) : [];
+  const videoModel = cleanText(settings.videoModel) || "MiniMax-H3";
   const draft = {
-    version: 3,
+    version: 4,
     confirmed: true,
     character: {
       id: characterId,
@@ -241,27 +258,26 @@ function buildGenerationDraft(project, analysis, settings = {}) {
     scenes,
     settings: {
       imageModel: cleanText(settings.imageModel) || "gpt-image-2",
-      videoModel: cleanText(settings.videoModel) || "MiniMax-H3",
+      videoModel,
       ratio: cleanText(settings.ratio) || (Number(project?.height) > Number(project?.width) ? "9:16" : "16:9"),
       resolution: cleanText(settings.resolution) || "720p",
     },
-    shots: rawShots.map((shot) => ({
-      title: cleanText(shot?.title),
-      sceneId: cleanText(shot?.sceneId),
-      productIds: Array.isArray(shot?.productIds) ? shot.productIds.map((id) => cleanText(id)).filter(Boolean) : [],
-      duration: normalizeVideoDuration(
-        Number(shot?.endTime) - Number(shot?.startTime) || Number(shot?.duration) || 4,
-        settings.videoModel || "MiniMax-H3",
-      ),
-      dialogue: cleanText(shot?.dialogue),
-      voiceDirection: cleanText(shot?.voiceDirection),
-      plot: cleanText(shot?.plot),
-      environment: cleanText(shot?.environment),
-      camera: cleanText(shot?.camera),
-      imagePrompt: cleanText(shot?.imagePrompt),
-      lastImagePrompt: cleanText(shot?.lastImagePrompt),
-      videoPrompt: cleanText(shot?.videoPrompt),
-    })),
+    shots: rawShots.map((shot) => {
+      const rawDuration = Number(shot?.endTime) - Number(shot?.startTime) || Number(shot?.duration) || 4;
+      const duration = normalizeVideoDuration(rawDuration, videoModel);
+      let timeline = Array.isArray(shot?.timeline) ? shot.timeline.map((segment) => ({ ...segment })) : legacyTimeline({ ...shot, duration });
+      if (timeline.length && Math.abs(Number(timeline.at(-1)?.end) - Number(rawDuration)) <= 0.001) {
+        timeline[timeline.length - 1].end = duration;
+      }
+      timeline = normalizeTimeline(timeline, duration);
+      return {
+        title: cleanText(shot?.title),
+        sceneId: cleanText(shot?.sceneId),
+        productIds: Array.isArray(shot?.productIds) ? shot.productIds.map((id) => cleanText(id)).filter(Boolean) : [],
+        duration,
+        timeline,
+      };
+    }),
   };
   const normalized = normalizeGenerationRequest(draft);
   return { ...normalized, confirmed: false };
@@ -273,20 +289,26 @@ function analysisStoryboardMarkdown(project, request) {
     "",
     "> 已根据原片画面和台词生成复刻草案。原片截图只用于分析，不会作为生图或视频参考图。",
     "",
-    "| 镜头 | 时长 | 剧情/动作 | 台词 | 声音表演 | 环境 | 镜头语言 |",
+    "| 镜头 | 时间段 | 画面动作 | 台词 | 情绪与声音 | 景别与运镜 | 环境 |",
     "|---|---:|---|---|---|---|---|",
   ];
   for (const shot of request.shots || []) {
-    lines.push(`| ${shot.id}｜${safeSegment(shot.title)} | ${Number(shot.duration).toFixed(1)} 秒 | ${cleanText(shot.plot).replace(/\|/g, "\\|")} | ${cleanText(shot.dialogue).replace(/\|/g, "\\|")} | ${cleanText(shot.voiceDirection).replace(/\|/g, "\\|")} | ${cleanText(shot.environment).replace(/\|/g, "\\|")} | ${cleanText(shot.camera).replace(/\|/g, "\\|")} |`);
+    for (const segment of shot.timeline || legacyTimeline(shot)) {
+      lines.push(`| ${shot.id}｜${safeSegment(shot.title)} | ${Number(segment.start)}～${Number(segment.end)} 秒 | ${cleanText(segment.action).replace(/\|/g, "\\|")} | ${cleanText(segment.dialogue).replace(/\|/g, "\\|")} | ${cleanText(segment.performance).replace(/\|/g, "\\|")} | ${cleanText(segment.camera).replace(/\|/g, "\\|")} | ${cleanText(segment.environment).replace(/\|/g, "\\|")} |`);
+    }
   }
   lines.push("", "## 人物参考提示词", "", request.character.prompt, "", "## 人物声音设定", "", request.character.voiceProfile || "未指定，由视频模型根据人物和剧情自然生成。", "", "## 产品参考提示词", "");
   if (!(request.products || []).length) lines.push("本项目没有需要固定外观的核心产品。", "");
   for (const product of request.products || []) lines.push(`### ${product.id}`, "", product.prompt, "");
   lines.push("## 场景参考提示词", "");
   for (const scene of request.scenes || []) lines.push(`### ${scene.id}`, "", scene.prompt, "");
-  lines.push("## 分镜生成提示词", "");
+  lines.push("## 分镜时间轴", "");
   for (const shot of request.shots || []) {
-    lines.push(`### ${shot.id}｜${safeSegment(shot.title)}`, "", `- 首帧：${shot.imagePrompt}`, `- 尾帧：${shot.lastImagePrompt || "不单独生成"}`, `- 视频：${shot.videoPrompt}`, `- 台词：${shot.dialogue || "无"}`, `- 情绪与语调：${shot.voiceDirection || "无"}`, "");
+    lines.push(`### ${shot.id}｜${safeSegment(shot.title)}`, "");
+    for (const segment of shot.timeline || legacyTimeline(shot)) {
+      lines.push(`- **${Number(segment.start)}～${Number(segment.end)} 秒**：${segment.action || "保持自然动作"}；台词：${segment.dialogue || "无"}；情绪与声音：${segment.performance || "自然"}；景别与运镜：${segment.camera || "稳定"}；环境：${segment.environment || "延续场景"}`);
+    }
+    lines.push("");
   }
   return lines.join("\n");
 }

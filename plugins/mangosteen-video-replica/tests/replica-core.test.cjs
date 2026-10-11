@@ -96,6 +96,15 @@ assert.strictEqual(requestV3.version, 3);
 assert.deepStrictEqual(requestV3.products, requestV3Input.products);
 assert.deepStrictEqual(requestV3.shots[0].productIds, ["headphones"]);
 assert.strictEqual(requestV3.shots[0].videoPromptOverride, "用户确认后的完整视频生成提示词。");
+assert.deepStrictEqual(requestV3.shots[0].timeline, [{
+  start: 0,
+  end: 4,
+  action: "人物向前走，镜头缓慢推进",
+  dialogue: "今天带大家看看这款耳机。",
+  performance: "自然介绍，语速中等，句尾轻微上扬。",
+  camera: "",
+  environment: "",
+}]);
 assert.throws(
   () => core.normalizeGenerationRequest({ ...requestV3Input, shots: [{ ...requestV3Input.shots[0], productIds: ["missing"] }] }),
   /找不到产品 ID.*missing/,
@@ -124,24 +133,24 @@ const analysisDraft = core.buildGenerationDraft({ width: 1080, height: 1920 }, {
   shots: [{
     title: "走向集装箱", sceneId: "harbor", startTime: 0, endTime: 4,
     productIds: ["headphones"],
-    dialogue: "你好呀", voiceDirection: "轻松打招呼，语速中等，尾音自然上扬。", plot: "人物向前走两步", environment: "海边码头", camera: "中景缓慢推进",
-    imagePrompt: "同一人物站在码头通道起点。", lastImagePrompt: "同一人物向前两步后停下。", videoPrompt: "人物自然向前走两步，镜头缓慢推进。",
+    timeline: [{ start: 0, end: 4, action: "人物向前走两步", dialogue: "你好呀", performance: "轻松打招呼，语速中等，尾音自然上扬。", camera: "中景缓慢推进", environment: "海边码头" }],
   }],
 }, { videoModel: "MiniMax-H3", resolution: "768p" });
 assert.strictEqual(analysisDraft.confirmed, false);
-assert.strictEqual(analysisDraft.version, 3);
+assert.strictEqual(analysisDraft.version, 4);
 assert.strictEqual(analysisDraft.settings.ratio, "9:16");
 assert.strictEqual(analysisDraft.shots[0].duration, 4);
 assert.deepStrictEqual(analysisDraft.shots[0].productIds, ["headphones"]);
 assert.strictEqual(analysisDraft.character.voiceProfile, "年轻清亮的中文女声，普通话，声音有亲和力。");
-assert.strictEqual(analysisDraft.shots[0].voiceDirection, "轻松打招呼，语速中等，尾音自然上扬。");
+assert.strictEqual(analysisDraft.shots[0].timeline[0].performance, "轻松打招呼，语速中等，尾音自然上扬。");
 const fractionalAnalysisDraft = core.buildGenerationDraft({ width: 1080, height: 1920 }, {
   character: analysisDraft.character,
   products: analysisDraft.products,
   scenes: analysisDraft.scenes,
-  shots: [{ ...analysisDraft.shots[0], startTime: 0, endTime: 13.5 }],
+  shots: [{ ...analysisDraft.shots[0], startTime: 0, endTime: 13.5, timeline: [{ ...analysisDraft.shots[0].timeline[0], end: 13.5 }] }],
 }, { videoModel: "MiniMax-H3", resolution: "768p" });
 assert.strictEqual(fractionalAnalysisDraft.shots[0].duration, 14);
+assert.strictEqual(fractionalAnalysisDraft.shots[0].timeline.at(-1).end, 14);
 const storyboard = core.analysisStoryboardMarkdown({ title: "测试" }, analysisDraft);
 assert.match(storyboard, /原片截图只用于分析/);
 assert.match(storyboard, /产品参考提示词/);
