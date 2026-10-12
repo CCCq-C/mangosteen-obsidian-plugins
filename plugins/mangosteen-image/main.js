@@ -1,7 +1,5 @@
 const { Plugin, Modal, Notice, requestUrl } = require("obsidian");
 const path = require("path");
-const historyMigration = require("./history-migration.cjs");
-const { normalizeImageOutputTarget, standaloneImagePath } = require("./output-storage.cjs");
 
 const API_BASE = "https://apimodel.aihubkit.com";
 const HISTORY_ROOT = "生图记录";
@@ -378,6 +376,18 @@ class ImageHistoryModal extends Modal {
 
 module.exports = class MangosteenImagePlugin extends Plugin {
   async onload() {
+    const adapter = this.app?.vault?.adapter;
+    const vaultBasePath = adapter?.getBasePath?.() || adapter?.basePath;
+    if (!vaultBasePath) throw new Error("无法定位山竹生图插件目录");
+    const pluginRoot = path.join(vaultBasePath, ...String(this.manifest.dir || "").split(/[\\/]/).filter(Boolean));
+    this.historyMigration = require(path.join(pluginRoot, "history-migration.cjs"));
+    this.outputStorage = require(path.join(pluginRoot, "output-storage.cjs"));
+    this.api = require(path.join(pluginRoot, "image-api.cjs"));
+    this.migrationRuntime = require(path.join(path.dirname(pluginRoot), "migration-safe-fs.cjs"));
+    this.createSafeMigrationFs = this.migrationRuntime.createSafeMigrationFs;
+    this.migrationSafeFsUnavailable = this.migrationRuntime.MIGRATION_SAFE_FS_UNAVAILABLE;
+    if (typeof this.createSafeMigrationFs !== "function") throw new Error("山竹生图迁移安全运行时无效");
+    this._migrationSafeFs ||= this.createSafeMigrationFs({ vaultRoot: vaultBasePath });
     const saved = await this.loadData();
     const hadStandaloneAccess = ["apiKey", "imageKeys", "imageModelKeys", "imageKeyOwnerUserId", "account"].some((key) => Object.prototype.hasOwnProperty.call(saved || {}, key));
     this.settings = {
@@ -389,17 +399,6 @@ module.exports = class MangosteenImagePlugin extends Plugin {
       submissionMarkers: Array.isArray(saved?.submissionMarkers) ? saved.submissionMarkers : [],
     };
     if (hadStandaloneAccess) await this.saveSettings();
-    const adapter = this.app?.vault?.adapter;
-    const vaultBasePath = adapter?.getBasePath?.() || adapter?.basePath;
-    if (!vaultBasePath) throw new Error("无法定位山竹生图插件目录");
-    const pluginRoot = path.join(vaultBasePath, ...String(this.manifest.dir || "").split(/[\\/]/).filter(Boolean));
-    this.migrationRuntime = require(path.join(path.dirname(pluginRoot), "migration-safe-fs.cjs"));
-    this.createSafeMigrationFs = this.migrationRuntime.createSafeMigrationFs;
-    this.migrationSafeFsUnavailable = this.migrationRuntime.MIGRATION_SAFE_FS_UNAVAILABLE;
-    if (typeof this.createSafeMigrationFs !== "function") throw new Error("山竹生图迁移安全运行时无效");
-    this._migrationSafeFs ||= this.createSafeMigrationFs({ vaultRoot: vaultBasePath });
-    const apiPath = path.join(pluginRoot, "image-api.cjs");
-    this.api = require(apiPath);
     this.imageTaskViews = new Set();
     this.addRibbonIcon("image-plus", "山竹出图", () => void this.openModal());
     this.addCommand({ id: "open-image-generator", name: "山竹出图", callback: () => void this.openModal() });
@@ -442,7 +441,7 @@ module.exports = class MangosteenImagePlugin extends Plugin {
     const journal = safe.previewReadLastJournalRecord(`${relativeRoot}/${name}`);
     if (["completed", "rolled-back"].includes(String(journal?.state || ""))) return null;
     if (!journal?.planSnapshot || journal.planId !== journal.planSnapshot.planId
-        || historyMigration.imageHistoryPlanId(journal.planSnapshot) !== journal.planId) throw new Error(`生图历史迁移 journal 与计划不一致：${name}`);
+        || this.historyMigration.imageHistoryPlanId(journal.planSnapshot) !== journal.planId) throw new Error(`生图历史迁移 journal 与计划不一致：${name}`);
     return journal;
   }
   recoverableImageHistoryMigrationPlan() {
@@ -470,7 +469,7 @@ module.exports = class MangosteenImagePlugin extends Plugin {
   previewImageHistoryMigration(now) {
     const recovery = this.recoverableImageHistoryMigrationPlan();
     if (recovery) return recovery;
-    return historyMigration.planImageHistoryMigration({
+    return this.historyMigration.planImageHistoryMigration({
       tasks: this.settings.imageTasks || [],
       submissionMarkers: this.settings.submissionMarkers || [],
       files: this.imageHistoryMigrationFiles(),
@@ -488,12 +487,12 @@ module.exports = class MangosteenImagePlugin extends Plugin {
   writeMigrationJournal(vaultPath, value) {
     const snapshot = value?.planSnapshot;
     if (!snapshot || value?.type !== "image-history-migration-journal" || value.planId !== snapshot.planId
-        || historyMigration.imageHistoryPlanId(snapshot) !== value.planId
-        || historyMigration.derivedImageJournalPath(snapshot.plannedAt) !== vaultPath
+        || this.historyMigration.imageHistoryPlanId(snapshot) !== value.planId
+        || this.historyMigration.derivedImageJournalPath(snapshot.plannedAt) !== vaultPath
         || snapshot.journalPath !== vaultPath) throw new Error("生图历史迁移 journal 路径或计划无效。");
     this.migrationSafeFs().appendJournalRecord(vaultPath, value, (existing) => existing?.type === value.type
       && existing?.planId === value.planId && existing?.journalPath === vaultPath
-      && existing?.planSnapshot && historyMigration.imageHistoryPlanId(existing.planSnapshot) === existing.planId);
+      && existing?.planSnapshot && this.historyMigration.imageHistoryPlanId(existing.planSnapshot) === existing.planId);
   }
   imageHistoryDirectoryManifest(vaultPath) {
     return this.migrationSafeFs().manifest(vaultPath);
@@ -520,7 +519,7 @@ module.exports = class MangosteenImagePlugin extends Plugin {
   async executeImageHistoryMigration(plan) {
     const safe = this.migrationSafeFs();
     safe.assertExecutionAvailable();
-    const result = await historyMigration.executeImageHistoryMigration({
+    const result = await this.historyMigration.executeImageHistoryMigration({
       plan,
       copy: async (from, to, expected) => safe.copyVerified(from, to, expected),
       backupCopy: async (from, to, expected) => safe.copyVerified(from, to, expected),
@@ -529,7 +528,7 @@ module.exports = class MangosteenImagePlugin extends Plugin {
       writeJournal: async (vaultPath, value) => this.writeMigrationJournal(vaultPath, value),
       readManifest: async (vaultPath) => safe.manifest(vaultPath),
       readSettings: async () => cloneMigrationValue(this.settings.imageTasks || []),
-      readSafetySnapshot: async () => historyMigration.imageHistorySafetySnapshot(this.settings.imageTasks || [], this.settings.submissionMarkers || []),
+      readSafetySnapshot: async () => this.historyMigration.imageHistorySafetySnapshot(this.settings.imageTasks || [], this.settings.submissionMarkers || []),
     });
     this.refreshImageTaskViews();
     return result;
@@ -541,7 +540,7 @@ module.exports = class MangosteenImagePlugin extends Plugin {
       if (!plan.operations.length) { new Notice(`没有可整理的生图历史；已跳过 ${plan.counts.skipped} 项。`, 6000); return false; }
       if (!this.confirmMigrationPlan(this.migrationPlanText(plan, "整理山竹生图历史记录"))) return false;
       const current = await this.previewImageHistoryMigration(plan.plannedAt);
-      if (current.blocked || historyMigration.imageHistoryPlanId(current) !== plan.planId) throw new Error(`确认后任务状态已变化：${current.reasons.join("；") || "整理清单不再一致"}`);
+      if (current.blocked || this.historyMigration.imageHistoryPlanId(current) !== plan.planId) throw new Error(`确认后任务状态已变化：${current.reasons.join("；") || "整理清单不再一致"}`);
       if (!this.migrationSafeFs().capability.available) {
         new Notice(`${this.migrationSafeFsUnavailable || MIGRATION_SAFE_FS_UNAVAILABLE_FALLBACK}：${this.migrationSafeFs().capability.reason}`, 10000);
         return false;
@@ -689,14 +688,14 @@ module.exports = class MangosteenImagePlugin extends Plugin {
   async persistGeneration({ candidates, prompt, mode, cost, model = this.settings.model, taskId, outputTarget }) {
     const now = new Date();
     const taskName = now.toISOString().replace(/[T:.Z]/g, "-");
-    const normalizedOutputTarget = normalizeImageOutputTarget(outputTarget);
+    const normalizedOutputTarget = this.outputStorage.normalizeImageOutputTarget(outputTarget);
     const imagePaths = [];
     for (const [index, candidate] of candidates.entries()) {
       const image = await this.toSelectedImage(candidate, index + 1);
       const extension = /jpe?g/i.test(image.type) ? "jpg" : /webp/i.test(image.type) ? "webp" : "png";
       const imagePath = normalizedOutputTarget
         ? normalizedOutputTarget.destinationPath
-        : standaloneImagePath({ now, taskId: taskId || taskName, index: index + 1, extension });
+        : this.outputStorage.standaloneImagePath({ now, taskId: taskId || taskName, index: index + 1, extension });
       const parentPath = imagePath.split("/").slice(0, -1).join("/");
       if (!await this.app.vault.adapter.exists(parentPath)) await this.app.vault.createFolder(parentPath);
       const existing = this.app.vault.getAbstractFileByPath(imagePath);
@@ -713,7 +712,7 @@ module.exports = class MangosteenImagePlugin extends Plugin {
   }
   async saveImageResult({ taskId, submissionFingerprint, candidates, prompt, mode, cost, requestedCount, model = this.settings.model, outputTarget }) {
     let task = (this.settings.imageTasks || []).find((item) => item.id === taskId);
-    const normalizedOutputTarget = normalizeImageOutputTarget(outputTarget || task?.outputTarget);
+    const normalizedOutputTarget = this.outputStorage.normalizeImageOutputTarget(outputTarget || task?.outputTarget);
     const saved = await this.persistGeneration({ candidates, prompt, mode, cost, model, taskId, outputTarget: normalizedOutputTarget });
     if (!task) {
       task = { id: taskId || saved.taskName, accountUserId: String(this.agentImageAccess?.accountUserId || ""), createdAt: new Date().toISOString() };
@@ -746,7 +745,7 @@ module.exports = class MangosteenImagePlugin extends Plugin {
     new ImageHistoryModal(this).open();
   }
   async rememberImageTask({ id, taskPath, mode, prompt, model, group, size, requestedCount, submissionFingerprint, outputTarget }) {
-    const task = { id, taskPath, mode, prompt, model, group, size, requestedCount, submissionFingerprint, outputTarget: normalizeImageOutputTarget(outputTarget), accountUserId: String(this.agentImageAccess?.accountUserId || ""), createdAt: new Date().toISOString(), status: "processing", progress: null, saved: false };
+    const task = { id, taskPath, mode, prompt, model, group, size, requestedCount, submissionFingerprint, outputTarget: this.outputStorage.normalizeImageOutputTarget(outputTarget), accountUserId: String(this.agentImageAccess?.accountUserId || ""), createdAt: new Date().toISOString(), status: "processing", progress: null, saved: false };
     const previousTasks = this.settings.imageTasks || [];
     const previousMarkers = (this.settings.submissionMarkers || []).map((item) => ({ ...item }));
     const marker = submissionFingerprint ? this.submissionMarker(submissionFingerprint) : null;
@@ -936,7 +935,7 @@ module.exports = class MangosteenImagePlugin extends Plugin {
   }
   async submitImageTask({ taskPath, fallbackPath, mode, prompt, model = this.settings.model, requestedCount = 1, submissionFingerprint, requestShape, outputTarget, submit, fallbackSubmit }) {
     if (!Array.isArray(this.settings.submissionMarkers)) this.settings.submissionMarkers = [];
-    const normalizedOutputTarget = normalizeImageOutputTarget(outputTarget);
+    const normalizedOutputTarget = this.outputStorage.normalizeImageOutputTarget(outputTarget);
     await this.prepareSubmissionMarker(submissionFingerprint, requestShape);
     let response;
     try {

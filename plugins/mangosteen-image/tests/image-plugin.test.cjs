@@ -16,7 +16,10 @@ Module._load = function patchedLoad(request, parent, isMain) {
 
 const ImagePlugin = require("../main.js");
 const imageApi = require("../image-api.cjs");
+const imageOutputStorage = require("../output-storage.cjs");
 Module._load = originalLoad;
+
+const newImagePlugin = () => Object.assign(new ImagePlugin(), { outputStorage: imageOutputStorage });
 
 function createVault(initialFiles = {}) {
   const files = new Map(Object.entries(initialFiles).map(([filePath, value]) => [filePath, Buffer.from(value)]));
@@ -37,7 +40,7 @@ function createVault(initialFiles = {}) {
 }
 
 (async () => {
-  const plugin = new ImagePlugin();
+  const plugin = newImagePlugin();
   assert.strictEqual(plugin.supportsOutputTargetSave(), true, "current image plugin must explicitly advertise target-aware saves");
   let polls = 0;
   plugin.api = {
@@ -58,7 +61,7 @@ function createVault(initialFiles = {}) {
     assert.strictEqual(task.status, "completed");
     assert.strictEqual(polls, 91, "a valid image task taking just over three minutes must not be abandoned");
 
-    const reconnectingPlugin = new ImagePlugin();
+    const reconnectingPlugin = newImagePlugin();
     reconnectingPlugin.settings = { model: "gpt-image-2", size: "1024x1024", imageTasks: [], submissionMarkers: [] };
     reconnectingPlugin.api = {
       readImageTaskProgress: () => null,
@@ -86,7 +89,7 @@ function createVault(initialFiles = {}) {
     global.window = originalWindow;
   }
 
-  const responseLostPlugin = new ImagePlugin();
+  const responseLostPlugin = newImagePlugin();
   responseLostPlugin.api = imageApi;
   responseLostPlugin.settings = { model: "gpt-image-2", size: "1024x1024", imageTasks: [], submissionMarkers: [] };
   responseLostPlugin.saveSettings = async () => {};
@@ -106,7 +109,7 @@ function createVault(initialFiles = {}) {
   await assert.rejects(responseLostPlugin.generateText("safe prompt", 1, "single", { outputTarget: secondOutputTarget }), /已阻止重复提交/);
   assert.strictEqual(responseLostPosts, 1, "response-lost retry must not issue another paid POST");
 
-  const saveFailurePlugin = new ImagePlugin();
+  const saveFailurePlugin = newImagePlugin();
   saveFailurePlugin.api = imageApi;
   saveFailurePlugin.settings = { model: "gpt-image-2", size: "1024x1024", imageTasks: [], submissionMarkers: [] };
   let saveFailurePosts = 0;
@@ -128,7 +131,7 @@ function createVault(initialFiles = {}) {
   await assert.rejects(saveFailurePlugin.generateText("save failure prompt", 1), /已阻止重复提交/);
   assert.strictEqual(saveFailurePosts, 1, "save-failure retry must not issue another paid POST");
 
-  const batchPlugin = new ImagePlugin();
+  const batchPlugin = newImagePlugin();
   batchPlugin.api = imageApi;
   batchPlugin.settings = { model: "gpt-image-2", size: "1024x1024", imageTasks: [], submissionMarkers: [] };
   batchPlugin.saveSettings = async () => {};
@@ -142,7 +145,7 @@ function createVault(initialFiles = {}) {
   await batchPlugin.reconcileImageSubmission(batch.successes[0].response.__mangosteenSubmissionFingerprint);
   assert.strictEqual(batchPlugin.settings.submissionMarkers.length, 1, "persisted image output reconciles only its own marker");
 
-  const overridePlugin = new ImagePlugin();
+  const overridePlugin = newImagePlugin();
   overridePlugin.api = imageApi;
   overridePlugin.settings = { model: "gpt-image-2-adobe", size: "1024x1024", imageTasks: [], submissionMarkers: [] };
   overridePlugin.saveSettings = async () => {};
@@ -206,7 +209,7 @@ function createVault(initialFiles = {}) {
       };
     },
   };
-  const usagePlugin = new ImagePlugin();
+  const usagePlugin = newImagePlugin();
   usagePlugin.settings = { model: "gpt-image-2", size: "1024x1024", imageTasks: [usageTask], submissionMarkers: [] };
   usagePlugin.app = { plugins: { getPlugin: () => ({ getAccountBridge: () => usageBridge }) } };
   usagePlugin.saveSettings = async () => {};
@@ -234,7 +237,7 @@ function createVault(initialFiles = {}) {
   assert.strictEqual(usageTask.cost, 0.125);
   assert.strictEqual(usageTask.usageRequestId, "request-1");
 
-  const targetPlugin = new ImagePlugin();
+  const targetPlugin = newImagePlugin();
   targetPlugin.api = imageApi;
   targetPlugin.settings = { model: "gpt-image-2", size: "1024x1024", imageTasks: [], submissionMarkers: [] };
   targetPlugin.saveSettings = async () => {};
@@ -248,7 +251,7 @@ function createVault(initialFiles = {}) {
   assert.ok(!Object.prototype.hasOwnProperty.call(remoteJsonPayload, "outputTarget"), "outputTarget must stay out of remote JSON");
   assert.deepStrictEqual(targetResponse.task.outputTarget, { ...outputTarget, overwrite: "replace-current" });
 
-  const synchronousPlugin = new ImagePlugin();
+  const synchronousPlugin = newImagePlugin();
   synchronousPlugin.api = imageApi;
   synchronousPlugin.settings = { model: "gpt-image-2", size: "1024x1024", imageTasks: [], submissionMarkers: [] };
   synchronousPlugin.saveSettings = async () => {};
@@ -257,7 +260,7 @@ function createVault(initialFiles = {}) {
   assert.deepStrictEqual(synchronousResponse.__mangosteenOutputTarget, { ...outputTarget, overwrite: "replace-current" });
   assert.deepStrictEqual(synchronousPlugin.settings.imageTasks[0].outputTarget, synchronousResponse.__mangosteenOutputTarget, "sync and async tasks must persist the same normalized destination");
 
-  const editPlugin = new ImagePlugin();
+  const editPlugin = newImagePlugin();
   editPlugin.api = imageApi;
   editPlugin.settings = { model: "gpt-image-2", size: "1024x1024", imageTasks: [], submissionMarkers: [] };
   editPlugin.saveSettings = async () => {};
@@ -275,7 +278,7 @@ function createVault(initialFiles = {}) {
 
   const persistedSettings = JSON.parse(JSON.stringify(targetPlugin.settings));
   const projectVault = createVault({ [outputTarget.destinationPath]: "old image" });
-  const restartedPlugin = new ImagePlugin();
+  const restartedPlugin = newImagePlugin();
   restartedPlugin.api = imageApi;
   restartedPlugin.settings = persistedSettings;
   restartedPlugin.app = { vault: projectVault.vault, plugins: {} };
@@ -292,7 +295,7 @@ function createVault(initialFiles = {}) {
   assert.strictEqual(restartedPlugin.settings.submissionMarkers.length, 0, "saved project output must reconcile its paid submission marker");
 
   const standaloneVault = createVault();
-  const standalonePlugin = new ImagePlugin();
+  const standalonePlugin = newImagePlugin();
   standalonePlugin.api = imageApi;
   standalonePlugin.settings = { model: "gpt-image-2", size: "1024x1024", imageTasks: [], submissionMarkers: [] };
   standalonePlugin.app = { vault: standaloneVault.vault, plugins: {} };

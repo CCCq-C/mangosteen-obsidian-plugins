@@ -1,8 +1,6 @@
 const { Plugin, Modal, Notice, requestUrl } = require("obsidian");
 const path = require("path");
 const fs = require("fs");
-const historyMigration = require("./history-migration.cjs");
-const { normalizeVideoOutputTarget, standaloneVideoPath } = require("./output-storage.cjs");
 
 const API_BASE = "https://apimodel.aihubkit.com";
 const MIGRATION_SAFE_FS_UNAVAILABLE_FALLBACK = "MIGRATION_SAFE_FS_UNAVAILABLE";
@@ -308,15 +306,14 @@ module.exports = class MangosteenVideoPlugin extends Plugin {
     const vaultBasePath = adapter?.getBasePath?.() || adapter?.basePath;
     if (!vaultBasePath) throw new Error("无法定位山竹视频插件目录");
     const pluginRoot = path.join(vaultBasePath, ...String(this.manifest.dir || "").split(/[\\/]/).filter(Boolean));
+    this.historyMigration = require(path.join(pluginRoot, "history-migration.cjs"));
+    this.outputStorage = require(path.join(pluginRoot, "output-storage.cjs"));
+    this.api = require(path.join(pluginRoot, "video-api.cjs"));
     this.migrationRuntime = require(path.join(path.dirname(pluginRoot), "migration-safe-fs.cjs"));
     this.createSafeMigrationFs = this.migrationRuntime.createSafeMigrationFs;
     this.migrationSafeFsUnavailable = this.migrationRuntime.MIGRATION_SAFE_FS_UNAVAILABLE;
     if (typeof this.createSafeMigrationFs !== "function") throw new Error("山竹视频迁移安全运行时无效");
     this._migrationSafeFs ||= this.createSafeMigrationFs({ vaultRoot: vaultBasePath });
-    if (!this.api) {
-      const apiPath = path.join(pluginRoot, "video-api.cjs");
-      this.api = require(apiPath);
-    }
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData?.());
     this.videoTaskViews = new Set();
     if (!this.settings.resolutionsByModel || typeof this.settings.resolutionsByModel !== "object") this.settings.resolutionsByModel = {};
@@ -374,7 +371,7 @@ module.exports = class MangosteenVideoPlugin extends Plugin {
     const journal = safe.previewReadLastJournalRecord(`${relativeRoot}/${name}`);
     if (["completed", "rolled-back"].includes(String(journal?.state || ""))) return null;
     if (!journal?.planSnapshot || journal.planId !== journal.planSnapshot.planId
-        || historyMigration.videoHistoryPlanId(journal.planSnapshot) !== journal.planId) throw new Error(`视频历史迁移 journal 与计划不一致：${name}`);
+        || this.historyMigration.videoHistoryPlanId(journal.planSnapshot) !== journal.planId) throw new Error(`视频历史迁移 journal 与计划不一致：${name}`);
     return journal;
   }
 
@@ -404,7 +401,7 @@ module.exports = class MangosteenVideoPlugin extends Plugin {
   previewVideoHistoryMigration(now) {
     const recovery = this.recoverableVideoHistoryMigrationPlan();
     if (recovery) return recovery;
-    return historyMigration.planVideoHistoryMigration({
+    return this.historyMigration.planVideoHistoryMigration({
       tasks: this.settings.videoTasks || [],
       submissionMarkers: this.settings.submissionMarkers || [],
       files: this.videoHistoryMigrationFiles(),
@@ -425,12 +422,12 @@ module.exports = class MangosteenVideoPlugin extends Plugin {
   writeMigrationJournal(vaultPath, value) {
     const snapshot = value?.planSnapshot;
     if (!snapshot || value?.type !== "video-history-migration-journal" || value.planId !== snapshot.planId
-        || historyMigration.videoHistoryPlanId(snapshot) !== value.planId
-        || historyMigration.derivedVideoJournalPath(snapshot.plannedAt) !== vaultPath
+        || this.historyMigration.videoHistoryPlanId(snapshot) !== value.planId
+        || this.historyMigration.derivedVideoJournalPath(snapshot.plannedAt) !== vaultPath
         || snapshot.journalPath !== vaultPath) throw new Error("视频历史迁移 journal 路径或计划无效。");
     this.migrationSafeFs().appendJournalRecord(vaultPath, value, (existing) => existing?.type === value.type
       && existing?.planId === value.planId && existing?.journalPath === vaultPath
-      && existing?.planSnapshot && historyMigration.videoHistoryPlanId(existing.planSnapshot) === existing.planId);
+      && existing?.planSnapshot && this.historyMigration.videoHistoryPlanId(existing.planSnapshot) === existing.planId);
   }
 
   videoHistoryDirectoryManifest(vaultPath) {
@@ -460,7 +457,7 @@ module.exports = class MangosteenVideoPlugin extends Plugin {
   async executeVideoHistoryMigration(plan) {
     const safe = this.migrationSafeFs();
     safe.assertExecutionAvailable();
-    const result = await historyMigration.executeVideoHistoryMigration({
+    const result = await this.historyMigration.executeVideoHistoryMigration({
       plan,
       copy: async (from, to, expected) => safe.copyVerified(from, to, expected),
       backupCopy: async (from, to, expected) => safe.copyVerified(from, to, expected),
@@ -469,7 +466,7 @@ module.exports = class MangosteenVideoPlugin extends Plugin {
       writeJournal: async (vaultPath, value) => this.writeMigrationJournal(vaultPath, value),
       readManifest: async (vaultPath) => safe.manifest(vaultPath),
       readSettings: async () => JSON.parse(JSON.stringify(this.settings.videoTasks || [])),
-      readSafetySnapshot: async () => historyMigration.videoHistorySafetySnapshot(this.settings.videoTasks || [], this.settings.submissionMarkers || []),
+      readSafetySnapshot: async () => this.historyMigration.videoHistorySafetySnapshot(this.settings.videoTasks || [], this.settings.submissionMarkers || []),
     });
     for (const view of this.videoTaskViews || []) { view.refreshTasks?.(); view.refreshPrice?.(); }
     return result;
@@ -482,7 +479,7 @@ module.exports = class MangosteenVideoPlugin extends Plugin {
       if (!plan.operations.length) { new Notice(`没有可整理的视频历史；已跳过 ${plan.counts.skipped} 项。`, 6000); return false; }
       if (!this.confirmMigrationPlan(this.migrationPlanText(plan, "整理山竹视频历史记录"))) return false;
       const current = await this.previewVideoHistoryMigration(plan.plannedAt);
-      if (current.blocked || historyMigration.videoHistoryPlanId(current) !== plan.planId) throw new Error(`确认后任务状态已变化：${current.reasons.join("；") || "整理清单不再一致"}`);
+      if (current.blocked || this.historyMigration.videoHistoryPlanId(current) !== plan.planId) throw new Error(`确认后任务状态已变化：${current.reasons.join("；") || "整理清单不再一致"}`);
       if (!this.migrationSafeFs().capability.available) {
         new Notice(`${this.migrationSafeFsUnavailable || MIGRATION_SAFE_FS_UNAVAILABLE_FALLBACK}：${this.migrationSafeFs().capability.reason}`, 10000);
         return false;
@@ -711,7 +708,7 @@ module.exports = class MangosteenVideoPlugin extends Plugin {
     delete payload.referenceImages;
     delete payload.referenceVideos;
     delete payload.referenceAudios;
-    const outputTarget = normalizeVideoOutputTarget(task.outputTarget);
+    const outputTarget = this.outputStorage.normalizeVideoOutputTarget(task.outputTarget);
     const saved = Object.assign({
       accountUserId: String(this.videoAccess?.accountUserId || ""),
       createdAt: new Date().toISOString(),
@@ -793,7 +790,7 @@ module.exports = class MangosteenVideoPlugin extends Plugin {
 
   async submitVideo(options) {
     if (!Array.isArray(this.settings.submissionMarkers)) this.settings.submissionMarkers = [];
-    const outputTarget = normalizeVideoOutputTarget(options.outputTarget);
+    const outputTarget = this.outputStorage.normalizeVideoOutputTarget(options.outputTarget);
     const payloadOptions = { ...options };
     delete payloadOptions.outputTarget;
     const originalOptions = { ...payloadOptions };
@@ -880,13 +877,13 @@ module.exports = class MangosteenVideoPlugin extends Plugin {
     }
     if (download.status >= 400 || !download.arrayBuffer) throw new Error("视频已经生成，但保存失败，请稍后重新保存。");
     this.api.assertVideoDownloadSize(download);
-    const outputTarget = normalizeVideoOutputTarget(task.outputTarget);
+    const outputTarget = this.outputStorage.normalizeVideoOutputTarget(task.outputTarget);
     const persistedLocalTarget = !outputTarget && task.localPath
-      ? normalizeVideoOutputTarget({ destinationPath: task.localPath })
+      ? this.outputStorage.normalizeVideoOutputTarget({ destinationPath: task.localPath })
       : null;
     const filePath = outputTarget?.destinationPath
       || persistedLocalTarget?.destinationPath
-      || standaloneVideoPath({ now: task.createdAt || new Date(), taskId: task.id });
+      || this.outputStorage.standaloneVideoPath({ now: task.createdAt || new Date(), taskId: task.id });
     task.localPath = filePath;
     const folder = filePath.split("/").slice(0, -1).join("/");
     await this.ensureVaultFolder(folder);

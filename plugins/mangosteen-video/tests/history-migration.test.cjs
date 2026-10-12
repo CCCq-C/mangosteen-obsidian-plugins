@@ -273,15 +273,22 @@ function adapters(initial, options = {}) {
 
   const originalLoad = Module._load;
   const notices = [];
-  const migrationRuntimePath = path.resolve(__dirname, "../../migration-safe-fs.cjs");
-  let absoluteMigrationRuntimeLoads = 0;
+  const mainPath = path.resolve(__dirname, "../main.js");
+  const pluginRoot = path.dirname(mainPath);
+  const absoluteModulePaths = [
+    path.join(pluginRoot, "history-migration.cjs"),
+    path.join(pluginRoot, "output-storage.cjs"),
+    path.join(pluginRoot, "video-api.cjs"),
+    path.resolve(pluginRoot, "../migration-safe-fs.cjs"),
+  ];
+  const absoluteModuleLoads = new Map(absoluteModulePaths.map((modulePath) => [modulePath, 0]));
   Module._load = function patchedLoad(request, parent, isMain) {
-    if (request === "../migration-safe-fs.cjs") {
-      const error = new Error("Cannot find module '../migration-safe-fs.cjs'\nRequire stack: electron/js2c/renderer_init");
+    if (parent?.filename === mainPath && /^\.\.?\/.*\.cjs$/i.test(request)) {
+      const error = new Error(`Cannot find module '${request}'\nRequire stack: electron/js2c/renderer_init`);
       error.code = "MODULE_NOT_FOUND";
       throw error;
     }
-    if (request === migrationRuntimePath) absoluteMigrationRuntimeLoads += 1;
+    if (absoluteModuleLoads.has(request)) absoluteModuleLoads.set(request, absoluteModuleLoads.get(request) + 1);
     if (request === "obsidian") return {
       Modal: class Modal {}, Plugin: class Plugin {},
       Notice: class Notice { constructor(message) { notices.push(String(message)); } },
@@ -293,6 +300,11 @@ function adapters(initial, options = {}) {
   let VideoPlugin;
   try { VideoPlugin = require("../main.js"); }
   catch (error) { Module._load = originalLoad; throw error; }
+  for (const relativeMainPath of ["../../mangosteen-image/main.js", "../../mangosteen-video/main.js"]) {
+    const source = fs.readFileSync(path.resolve(__dirname, relativeMainPath), "utf8");
+    const localCjsRequires = [...source.matchAll(/\brequire\s*\(\s*["'](\.\.?\/[^"']+\.cjs)["']\s*\)/g)].map((match) => match[1]);
+    assert.deepStrictEqual(localCjsRequires, [], `${relativeMainPath} must not contain local relative CJS requires: ${localCjsRequires.join(", ")}`);
+  }
   const plugin = new VideoPlugin();
   const commands = [];
   plugin.api = {};
@@ -305,7 +317,9 @@ function adapters(initial, options = {}) {
   global.window = { setInterval: () => ({ unref() {} }) };
   try { await plugin.onload(); }
   finally { Module._load = originalLoad; }
-  assert.strictEqual(absoluteMigrationRuntimeLoads, 1, "Obsidian onload must load migration-safe-fs.cjs by its absolute installed path");
+  for (const modulePath of absoluteModulePaths) {
+    assert.strictEqual(absoluteModuleLoads.get(modulePath), 1, `Obsidian onload must load ${path.basename(modulePath)} once by its absolute installed path`);
+  }
   const command = commands.find((item) => item.name === "整理山竹视频历史记录");
   assert.ok(command);
   let executions = 0;

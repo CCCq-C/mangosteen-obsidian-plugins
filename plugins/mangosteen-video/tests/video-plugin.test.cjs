@@ -16,7 +16,10 @@ Module._load = function patchedLoad(request, parent, isMain) {
 
 const VideoPlugin = require("../main.js");
 const videoApi = require("../video-api.cjs");
+const videoOutputStorage = require("../output-storage.cjs");
 Module._load = originalLoad;
+
+const newVideoPlugin = () => Object.assign(new VideoPlugin(), { outputStorage: videoOutputStorage });
 
 const makeFile = (name, type, contents) => {
   const bytes = Uint8Array.from(Buffer.from(contents));
@@ -43,7 +46,7 @@ function createVault(initialFiles = {}) {
 }
 
 const makePlugin = (uploadTemporaryImage) => {
-  const plugin = new VideoPlugin();
+  const plugin = newVideoPlugin();
   plugin.api = videoApi;
   plugin.settings = { resolutionsByModel: {}, videoTasks: [] };
   plugin.app = {
@@ -192,7 +195,7 @@ const outputTarget = {
   );
   assert.strictEqual(paidRequests, 0);
 
-  const persistencePlugin = new VideoPlugin();
+  const persistencePlugin = newVideoPlugin();
   persistencePlugin.api = videoApi;
   persistencePlugin.videoAccess = { accountUserId: "user-1" };
   persistencePlugin.settings = { videoTasks: [] };
@@ -231,7 +234,7 @@ const outputTarget = {
   assert.strictEqual(JSON.stringify(persisted).includes("signed.example"), false);
   assert.deepStrictEqual(persisted.outputTarget, { ...outputTarget, overwrite: "replace-current" });
 
-  const targetPlugin = new VideoPlugin();
+  const targetPlugin = newVideoPlugin();
   const fingerprintInputs = [];
   targetPlugin.api = {
     ...videoApi,
@@ -290,7 +293,7 @@ const outputTarget = {
       };
     },
   };
-  const usagePlugin = new VideoPlugin();
+  const usagePlugin = newVideoPlugin();
   usagePlugin.settings = { resolutionsByModel: {}, videoTasks: [usageTask], submissionMarkers: [] };
   usagePlugin.app = { plugins: { getPlugin: () => ({ getAccountBridge: () => usageBridge }) } };
   usagePlugin.saveSettings = async () => {};
@@ -313,7 +316,7 @@ const outputTarget = {
 
   const persistedSettings = JSON.parse(JSON.stringify(targetPlugin.settings));
   const projectVault = createVault({ [outputTarget.destinationPath]: "old video" });
-  const restartedPlugin = new VideoPlugin();
+  const restartedPlugin = newVideoPlugin();
   restartedPlugin.api = videoApi;
   restartedPlugin.settings = persistedSettings;
   restartedPlugin.app = { vault: projectVault.vault, plugins: {} };
@@ -331,7 +334,7 @@ const outputTarget = {
   assert.strictEqual(restartedPlugin.settings.submissionMarkers.length, 0, "saved project output must reconcile its paid submission marker");
 
   const standaloneVault = createVault();
-  const standalonePlugin = new VideoPlugin();
+  const standalonePlugin = newVideoPlugin();
   standalonePlugin.api = videoApi;
   standalonePlugin.settings = { resolutionsByModel: {}, videoTasks: [], submissionMarkers: [] };
   standalonePlugin.app = { vault: standaloneVault.vault, plugins: {} };
@@ -347,7 +350,7 @@ const outputTarget = {
   assert.ok(standaloneVault.createdBinaryPaths.every((filePath) => /^山竹创作记录\/视频\/\d{4}-\d{2}\/[^/]+\.mp4$/.test(filePath)), "standalone videos must not create one directory per task");
 
   const retryVault = createVault();
-  const retryPlugin = new VideoPlugin();
+  const retryPlugin = newVideoPlugin();
   retryPlugin.api = videoApi;
   retryPlugin.settings = { resolutionsByModel: {}, videoTasks: [], submissionMarkers: [] };
   retryPlugin.app = { vault: retryVault.vault, plugins: {} };
@@ -385,7 +388,7 @@ const outputTarget = {
   assert.deepStrictEqual(retryVault.modifiedBinaryPaths, [firstRetryPath], "retry must replace the first file at its stable path");
   assert.strictEqual(retryVault.files.size, 1);
 
-  const downloadFailurePlugin = new VideoPlugin();
+  const downloadFailurePlugin = newVideoPlugin();
   downloadFailurePlugin.api = videoApi;
   downloadFailurePlugin.settings = { resolutionsByModel: {}, videoTasks: [], submissionMarkers: [] };
   downloadFailurePlugin.videoAccess = { accountUserId: "user-1" };
@@ -414,7 +417,7 @@ const outputTarget = {
   );
   assert.strictEqual(downloadFailurePosts, 1, "changing only the local destination must not bypass duplicate paid-request protection");
 
-  const successPlugin = new VideoPlugin();
+  const successPlugin = newVideoPlugin();
   successPlugin.api = videoApi;
   successPlugin.settings = { resolutionsByModel: {}, videoTasks: [], submissionMarkers: [] };
   successPlugin.videoAccess = { accountUserId: "user-1" };
@@ -432,7 +435,7 @@ const outputTarget = {
   assert.strictEqual(successPlugin.settings.videoTasks[0].status, "completed");
   assert.strictEqual(successPlugin.settings.submissionMarkers.length, 0, "terminal success reconciles the paid submission marker");
 
-  const unavailablePlugin = new VideoPlugin();
+  const unavailablePlugin = newVideoPlugin();
   unavailablePlugin.api = videoApi;
   unavailablePlugin.settings = { resolutionsByModel: {}, videoTasks: [], submissionMarkers: [] };
   unavailablePlugin.videoAccess = { accountUserId: "user-1" };
@@ -444,7 +447,7 @@ const outputTarget = {
     (error) => error?.status === 404 && error?.model === "MiniMax-H3" && error?.changeModel === true,
   );
 
-  const responseLostPlugin = new VideoPlugin();
+  const responseLostPlugin = newVideoPlugin();
   responseLostPlugin.api = videoApi;
   responseLostPlugin.settings = { resolutionsByModel: {}, videoTasks: [], submissionMarkers: [] };
   responseLostPlugin.videoAccess = { accountUserId: "user-1" };
@@ -467,7 +470,7 @@ const outputTarget = {
   );
   assert.strictEqual(responseLostPosts, 1, "response-lost retry must not issue another paid POST");
 
-  const saveFailurePlugin = new VideoPlugin();
+  const saveFailurePlugin = newVideoPlugin();
   saveFailurePlugin.api = videoApi;
   saveFailurePlugin.settings = { resolutionsByModel: {}, videoTasks: [], submissionMarkers: [] };
   saveFailurePlugin.videoAccess = { accountUserId: "user-1" };
