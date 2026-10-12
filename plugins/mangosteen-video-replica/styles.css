@@ -19,8 +19,14 @@
   container-type: inline-size;
   --replica-gap: clamp(8px, 1.2cqi, 18px);
   --replica-pad: clamp(10px, 1.8cqi, 24px);
-  --replica-accent: var(--interactive-accent);
+  --replica-accent: #72a884;
   --replica-panel: var(--background-secondary);
+  --replica-cockpit-bg: #111512;
+  --replica-cockpit-panel: #171c18;
+  --replica-cockpit-panel-2: #1d231f;
+  --replica-cockpit-line: #303932;
+  --replica-cockpit-text: #e7ede9;
+  --replica-cockpit-muted: #96a198;
   height: 100%;
   min-width: 0;
   overflow: hidden;
@@ -214,6 +220,8 @@
 }
 
 .mangosteen-replica-content {
+  container-type: inline-size;
+  container-name: replica-cockpit;
   min-height: 0;
   min-width: 0;
   padding: var(--replica-pad);
@@ -571,6 +579,622 @@
 .mangosteen-replica-empty h2,
 .mangosteen-replica-empty p {
   margin: 0;
+}
+
+.mangosteen-replica-cockpit {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--replica-cockpit-line);
+  border-radius: 14px;
+  background: var(--replica-cockpit-bg);
+  color: var(--replica-cockpit-text);
+  color-scheme: dark;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.22);
+}
+
+.mangosteen-replica-cockpit-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--replica-cockpit-line);
+  background: #151a16;
+}
+
+.mangosteen-replica-cockpit-heading,
+.mangosteen-replica-cockpit-progress,
+.mangosteen-replica-shot-copy,
+.mangosteen-replica-editor-head > :first-child {
+  min-width: 0;
+}
+
+.mangosteen-replica-cockpit-heading h2,
+.mangosteen-replica-cockpit-heading p,
+.mangosteen-replica-pane-head h3,
+.mangosteen-replica-pane-head p,
+.mangosteen-replica-editor-head h3,
+.mangosteen-replica-editor-head p,
+.mangosteen-replica-editor-footer strong,
+.mangosteen-replica-editor-footer small {
+  margin: 0;
+}
+
+.mangosteen-replica-cockpit-heading h2 {
+  margin-top: 3px;
+  overflow: hidden;
+  font-size: clamp(18px, 2.1cqi, 26px);
+  letter-spacing: -0.03em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mangosteen-replica-cockpit-heading p,
+.mangosteen-replica-pane-head p,
+.mangosteen-replica-editor-head p,
+.mangosteen-replica-editor-footer small {
+  margin-top: 4px;
+  color: var(--replica-cockpit-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.mangosteen-replica-cockpit-progress-head,
+.mangosteen-replica-task-progress-head,
+.mangosteen-replica-task-meta,
+.mangosteen-replica-cockpit-actions,
+.mangosteen-replica-editor-footer,
+.mangosteen-replica-task-top,
+.mangosteen-replica-monitor-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mangosteen-replica-cockpit-progress-head,
+.mangosteen-replica-task-progress-head,
+.mangosteen-replica-task-meta,
+.mangosteen-replica-task-top {
+  justify-content: space-between;
+}
+
+.mangosteen-replica-cockpit-progress-head {
+  margin-bottom: 7px;
+  color: var(--replica-cockpit-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.mangosteen-replica-cockpit-progress-head strong,
+.mangosteen-replica-task-progress-head strong,
+.mangosteen-replica-mono,
+.mangosteen-replica-shot-number,
+.mangosteen-replica-timecode,
+.mangosteen-replica-task-id code {
+  font-family: var(--font-monospace);
+  font-variant-numeric: tabular-nums;
+}
+
+.mangosteen-replica-cockpit .mangosteen-replica-progress-track {
+  height: 6px;
+  background: #283129;
+}
+
+.mangosteen-replica-cockpit .mangosteen-replica-progress-bar {
+  background: var(--replica-accent);
+}
+
+.mangosteen-replica-cockpit .mangosteen-replica-progress-bar.is-indeterminate {
+  width: 100%;
+  min-width: 0;
+  opacity: 0.5;
+}
+
+.mangosteen-replica-cockpit-actions {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+}
+
+.mangosteen-replica-save-status {
+  color: var(--replica-cockpit-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.mangosteen-replica-cockpit button {
+  border-color: var(--replica-cockpit-line);
+  background: #202721;
+  color: var(--replica-cockpit-text);
+  transition: border-color 140ms ease, background 140ms ease, color 140ms ease, transform 140ms ease;
+}
+
+.mangosteen-replica-cockpit button:hover:not(:disabled) {
+  border-color: #52695a;
+  background: #283229;
+}
+
+.mangosteen-replica-cockpit button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.mangosteen-replica-cockpit button.mod-cta {
+  border-color: transparent;
+  background: var(--replica-accent);
+  color: #0d1710;
+  font-weight: var(--font-semibold);
+}
+
+.mangosteen-replica-cockpit button.mod-warning {
+  border-color: #675a3d;
+  color: #dfbf7b;
+}
+
+.mangosteen-replica-cockpit button:focus-visible,
+.mangosteen-replica-cockpit input:focus-visible,
+.mangosteen-replica-cockpit select:focus-visible,
+.mangosteen-replica-cockpit textarea:focus-visible,
+.mangosteen-replica-prompt-disclosure summary:focus-visible {
+  outline: 2px solid var(--replica-accent);
+  outline-offset: 2px;
+}
+
+.mangosteen-replica-cockpit button:disabled,
+.mangosteen-replica-cockpit input:disabled,
+.mangosteen-replica-cockpit select:disabled,
+.mangosteen-replica-cockpit textarea:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+
+.mangosteen-replica-cockpit button.is-loading {
+  cursor: progress;
+}
+
+.mangosteen-replica-cockpit-grid {
+  display: grid;
+  grid-template-areas:
+    "rail"
+    "editor"
+    "monitor";
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+}
+
+.mangosteen-replica-shot-rail,
+.mangosteen-replica-generation-monitor {
+  min-width: 0;
+  background: var(--replica-cockpit-panel);
+}
+
+.mangosteen-replica-shot-rail {
+  grid-area: rail;
+  border-bottom: 1px solid var(--replica-cockpit-line);
+}
+
+.mangosteen-replica-shot-editor {
+  grid-area: editor;
+  min-width: 0;
+  background: var(--replica-cockpit-bg);
+}
+
+.mangosteen-replica-generation-monitor {
+  grid-area: monitor;
+  border-top: 1px solid var(--replica-cockpit-line);
+}
+
+.mangosteen-replica-pane-head {
+  padding: 14px;
+  border-bottom: 1px solid var(--replica-cockpit-line);
+}
+
+.mangosteen-replica-pane-head h3 {
+  font-size: var(--font-ui-medium);
+}
+
+.mangosteen-replica-shot-picker {
+  display: block;
+  width: calc(100% - 24px);
+  margin: 12px;
+  border-color: var(--replica-cockpit-line);
+  background: var(--replica-cockpit-panel-2);
+  color: var(--replica-cockpit-text);
+}
+
+.mangosteen-replica-shot-rail .mangosteen-replica-shot-list {
+  display: none;
+  gap: 5px;
+  padding: 9px;
+}
+
+.mangosteen-replica-shot-item {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) 8px;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 4px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+}
+
+.mangosteen-replica-shot-item:hover {
+  background: #1d241f;
+}
+
+.mangosteen-replica-shot-item.is-active {
+  border-color: #4d6655;
+  background: #222c25;
+}
+
+.mangosteen-replica-shot-item.is-failed {
+  border-color: #633f3f;
+}
+
+.mangosteen-replica-shot-select {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 6px;
+  border: 0 !important;
+  background: transparent !important;
+  text-align: left;
+}
+
+.mangosteen-replica-shot-number {
+  color: var(--replica-cockpit-text);
+  font-size: 12px;
+}
+
+.mangosteen-replica-shot-copy strong,
+.mangosteen-replica-shot-copy small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mangosteen-replica-shot-copy strong {
+  font-size: 12px;
+}
+
+.mangosteen-replica-shot-copy small {
+  margin-top: 2px;
+  color: var(--replica-cockpit-muted);
+  font-size: 10px;
+}
+
+.mangosteen-replica-status-dot,
+.mangosteen-replica-monitor-stage i {
+  display: block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #59635c;
+}
+
+.mangosteen-replica-status-dot.is-completed,
+.mangosteen-replica-monitor-stage.is-done i {
+  background: var(--replica-accent);
+}
+
+.mangosteen-replica-status-dot.is-processing,
+.mangosteen-replica-status-dot.is-reserved,
+.mangosteen-replica-monitor-stage.is-active i {
+  background: #d0a85f;
+  box-shadow: 0 0 0 4px rgba(208, 168, 95, 0.12);
+}
+
+.mangosteen-replica-status-dot.is-failed,
+.mangosteen-replica-status-dot.is-recovery-pending,
+.mangosteen-replica-monitor-stage.is-failed i {
+  background: #d67575;
+}
+
+.mangosteen-replica-shot-rail-footer {
+  padding: 10px 12px;
+  border-top: 1px solid var(--replica-cockpit-line);
+}
+
+.mangosteen-replica-editor-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 18px 20px 14px;
+  border-bottom: 1px solid var(--replica-cockpit-line);
+}
+
+.mangosteen-replica-editor-head h3 {
+  overflow-wrap: anywhere;
+  font-size: clamp(19px, 2.2cqi, 27px);
+  letter-spacing: -0.03em;
+}
+
+.mangosteen-replica-lock-chip {
+  flex: 0 0 auto;
+  padding: 5px 8px;
+  border: 1px solid #496153;
+  border-radius: 999px;
+  color: #9bc6aa;
+  font-size: 10px;
+}
+
+.mangosteen-replica-lock-chip.is-locked {
+  border-color: #685a3d;
+  color: #dfbf7b;
+}
+
+.mangosteen-replica-editor-body {
+  padding: 16px 20px 20px;
+}
+
+.mangosteen-replica-reference-grid,
+.mangosteen-replica-editor-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 9px;
+  margin-bottom: 14px;
+}
+
+.mangosteen-replica-reference-card {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--replica-cockpit-line);
+  border-radius: 10px;
+  background: var(--replica-cockpit-panel);
+}
+
+.mangosteen-replica-reference-card span,
+.mangosteen-replica-reference-card strong,
+.mangosteen-replica-reference-card small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mangosteen-replica-reference-card span {
+  margin-bottom: 6px;
+  color: var(--replica-cockpit-muted);
+  font-size: 9px;
+  letter-spacing: 0.07em;
+}
+
+.mangosteen-replica-reference-card strong {
+  font-size: 11px;
+}
+
+.mangosteen-replica-reference-card small {
+  margin-top: 4px;
+  color: #8ebd9d;
+  font-size: 9px;
+}
+
+.mangosteen-replica-cockpit .mangosteen-replica-field {
+  color: var(--replica-cockpit-muted);
+  font-size: 10px;
+}
+
+.mangosteen-replica-cockpit input,
+.mangosteen-replica-cockpit select,
+.mangosteen-replica-cockpit textarea {
+  border-color: var(--replica-cockpit-line);
+  background: #131713;
+  color: var(--replica-cockpit-text);
+}
+
+.mangosteen-replica-cockpit .mangosteen-replica-timeline-list {
+  gap: 10px;
+}
+
+.mangosteen-replica-cockpit .mangosteen-replica-timeline-row {
+  border-color: var(--replica-cockpit-line);
+  background: var(--replica-cockpit-panel);
+}
+
+.mangosteen-replica-timecode {
+  display: block;
+  margin-top: 3px;
+  color: #8ebd9d;
+  font-size: 10px;
+}
+
+.mangosteen-replica-cockpit .mangosteen-replica-timeline-fields .is-wide {
+  grid-column: 1 / -1;
+}
+
+.mangosteen-replica-prompt-disclosure {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--replica-cockpit-line);
+}
+
+.mangosteen-replica-prompt-disclosure summary {
+  cursor: pointer;
+  color: var(--replica-cockpit-muted);
+  font-size: var(--font-ui-small);
+  font-weight: var(--font-semibold);
+}
+
+.mangosteen-replica-prompt-disclosure[open] summary {
+  margin-bottom: 9px;
+}
+
+.mangosteen-replica-prompt-disclosure textarea {
+  min-height: 160px;
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+}
+
+.mangosteen-replica-editor-footer {
+  align-items: flex-end;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--replica-cockpit-line);
+}
+
+.mangosteen-replica-editor-footer strong,
+.mangosteen-replica-editor-footer small {
+  display: block;
+}
+
+.mangosteen-replica-monitor-body {
+  display: grid;
+  gap: 10px;
+  padding: 11px;
+}
+
+.mangosteen-replica-task-card {
+  min-width: 0;
+  padding: 11px;
+  border: 1px solid var(--replica-cockpit-line);
+  border-radius: 10px;
+  background: var(--replica-cockpit-panel-2);
+}
+
+.mangosteen-replica-task-top span {
+  color: #dfbf7b;
+  font-size: 10px;
+}
+
+.mangosteen-replica-task-id {
+  display: grid;
+  gap: 3px;
+  margin-top: 9px;
+}
+
+.mangosteen-replica-task-id span {
+  color: var(--replica-cockpit-muted);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+}
+
+.mangosteen-replica-task-id code {
+  overflow-wrap: anywhere;
+  color: var(--replica-cockpit-text);
+  font-size: 10px;
+}
+
+.mangosteen-replica-task-progress {
+  margin-top: 10px;
+}
+
+.mangosteen-replica-task-progress-head,
+.mangosteen-replica-task-meta {
+  margin-bottom: 6px;
+  color: var(--replica-cockpit-muted);
+  font-size: 10px;
+}
+
+.mangosteen-replica-task-meta {
+  margin-top: 8px;
+  margin-bottom: 0;
+}
+
+.mangosteen-replica-monitor-stages {
+  display: grid;
+  gap: 7px;
+  margin-top: 12px;
+}
+
+.mangosteen-replica-monitor-stage {
+  display: grid;
+  grid-template-columns: 13px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  color: var(--replica-cockpit-muted);
+  font-size: 10px;
+}
+
+.mangosteen-replica-monitor-stage.is-active,
+.mangosteen-replica-monitor-stage.is-failed {
+  color: var(--replica-cockpit-text);
+}
+
+.mangosteen-replica-monitor-stage em {
+  font-style: normal;
+}
+
+.mangosteen-replica-monitor-error {
+  padding: 10px;
+  border: 1px solid #6b4141;
+  border-radius: 9px;
+  background: #2a1b1b;
+  color: #dfb2b2;
+}
+
+.mangosteen-replica-monitor-error strong {
+  color: #ee9f9f;
+  font-size: 11px;
+}
+
+.mangosteen-replica-monitor-error p {
+  margin: 5px 0 0;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.mangosteen-replica-monitor-error .mangosteen-replica-next-action {
+  color: #f0c8c8;
+}
+
+.mangosteen-replica-monitor-actions {
+  align-items: stretch;
+  flex-direction: column;
+}
+
+.mangosteen-replica-cockpit .mangosteen-replica-empty-inline {
+  border-color: var(--replica-cockpit-line);
+  background: var(--replica-cockpit-panel);
+  color: var(--replica-cockpit-muted);
+}
+
+@container replica-cockpit (max-width: 759px) {
+  .mangosteen-replica-editor-head { align-items: stretch; flex-direction: column; }
+  .mangosteen-replica-editor-footer { align-items: stretch; flex-direction: column; }
+  .mangosteen-replica-editor-footer .mangosteen-replica-inline-actions { align-items: stretch; flex-direction: column; }
+  .mangosteen-replica-cockpit-actions { align-items: stretch; flex-direction: column; }
+  .mangosteen-replica-cockpit-actions button { width: 100%; }
+  .mangosteen-replica-cockpit .mangosteen-replica-timeline-fields { grid-template-columns: minmax(0, 1fr); }
+  .mangosteen-replica-cockpit .mangosteen-replica-timeline-time { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@container replica-cockpit (min-width: 760px) and (max-width: 1099px) {
+  .mangosteen-replica-cockpit-header { grid-template-columns: minmax(0, 1fr) auto; }
+  .mangosteen-replica-cockpit-progress { grid-column: 1 / -1; grid-row: 2; }
+  .mangosteen-replica-cockpit-actions { justify-content: flex-end; }
+  .mangosteen-replica-cockpit-grid {
+    grid-template-areas:
+      "rail editor"
+      "monitor monitor";
+    grid-template-columns: 210px minmax(0, 1fr);
+  }
+  .mangosteen-replica-shot-rail { border-right: 1px solid var(--replica-cockpit-line); border-bottom: 0; }
+  .mangosteen-replica-generation-monitor { border-top: 1px solid var(--replica-cockpit-line); }
+  .mangosteen-replica-shot-picker { display: none; }
+  .mangosteen-replica-shot-rail .mangosteen-replica-shot-list { display: grid; }
+  .mangosteen-replica-reference-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .mangosteen-replica-reference-card:last-child { grid-column: 1 / -1; }
+  .mangosteen-replica-editor-fields { grid-template-columns: minmax(0, 1.5fr) minmax(90px, 0.5fr) minmax(120px, 0.8fr); }
+  .mangosteen-replica-monitor-body { grid-template-columns: minmax(0, 1fr) minmax(220px, 0.7fr); }
+  .mangosteen-replica-monitor-actions { grid-column: 1 / -1; flex-direction: row; flex-wrap: wrap; }
+}
+
+@container replica-cockpit (min-width: 1100px) {
+  .mangosteen-replica-cockpit-header { grid-template-columns: minmax(230px, 1.2fr) minmax(260px, 1fr) auto; }
+  .mangosteen-replica-cockpit-actions { justify-content: flex-end; }
+  .mangosteen-replica-cockpit-grid {
+    grid-template-areas: "rail editor monitor";
+    grid-template-columns: 220px minmax(0, 1fr) minmax(260px, 300px);
+    min-height: 620px;
+  }
+  .mangosteen-replica-shot-rail { border-right: 1px solid var(--replica-cockpit-line); border-bottom: 0; }
+  .mangosteen-replica-generation-monitor { border-top: 0; border-left: 1px solid var(--replica-cockpit-line); }
+  .mangosteen-replica-shot-picker { display: none; }
+  .mangosteen-replica-shot-rail .mangosteen-replica-shot-list { display: grid; }
+  .mangosteen-replica-reference-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .mangosteen-replica-editor-fields { grid-template-columns: minmax(0, 1.5fr) minmax(90px, 0.5fr) minmax(120px, 0.8fr); }
 }
 
 @container (max-width: 1099px) {

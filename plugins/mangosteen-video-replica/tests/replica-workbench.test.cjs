@@ -253,12 +253,17 @@ function createView(plugin) {
     assert.strictEqual(element.listeners.pointerdown, undefined);
     assert.strictEqual(element.listeners.mousedown, undefined);
   }
-  const shotList = view.contentEl.find((element) => element.classList.contains("mangosteen-replica-shot-list"));
-  assert(shotList, "storyboards must render as one vertical shot list");
+  const cockpitGrid = view.contentEl.find((element) => element.classList.contains("mangosteen-replica-cockpit-grid"));
+  assert(cockpitGrid, "the production tab must render the three-pane cockpit");
+  assert.deepStrictEqual(
+    cockpitGrid.children.map((element) => ["shot-rail", "shot-editor", "generation-monitor"].find((name) => element.classList.contains(name))),
+    ["shot-rail", "shot-editor", "generation-monitor"],
+  );
+  const shotList = cockpitGrid.find((element) => element.classList.contains("mangosteen-replica-shot-list"));
   assert.strictEqual(
-    shotList.findAll((element) => element.classList.contains("mangosteen-replica-shot-summary-row")).length,
+    shotList.findAll((element) => element.classList.contains("mangosteen-replica-shot-item")).length,
     view.draft.shots.length,
-    "each storyboard shot must have one compact summary row",
+    "the rail must render one compact row per shot",
   );
   assert(view.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "生成所选（0）"));
   assert(view.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "生成此镜头"));
@@ -310,6 +315,8 @@ function createView(plugin) {
   assert(performanceInput, "per-segment performance should be editable in the workbench");
   assert.strictEqual(performanceInput.value, "自然");
   const livePromptPreview = view.contentEl.find((element) => element.attributes["aria-label"] === "最终视频提示词预览");
+  const promptDisclosure = view.contentEl.find((element) => element.classList.contains("mangosteen-replica-prompt-disclosure"));
+  assert.strictEqual(promptDisclosure.open, false, "the full prompt must stay collapsed by default");
   performanceInput.value = "紧张低声说话";
   await performanceInput.dispatch("input");
   assert.match(livePromptPreview.value, /紧张低声说话/, "the final prompt preview must update before paid confirmation");
@@ -757,6 +764,13 @@ function createView(plugin) {
   assert.strictEqual(currentRunView.viewModel.cockpit.monitor.taskId, "task-current");
   assert.strictEqual(currentRunView.viewModel.cockpit.monitor.progress, null, "missing provider progress must remain null through the workbench snapshot");
   assert.strictEqual(currentRunView.viewModel.progress.percent, null);
+  await currentRunView.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "总览").dispatch("click");
+  assert.strictEqual(
+    currentRunView.contentEl.find((element) => element.textContent === "null%"),
+    null,
+    "overview must not invent a percentage when the provider has not returned one",
+  );
+  assert(currentRunView.contentEl.find((element) => element.textContent === "活动中"));
   await currentRunView.onClose();
 
   const partialLockView = createView(createPlugin({
@@ -783,21 +797,42 @@ function createView(plugin) {
   const lockedPrompt = partialLockView.contentEl.find((element) => (
     element.tagName === "TEXTAREA" && element.dataset.shotIndex === "0" && element.dataset.field === "action"
   ));
-  const editablePrompt = partialLockView.contentEl.find((element) => (
-    element.tagName === "TEXTAREA" && element.dataset.shotIndex === "1" && element.dataset.field === "action"
-  ));
   assert.strictEqual(lockedPrompt.disabled, true, "queued or processing shots must be locked");
-  assert.strictEqual(editablePrompt.disabled, false, "unselected shots must remain editable");
   const partialShotCheckboxes = partialLockView.contentEl.findAll((element) => (
     element.tagName === "INPUT" && element.attributes.type === "checkbox" && element.dataset.shotId
   ));
   assert.strictEqual(partialShotCheckboxes[0].disabled, true, "the processing shot must not be selectable again");
   assert.strictEqual(partialShotCheckboxes[1].disabled, false, "an unqueued shot must remain selectable during generation");
-  const partialGenerateButtons = partialLockView.contentEl.findAll((element) => (
-    element.tagName === "BUTTON" && element.textContent === "生成此镜头"
+  assert.strictEqual(
+    partialLockView.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "生成此镜头").disabled,
+    true,
+    "the processing shot generation button must stay locked",
+  );
+  const secondShotButton = partialLockView.contentEl.find((element) => (
+    element.tagName === "BUTTON" && element.dataset.selectShotId === "002"
   ));
-  assert.strictEqual(partialGenerateButtons[0].disabled, true, "the processing shot generation button must stay locked");
-  assert.strictEqual(partialGenerateButtons[1].disabled, false, "an unqueued shot must be appendable to the running queue");
+  await secondShotButton.dispatch("click");
+  const editablePrompt = partialLockView.contentEl.find((element) => (
+    element.tagName === "TEXTAREA" && element.dataset.shotIndex === "1" && element.dataset.field === "action"
+  ));
+  assert.strictEqual(editablePrompt.disabled, false, "unselected shots must remain editable");
+  assert.strictEqual(
+    partialLockView.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "生成此镜头").disabled,
+    false,
+    "an unqueued shot must be appendable to the running queue",
+  );
+  const secondTitle = partialLockView.contentEl.find((element) => (
+    element.tagName === "INPUT" && element.dataset.shotIndex === "1" && element.dataset.field === "title"
+  ));
+  secondTitle.value = "未保存的第二镜草案";
+  await secondTitle.dispatch("input");
+  await partialLockView.contentEl.find((element) => element.tagName === "BUTTON" && element.dataset.selectShotId === "001").dispatch("click");
+  await partialLockView.contentEl.find((element) => element.tagName === "BUTTON" && element.dataset.selectShotId === "002").dispatch("click");
+  assert.strictEqual(partialLockView.draft.shots[1].title, "未保存的第二镜草案", "shot switching must retain another shot's unsaved draft");
+  assert.strictEqual(
+    partialLockView.contentEl.find((element) => element.tagName === "INPUT" && element.dataset.shotIndex === "1" && element.dataset.field === "title").value,
+    "未保存的第二镜草案",
+  );
   assert(partialLockView.contentEl.find((element) => element.textContent.includes("镜头 001")), "the active shot progress must be visible in the workbench");
   await partialLockView.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "资产").dispatch("click");
   const lockedStylePrompt = partialLockView.contentEl.find((element) => (
@@ -938,7 +973,11 @@ function createView(plugin) {
   assert.match(fallbackCss, /\.mangosteen-replica-page-header/);
   assert.match(fallbackCss, /\.mangosteen-replica-toolbar-actions/);
   assert.match(fallbackCss, /\.mangosteen-replica-inline-actions/);
-  assert.match(css, /\.mangosteen-replica-shot-list\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\)/s);
+  assert.match(css, /@container\s+replica-cockpit\s+\(min-width:\s*1100px\)/);
+  assert.match(css, /@container\s+replica-cockpit\s+\(min-width:\s*760px\)\s+and\s+\(max-width:\s*1099px\)/);
+  assert.match(css, /grid-template-areas:\s*"rail editor monitor"/);
+  assert.match(css, /grid-template-areas:\s*"rail editor"\s*"monitor monitor"/);
+  assert.doesNotMatch(css, /(?:linear|radial)-gradient/i, "the cockpit must not use AI-style gradients");
 
   Module._load = originalLoad;
   console.log("replica-workbench: ok");

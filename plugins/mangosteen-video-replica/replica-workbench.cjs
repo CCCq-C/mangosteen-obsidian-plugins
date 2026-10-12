@@ -14,6 +14,7 @@ const {
   deriveWorkbenchState,
   stateSignature,
 } = require("./replica-ui-state.cjs");
+const { renderCockpit } = require("./replica-cockpit.cjs");
 
 const VIEW_TYPE = "mangosteen-video-replica-workbench";
 const TABS = [
@@ -125,8 +126,9 @@ function createVideoReplicaWorkbenchView(ItemView) {
   constructor(leaf, plugin) {
     super(leaf);
     this.plugin = plugin;
-    this.activeTab = "overview";
+    this.activeTab = "shots";
     this.selectedFolder = "";
+    this.selectedShotId = "";
     this.projects = [];
     this.snapshot = { project: {}, request: {}, activeRun: {}, currentRun: {}, generationState: {} };
     this.viewModel = deriveWorkbenchState();
@@ -239,14 +241,17 @@ function createVideoReplicaWorkbenchView(ItemView) {
           : {},
       };
       const folderChanged = previousFolder !== text(nextSnapshot.project.folder);
-      if (folderChanged) this.dirty = false;
+      if (folderChanged) {
+        this.dirty = false;
+        this.selectedShotId = "";
+      }
       if (!this.dirty || folderChanged || !this.draft) {
         const sourceVersion = Number(nextSnapshot.request?.version || 1);
         this.draft = editableRequest(nextSnapshot.request);
         if (sourceVersion < 5 && Number(this.draft?.version) === 5) this.dirty = true;
       }
       this.snapshot = nextSnapshot;
-      this.viewModel = deriveWorkbenchState(nextSnapshot);
+      this.updateViewModel();
       const availableShotIds = new Set(list(this.draft?.shots).map((shot) => String(shot.id)));
       this.selectedShotIds = new Set([...this.selectedShotIds].filter((id) => availableShotIds.has(id)));
       this.refreshFeedback = "";
@@ -278,8 +283,20 @@ function createVideoReplicaWorkbenchView(ItemView) {
         videoModels: this.generationModelCatalog.videoModels,
       },
       state: stateSignature(this.viewModel),
+      selectedShotId: this.selectedShotId,
       selectedShotIds: [...this.selectedShotIds],
     });
+  }
+
+  updateViewModel() {
+    this.viewModel = deriveWorkbenchState({
+      ...this.snapshot,
+      request: this.draft || this.snapshot.request,
+      selectedShotId: this.selectedShotId,
+    });
+    const selected = list(this.viewModel?.cockpit?.rail?.items).find((shot) => shot.selected);
+    this.selectedShotId = text(selected?.id);
+    return this.viewModel;
   }
 
   captureUiState() {
@@ -410,10 +427,11 @@ function createVideoReplicaWorkbenchView(ItemView) {
     const progressCard = parent.createDiv({ cls: "mangosteen-replica-card mangosteen-replica-progress-card" });
     const progressHeading = progressCard.createDiv({ cls: "mangosteen-replica-card-heading" });
     progressHeading.createEl("strong", { text: this.viewModel.progress.label });
-    progressHeading.createEl("span", { text: `${this.viewModel.progress.percent}%` });
+    const knownProgress = typeof this.viewModel.progress.percent === "number" && Number.isFinite(this.viewModel.progress.percent);
+    progressHeading.createEl("span", { text: knownProgress ? `${this.viewModel.progress.percent}%` : this.viewModel.progress.indeterminate ? "活动中" : "—" });
     const track = progressCard.createDiv({ cls: "mangosteen-replica-progress-track" });
     const bar = track.createDiv({ cls: `mangosteen-replica-progress-bar${this.viewModel.progress.indeterminate ? " is-indeterminate" : ""}` });
-    bar.style.width = `${Math.max(0, Math.min(100, this.viewModel.progress.percent))}%`;
+    bar.style.width = knownProgress ? `${Math.max(0, Math.min(100, this.viewModel.progress.percent))}%` : "0%";
 
     const summary = parent.createDiv({ cls: "mangosteen-replica-summary-grid" });
     this.renderMetric(summary, "当前步骤", text(this.viewModel.current.step, "等待开始"));
@@ -503,143 +521,154 @@ function createVideoReplicaWorkbenchView(ItemView) {
   }
 
   renderShots(parent) {
-    const durationRange = videoDurationRange(this.draft?.settings?.videoModel);
-    this.renderPageTitle(parent, "分镜编辑", "勾选一个或多个镜头，确认最终视频提示词后按草案顺序生成。");
-    const queueTools = parent.createDiv({ cls: "mangosteen-replica-shot-queue-tools" });
-    const selectAllLabel = queueTools.createEl("label", { cls: "mangosteen-replica-shot-select-all" });
-    const selectAll = selectAllLabel.createEl("input", { attr: { type: "checkbox", "aria-label": "选择全部分镜" } });
-    const selectableShotIds = list(this.draft?.shots)
-      .map((shot) => String(shot.id))
-      .filter((id) => !this.shotLocked(id));
-    selectAll.checked = selectableShotIds.length > 0 && selectableShotIds.every((id) => this.selectedShotIds.has(id));
-    selectAll.disabled = !this.viewModel.canGenerate || this.confirmPending || !selectableShotIds.length;
-    selectAllLabel.createEl("span", { text: "全选" });
-    selectAll.addEventListener("change", () => {
-      for (const id of selectableShotIds) {
-        if (selectAll.checked) this.selectedShotIds.add(id);
-        else this.selectedShotIds.delete(id);
-      }
-      this.render();
-      this.renderSignature = this.buildRenderSignature();
+    this.updateViewModel();
+    const model = this.cockpitRenderModel();
+    renderCockpit(parent, model, {
+      selectShot: (shotId) => this.selectCockpitShot(shotId),
+      toggleShotSelected: (shotId, checked) => this.toggleCockpitShot(shotId, checked),
+      toggleAllShots: (shotIds, checked) => this.toggleAllCockpitShots(shotIds, checked),
+      updateDraftField: (target, value) => this.applyDraftControl(target, value),
+      addTimelineSegment: (shotIndex, segmentIndex) => this.addTimelineRow(shotIndex, segmentIndex),
+      removeTimelineSegment: (shotIndex, segmentIndex) => this.removeTimelineRow(shotIndex, segmentIndex),
+      saveDraft: () => this.saveDraft(),
+      generateSelected: (shotIds) => this.generateShots(shotIds),
+      stopGeneration: () => this.stopGeneration(),
+      refreshModels: () => this.ensureGenerationModelCatalog({ force: true }),
+      openArtifact: (vaultPath) => this.plugin.openVaultPath(vaultPath),
+      organizeProject: () => this.organizeCurrentProject(),
+      reportError: (error) => this.setFeedback(String(error?.message || error)),
+      registerButton: (kind, button, guardDisabled) => this.registerCockpitButton(kind, button, guardDisabled),
+      registerSaveStatus: (element) => this.saveStatusElements.push(element),
+      registerPromptPreview: (shotIndex, element) => this.promptPreviewElements.set(Number(shotIndex), element),
     });
-    const selectedCount = [...this.selectedShotIds].filter((id) => selectableShotIds.includes(id)).length;
-    this.confirmButtons.push(this.createButton(
-      queueTools,
-      `生成所选（${selectedCount}）`,
-      () => this.generateShots([...this.selectedShotIds]),
-      "mod-cta",
-      this.confirmPending || !this.viewModel.canGenerate || selectedCount === 0,
-    ));
-    if (this.viewModel.queueStatus) {
-      queueTools.createEl("span", {
-        cls: "mangosteen-replica-muted",
-        text: `当前队列：${this.queueStatusLabel(this.viewModel.queueStatus)}${this.viewModel.current.step ? ` · ${this.viewModel.current.step}` : ""}`,
-      });
-    }
-    const shotGrid = parent.createDiv({ cls: "mangosteen-replica-shot-list" });
-    list(this.draft?.shots).forEach((shot, index) => {
-      const projectShot = this.viewModel.shots[index] || {};
-      const shotId = String(shot.id);
-      const queueShot = list(this.viewModel.queueShots).find((item) => String(item.id) === shotId) || {};
-      const shotLocked = this.shotLocked(shotId);
-      const card = shotGrid.createDiv({ cls: `mangosteen-replica-shot-card${projectShot.status === "失败" ? " is-failed" : ""}` });
-      const summaryRow = card.createDiv({ cls: "mangosteen-replica-shot-summary-row" });
-      const identity = summaryRow.createDiv({ cls: "mangosteen-replica-shot-identity" });
-      const checkbox = identity.createEl("input", { attr: { type: "checkbox", "aria-label": `选择镜头 ${shotId}` } });
-      checkbox.dataset.shotId = shotId;
-      checkbox.checked = this.selectedShotIds.has(shotId);
-      checkbox.disabled = shotLocked || !this.viewModel.canGenerate || this.confirmPending;
-      checkbox.addEventListener("change", () => {
-        if (checkbox.checked) this.selectedShotIds.add(shotId);
-        else this.selectedShotIds.delete(shotId);
-        this.render();
-        this.renderSignature = this.buildRenderSignature();
-      });
-      identity.createEl("strong", { text: text(shot.id, String(index + 1).padStart(3, "0")) });
-      identity.createEl("span", {
-        cls: "mangosteen-replica-shot-status",
-        text: queueShot.status ? this.queueStatusLabel(queueShot.status) : text(projectShot.status, "草案"),
-      });
-      this.createDraftControl(summaryRow, "标题", "input", shot.title, {
-        section: "shot", index, field: "title",
-      }, { className: "is-title", disabled: shotLocked });
-      this.createDraftControl(summaryRow, "时长（秒）", "input", shot.duration, {
-        section: "shot", index, field: "duration",
-      }, {
-        inputType: "number",
-        min: String(durationRange.min),
-        max: String(durationRange.max),
-        step: String(durationRange.step),
-        className: "is-duration",
-        disabled: shotLocked,
-      });
-      this.createDraftControl(summaryRow, "场景", "select", shot.sceneId, {
-        section: "shot", index, field: "sceneId",
-      }, {
-        options: list(this.draft?.scenes).map((scene) => [scene.id, scene.id]),
-        className: "is-scene",
-        disabled: shotLocked,
-      });
-      const cardActions = summaryRow.createDiv({ cls: "mangosteen-replica-shot-actions" });
-      this.createButton(cardActions, "上移", () => this.reorderShot(index, "up"), "", this.editingLocked() || shotLocked || index === 0 || this.shotLocked(this.draft.shots[index - 1]?.id));
-      this.createButton(cardActions, "下移", () => this.reorderShot(index, "down"), "", this.editingLocked() || shotLocked || index === this.draft.shots.length - 1 || this.shotLocked(this.draft.shots[index + 1]?.id));
-      this.confirmButtons.push(this.createButton(
-        cardActions,
-        "生成此镜头",
-        () => this.generateShots([shotId]),
-        "",
-        this.confirmPending || !this.viewModel.canGenerate || shotLocked,
-      ));
-      if (projectShot.videoPath) this.createButton(cardActions, "打开视频", () => this.plugin.openVaultPath(projectShot.videoPath));
+  }
 
-      const details = this.createDetails(card, `shot-${shot.id || index}`, "展开镜头内容", projectShot.status === "失败");
-      const timelineList = details.createDiv({ cls: "mangosteen-replica-timeline-list" });
-      const lockedOptions = { disabled: shotLocked };
-      const timeline = list(shot.timeline).length ? list(shot.timeline) : legacyTimeline(shot);
-      timeline.forEach((segment, segmentIndex) => {
-        const row = timelineList.createDiv({ cls: "mangosteen-replica-timeline-row" });
-        const rowHeader = row.createDiv({ cls: "mangosteen-replica-timeline-header" });
-        rowHeader.createEl("strong", { text: `时间段 ${segmentIndex + 1}` });
-        const rowActions = rowHeader.createDiv({ cls: "mangosteen-replica-timeline-actions" });
-        this.createButton(rowActions, "在后面添加", () => this.addTimelineRow(index, segmentIndex), "", shotLocked);
-        this.createButton(rowActions, "删除此段", () => this.removeTimelineRow(index, segmentIndex), "", shotLocked || timeline.length <= 1);
-        const timeGrid = row.createDiv({ cls: "mangosteen-replica-timeline-time" });
-        this.createDraftControl(timeGrid, "开始（秒）", "input", segment.start, {
-          section: "timeline", shotIndex: index, segmentIndex, field: "start",
-        }, { inputType: "number", min: "0", max: String(shot.duration), step: "0.1", disabled: shotLocked });
-        this.createDraftControl(timeGrid, "结束（秒）", "input", segment.end, {
-          section: "timeline", shotIndex: index, segmentIndex, field: "end",
-        }, { inputType: "number", min: "0", max: String(shot.duration), step: "0.1", disabled: shotLocked });
-        const contentGrid = row.createDiv({ cls: "mangosteen-replica-timeline-fields" });
-        this.createDraftControl(contentGrid, "画面动作", "textarea", segment.action, { section: "timeline", shotIndex: index, segmentIndex, field: "action" }, lockedOptions);
-        this.createDraftControl(contentGrid, "人物台词", "textarea", segment.dialogue, { section: "timeline", shotIndex: index, segmentIndex, field: "dialogue" }, lockedOptions);
-        this.createDraftControl(contentGrid, "情绪与声音", "textarea", segment.performance, { section: "timeline", shotIndex: index, segmentIndex, field: "performance" }, lockedOptions);
-        this.createDraftControl(contentGrid, "景别与运镜", "textarea", segment.camera, { section: "timeline", shotIndex: index, segmentIndex, field: "camera" }, lockedOptions);
-        this.createDraftControl(contentGrid, "环境", "textarea", segment.environment, { section: "timeline", shotIndex: index, segmentIndex, field: "environment" }, lockedOptions);
-      });
-      const previewLabel = details.createEl("label", { cls: "mangosteen-replica-field mangosteen-replica-prompt-preview" });
-      previewLabel.createEl("span", { text: "最终视频提示词预览" });
-      const preview = previewLabel.createEl("textarea", { attr: { readonly: "true", "aria-label": "最终视频提示词预览" } });
+  cockpitRenderModel() {
+    const cockpit = this.viewModel?.cockpit || { header: {}, rail: { items: [] }, editor: {}, monitor: {} };
+    const shot = cockpit.editor?.shot || {};
+    const shotId = text(shot.id);
+    const editorLocked = Boolean(cockpit.editor?.locked || this.shotLocked(shotId));
+    const shotIndex = Math.max(0, list(this.draft?.shots).findIndex((item) => String(item.id) === shotId));
+    const draftShot = this.draft?.shots?.[shotIndex] || shot;
+    const characterPath = text(this.viewModel.assets?.character?.imagePath);
+    const scenePath = text(list(this.viewModel.assets?.scenes).find((item) => String(item.id) === String(draftShot.sceneId))?.imagePath);
+    const productIds = new Set(list(draftShot.productIds).map(String));
+    const productPaths = list(this.viewModel.assets?.products)
+      .filter((item) => productIds.has(String(item.id)))
+      .map((item) => text(item.imagePath))
+      .filter(Boolean);
+    const referenceGroups = [
+      { id: "character", label: "人物参考", value: characterPath || "尚未生成", state: characterPath ? "已绑定" : "未绑定" },
+      { id: "scene", label: "场景参考", value: scenePath || "尚未生成", state: scenePath ? "已绑定" : "未绑定" },
+      {
+        id: "product",
+        label: "产品参考",
+        value: productIds.size ? productPaths.join("、") || "尚未生成" : "本镜头无产品",
+        state: productIds.size ? productPaths.length ? "已绑定" : "未绑定" : "无需绑定",
+      },
+    ];
+    let effectivePrompt = text(cockpit.editor?.effectivePrompt);
+    if (!editorLocked) {
       try {
-        preview.value = resolveVideoPrompt({
-          timeline,
-          duration: shot.duration,
-          videoPrompt: shot.videoPrompt,
-          videoPromptOverride: shot.videoPromptOverride,
-          dialogue: shot.dialogue,
+        effectivePrompt = resolveVideoPrompt({
+          timeline: list(draftShot.timeline).length ? draftShot.timeline : legacyTimeline(draftShot),
+          duration: draftShot.duration,
+          videoPrompt: draftShot.videoPrompt,
+          videoPromptOverride: draftShot.videoPromptOverride,
+          dialogue: draftShot.dialogue,
           voiceProfile: this.draft?.character?.voiceProfile,
-          voiceDirection: shot.voiceDirection,
+          voiceDirection: draftShot.voiceDirection,
           visualStyle: this.draft?.visualStyle,
         });
       } catch (error) {
-        preview.value = `时间轴待修正：${String(error?.message || error)}`;
+        effectivePrompt = `时间轴待修正：${String(error?.message || error)}`;
       }
-      this.promptPreviewElements.set(index, preview);
+    }
+    const projectShot = list(this.viewModel.shots).find((item) => String(item.id) === shotId) || {};
+    const activeMonitorStatus = ["processing", "reserved", "recovery-pending"].includes(text(cockpit.monitor?.status));
+    return {
+      ...cockpit,
+      rail: {
+        ...cockpit.rail,
+        items: list(cockpit.rail?.items).map((item) => this.shotLocked(item.id)
+          ? { ...item, locked: true, lockReason: text(item.lockReason, "当前镜头正在生成") }
+          : item),
+      },
+      editor: {
+        ...cockpit.editor,
+        shot: { ...shot, ...draftShot, videoPath: text(shot.videoPath, text(projectShot.videoPath)) },
+        shotIndex,
+        locked: editorLocked,
+        lockReason: editorLocked ? text(cockpit.editor?.lockReason, "当前镜头正在生成") : null,
+        referenceGroups,
+        timeline: list(draftShot.timeline).length ? draftShot.timeline : legacyTimeline(draftShot),
+        effectivePrompt,
+      },
+      controls: {
+        canGenerate: this.viewModel.canGenerate,
+        canStop: this.viewModel.canStop,
+        confirmPending: this.confirmPending,
+        stopPending: this.stopPending,
+        dirty: this.dirty,
+        editingLocked: this.editingLocked(),
+        selectedShotIds: [...this.selectedShotIds].filter((id) => !this.shotLocked(id)),
+        durationRange: videoDurationRange(this.draft?.settings?.videoModel),
+        settings: { ...(this.draft?.settings || {}) },
+        sceneOptions: list(this.draft?.scenes).map((scene) => [scene.id, scene.id]),
+        modelCatalogLoading: this.generationCatalogStatus === "loading",
+        selectedArtifactPath: text(projectShot.videoPath),
+        outputPath: text(this.viewModel.output?.finalVideoPath),
+        organizeDisabled: activeMonitorStatus || list(this.viewModel.lockedShotIds).length > 0,
+      },
+    };
+  }
 
-      if (projectShot.error) card.createDiv({ cls: "mangosteen-replica-error", text: projectShot.error });
-    });
-    if (!list(this.draft?.shots).length) parent.createDiv({ cls: "mangosteen-replica-empty-inline", text: "当前草案没有分镜。" });
-    this.renderSaveRow(parent);
+  selectCockpitShot(shotId) {
+    const selected = String(shotId || "");
+    if (!list(this.draft?.shots).some((shot) => String(shot.id) === selected)) return;
+    this.selectedShotId = selected;
+    this.updateViewModel();
+    this.savedScrollTop = 0;
+    this.render();
+    this.renderSignature = this.buildRenderSignature();
+  }
+
+  toggleCockpitShot(shotId, checked) {
+    const id = String(shotId || "");
+    if (!id || this.shotLocked(id)) return;
+    if (checked) this.selectedShotIds.add(id);
+    else this.selectedShotIds.delete(id);
+    this.render();
+    this.renderSignature = this.buildRenderSignature();
+  }
+
+  toggleAllCockpitShots(shotIds, checked) {
+    for (const id of list(shotIds).map(String)) {
+      if (this.shotLocked(id)) continue;
+      if (checked) this.selectedShotIds.add(id);
+      else this.selectedShotIds.delete(id);
+    }
+    this.render();
+    this.renderSignature = this.buildRenderSignature();
+  }
+
+  registerCockpitButton(kind, button, guardDisabled = false) {
+    if (kind === "save") this.saveButtons.push(button);
+    if (kind === "confirm") {
+      button.dataset.guardDisabled = guardDisabled ? "true" : "false";
+      this.confirmButtons.push(button);
+    }
+    if (kind === "stop") this.stopButtons.push(button);
+  }
+
+  async organizeCurrentProject() {
+    if (typeof this.plugin.organizeCurrentReplicaProject !== "function") {
+      this.setFeedback("当前版本不支持从工作台整理项目。");
+      return false;
+    }
+    const organized = await this.plugin.organizeCurrentReplicaProject();
+    await this.refresh({ force: true });
+    return organized;
   }
 
   renderOutput(parent) {
@@ -716,7 +745,7 @@ function createVideoReplicaWorkbenchView(ItemView) {
         return this.generationModelCatalog;
       })
       .finally(() => {
-        if (this.activeTab === "settings") {
+        if (this.activeTab === "settings" || this.activeTab === "shots") {
           this.render();
           this.renderSignature = this.buildRenderSignature();
         }
@@ -767,21 +796,28 @@ function createVideoReplicaWorkbenchView(ItemView) {
     control.disabled = this.editingLocked() || Boolean(options.disabled);
     control.addEventListener(tagName === "select" ? "change" : "input", async () => {
       const nextValue = ["duration", "start", "end"].includes(target.field) ? Number(control.value) : control.value;
-      try {
-        this.draft = updateDraftField(this.draft, target, nextValue);
-        this.dirty = true;
-        this.feedback = "";
-        this.syncSaveState();
-        if (target.section === "timeline") this.refreshPromptPreview(target.shotIndex);
-        else if (target.section === "shot" && target.field === "duration") this.refreshPromptPreview(target.index);
-        else if ((target.section === "character" && target.field === "voiceProfile") || target.section === "visualStyle") this.refreshAllPromptPreviews();
-        this.renderSignature = this.buildRenderSignature();
-        if (typeof options.onChange === "function") await options.onChange(nextValue, control);
-      } catch (error) {
-        this.setFeedback(String(error?.message || error));
-      }
+      await this.applyDraftControl(target, nextValue, control, options);
     });
     return control;
+  }
+
+  async applyDraftControl(target, nextValue, control = null, options = {}) {
+    try {
+      this.draft = updateDraftField(this.draft, target, nextValue);
+      this.dirty = true;
+      this.feedback = "";
+      this.updateViewModel();
+      this.syncSaveState();
+      if (target.section === "timeline") this.refreshPromptPreview(target.shotIndex);
+      else if (target.section === "shot" && target.field === "duration") this.refreshPromptPreview(target.index);
+      else if ((target.section === "character" && target.field === "voiceProfile") || target.section === "visualStyle") this.refreshAllPromptPreviews();
+      this.renderSignature = this.buildRenderSignature();
+      if (typeof options.onChange === "function") await options.onChange(nextValue, control);
+      return true;
+    } catch (error) {
+      this.setFeedback(String(error?.message || error));
+      return false;
+    }
   }
 
   refreshPromptPreview(shotIndex) {
@@ -836,7 +872,9 @@ function createVideoReplicaWorkbenchView(ItemView) {
 
   syncConfirmState() {
     const disabled = this.confirmPending || !this.viewModel.canGenerate;
-    for (const button of this.confirmButtons) button.disabled = disabled;
+    for (const button of this.confirmButtons) {
+      button.disabled = disabled || button.dataset.guardDisabled === "true";
+    }
   }
 
   syncStopState() {
@@ -879,6 +917,7 @@ function createVideoReplicaWorkbenchView(ItemView) {
     if (this.editingLocked()) return;
     this.draft = moveShot(this.draft, index, direction);
     this.dirty = true;
+    this.updateViewModel();
     this.render();
     this.renderSignature = this.buildRenderSignature();
   }
@@ -887,6 +926,7 @@ function createVideoReplicaWorkbenchView(ItemView) {
     if (this.editingLocked() || this.shotLocked(this.draft?.shots?.[shotIndex]?.id)) return;
     this.draft = addTimelineSegment(this.draft, shotIndex, segmentIndex);
     this.dirty = true;
+    this.updateViewModel();
     this.render();
     this.renderSignature = this.buildRenderSignature();
   }
@@ -895,6 +935,7 @@ function createVideoReplicaWorkbenchView(ItemView) {
     if (this.editingLocked() || this.shotLocked(this.draft?.shots?.[shotIndex]?.id)) return;
     this.draft = removeTimelineSegment(this.draft, shotIndex, segmentIndex);
     this.dirty = true;
+    this.updateViewModel();
     this.render();
     this.renderSignature = this.buildRenderSignature();
   }
