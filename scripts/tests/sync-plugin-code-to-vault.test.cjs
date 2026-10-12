@@ -67,6 +67,21 @@ try {
     "tests/replica-editor.test.cjs", "tests/replica-ui-state.test.cjs", "tests/replica-workbench.test.cjs",
     "replica-cockpit.cjs", "tests/replica-cockpit.test.cjs", "tests/visual-style.test.cjs",
   ]) assert(fs.lstatSync(path.join(target, file)).isFile(), `missing synced allowlist file: ${file}`);
+  const sourceReplicaTests = fs.readdirSync(path.join(repoRoot, "plugins/mangosteen-video-replica/tests"))
+    .filter((name) => name.endsWith(".test.cjs"))
+    .sort();
+  const installedReplicaTests = fs.readdirSync(path.join(target, "tests"))
+    .filter((name) => name.endsWith(".test.cjs"))
+    .sort();
+  assert.deepStrictEqual(
+    installedReplicaTests,
+    sourceReplicaTests,
+    "sync allowlist must install every mangosteen-video-replica source test",
+  );
+  for (const name of installedReplicaTests) {
+    const installedTest = fs.lstatSync(path.join(target, "tests", name));
+    assert(installedTest.isFile() && !installedTest.isSymbolicLink(), `synced replica test must be a regular non-symlink file: ${name}`);
+  }
   assert.strictEqual(fs.readFileSync(path.join(target, "user-owned-sentinel.txt"), "utf8"), "keep", "sync must not delete user files");
   fs.writeFileSync(path.join(target, "main.js"), "stale copy");
   const replacementSync = run(vault);
