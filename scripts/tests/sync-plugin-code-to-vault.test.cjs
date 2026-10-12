@@ -135,6 +135,27 @@ try {
     assert.strictEqual(fs.readFileSync(externalTarget, "utf8"), "external target must stay unchanged");
     assert.deepStrictEqual(snapshotTree(outside), before, "ancestor-symlink refusal must not change any external file or directory");
   }
+
+  {
+    const suppliedPathRoot = temporary("mangosteen-sync-control-path-");
+    const outside = temporary("mangosteen-sync-control-outside-");
+    const externalVault = path.join(outside, "vault");
+    const externalTarget = path.join(externalVault, ".obsidian/plugins/mangosteen-image/main.js");
+    fs.mkdirSync(path.dirname(externalTarget), { recursive: true });
+    fs.writeFileSync(path.join(outside, "sentinel.txt"), "outside sentinel");
+    fs.writeFileSync(externalTarget, "external target must stay unchanged");
+    const before = snapshotTree(outside);
+    const ancestorLink = path.join(suppliedPathRoot, "linked\nancestor");
+    fs.symlinkSync(outside, ancestorLink, "dir");
+
+    const result = run(path.join(ancestorLink, "vault"));
+
+    assert.notStrictEqual(result.status, 0, `vault path with a newline ancestor component must fail\n${result.stdout}\n${result.stderr}`);
+    assert.match(result.stderr, /control character/, "control-character refusal must state the cause");
+    assert.strictEqual(fs.readFileSync(path.join(outside, "sentinel.txt"), "utf8"), "outside sentinel");
+    assert.strictEqual(fs.readFileSync(externalTarget, "utf8"), "external target must stay unchanged");
+    assert.deepStrictEqual(snapshotTree(outside), before, "control-character refusal must not change any external file or directory");
+  }
 } finally {
   for (const root of temporaryRoots.reverse()) fs.rmSync(root, { recursive: true, force: true });
 }

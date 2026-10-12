@@ -10,14 +10,23 @@ if (( $# > 1 )); then
 fi
 
 vault_path="${1:-$DEFAULT_VAULT}"
-plugin_root="$vault_path/.obsidian/plugins"
-script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd -- "$script_dir/.." && pwd)"
 
 fail_sync() {
   printf 'Refusing to sync: %s\n' "$1" >&2
   exit 1
 }
+
+assert_safe_vault_path_text() {
+  local supplied="$1"
+  local LC_ALL=C
+  [[ ! "$supplied" =~ [[:cntrl:]] ]] || fail_sync "vault path contains a control character"
+}
+
+assert_safe_vault_path_text "$vault_path"
+
+plugin_root="$vault_path/.obsidian/plugins"
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd -- "$script_dir/.." && pwd)"
 
 assert_regular_directory() {
   local candidate="$1"

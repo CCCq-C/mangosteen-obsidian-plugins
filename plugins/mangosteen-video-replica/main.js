@@ -1928,6 +1928,9 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
   migrationPlanText(plan, title) {
     const capability = this.migrationFs().capability;
     const execution = capability.available ? `执行状态：可用（${capability.name}）` : `执行状态：不可用（${capability.code}）— ${capability.reason}`;
+    const nextStep = capability.available
+      ? "确认后才会执行；不会永久删除旧文件。"
+      : "当前为只读预览；当前不可执行，不会进入执行确认。";
     return [
       title,
       `目标复制：${plan.counts.files} 个文件，${plan.counts.bytes} 字节`,
@@ -1938,7 +1941,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       `目标：${plan.destination}`,
       `备份：${plan.backupPath}`,
       "源处理：保留原目录；仅记录 cleanupPending，不移动、不删除。",
-      "确认后才会执行；不会永久删除旧文件。",
+      nextStep,
       execution,
     ].join("\n");
   }
@@ -2000,11 +2003,12 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         new Notice("当前项目没有需要整理的旧项目文件。", 6000);
         return false;
       }
-      if (!this.confirmMigrationPlan(this.migrationPlanText(plan, "整理当前视频复刻项目"))) return false;
+      const migrationPlanText = this.migrationPlanText(plan, "整理当前视频复刻项目");
       if (!this.migrationFs().capability.available) {
-        new Notice(`${migrationSafeFs.MIGRATION_SAFE_FS_UNAVAILABLE}：${this.migrationFs().capability.reason}`, 10000);
+        new Notice(migrationPlanText, 10000);
         return false;
       }
+      if (!this.confirmMigrationPlan(migrationPlanText)) return false;
       maintenanceLock = this.acquireProjectMaintenanceLock(plan.projectFolder);
       this.assertProjectMaintenanceLockOwned(maintenanceLock);
       this.assertProjectGenerationIdle(plan.projectFolder);

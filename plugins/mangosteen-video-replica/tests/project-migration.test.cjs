@@ -433,43 +433,55 @@ function memoryAdapters(initial, options = {}) {
   const command = commands.find((item) => item.name === "整理当前视频复刻项目");
   assert.ok(command, "explicit project migration command must be registered");
   let executions = 0;
-  let confirmationText = "";
+  let confirmationCalls = 0;
+  let lockAcquisitions = 0;
   plugin.previewCurrentProjectMigration = () => plan;
   plugin.executeCurrentProjectMigration = async () => { executions += 1; };
-  plugin.acquireProjectMaintenanceLock = () => ({ folder, lockPath: "test-lock", token: "test-token" });
+  plugin.acquireProjectMaintenanceLock = () => {
+    lockAcquisitions += 1;
+    return { folder, lockPath: "test-lock", token: "test-token" };
+  };
   plugin.assertProjectMaintenanceLockOwned = () => true;
   plugin.assertProjectGenerationIdle = () => true;
   plugin.releaseProjectMaintenanceLock = () => {};
   plugin.isProjectMigrationLocked = () => false;
-  plugin.confirmMigrationPlan = (message) => { confirmationText = message; return false; };
+  plugin.confirmMigrationPlan = () => {
+    confirmationCalls += 1;
+    throw new Error("unavailable migration must not ask for execution confirmation");
+  };
+  const noticesBeforeUnavailable = notices.length;
   await command.callback();
-  assert.strictEqual(executions, 0, "previewing or declining must not execute migration");
+  assert.strictEqual(confirmationCalls, 0, "unavailable migration must not enter execution confirmation");
+  assert.strictEqual(lockAcquisitions, 0, "unavailable migration must not acquire the execution lock");
+  assert.strictEqual(executions, 0, "unavailable migration must not execute");
+  const unavailablePreview = notices.slice(noticesBeforeUnavailable).join("\n");
   for (const value of [String(plan.counts.files), String(plan.counts.bytes), String(plan.counts.blocked), String(plan.counts.skipped), plan.destination, plan.backupPath]) {
-    assert.ok(confirmationText.includes(value), `confirmation preview must include ${value}`);
+    assert.ok(unavailablePreview.includes(value), `read-only preview must include ${value}`);
   }
-  assert.match(confirmationText, /保留原目录.*不移动.*不删除/);
-  assert.match(confirmationText, /MIGRATION_SAFE_FS_UNAVAILABLE/);
+  assert.match(unavailablePreview, /保留原目录.*不移动.*不删除/);
+  assert.match(unavailablePreview, /只读预览/);
+  assert.match(unavailablePreview, /当前不可执行/);
+  assert.match(unavailablePreview, /MIGRATION_SAFE_FS_UNAVAILABLE/);
+  assert.doesNotMatch(unavailablePreview, /确认后才会执行/);
   plugin.previewCurrentProjectMigration = () => ({ ...plan, blocked: true, reasons: ["active paid task"], counts: { ...plan.counts, blocked: 1 } });
   plugin.confirmMigrationPlan = () => { throw new Error("blocked plan must not ask for confirmation"); };
   await command.callback();
   assert.strictEqual(executions, 0);
   assert.ok(notices.some((message) => message.includes("active paid task")));
-  let previewCalls = 0;
-  plugin.previewCurrentProjectMigration = () => (++previewCalls === 1
-    ? plan
-    : { ...plan, blocked: true, reasons: ["task became active"], counts: { ...plan.counts, blocked: 1 } });
-  plugin.confirmMigrationPlan = () => true;
-  await command.callback();
-  assert.strictEqual(executions, 0, "the command must revalidate paid-work blockers after confirmation");
-  plugin.previewCurrentProjectMigration = () => plan;
-  plugin.confirmMigrationPlan = () => true;
-  await command.callback();
-  assert.strictEqual(executions, 0, "production execution must fail closed before lock or migration work");
-  assert.ok(notices.some((message) => message.includes("MIGRATION_SAFE_FS_UNAVAILABLE")));
   plugin.migrationSafeFs = createSafeMigrationFs({
     vaultRoot: path.resolve(__dirname, "../../.."),
     descriptorRelativeFs: testDescriptorRelativeFs(),
   });
+  let previewCalls = 0;
+  let confirmationText = "";
+  plugin.previewCurrentProjectMigration = () => (++previewCalls === 1
+    ? plan
+    : { ...plan, blocked: true, reasons: ["task became active"], counts: { ...plan.counts, blocked: 1 } });
+  plugin.confirmMigrationPlan = (message) => { confirmationText = message; return true; };
+  await command.callback();
+  assert.strictEqual(executions, 0, "the command must revalidate paid-work blockers after confirmation");
+  assert.match(confirmationText, /确认后才会执行/);
+  assert.doesNotMatch(confirmationText, /当前不可执行/);
   const metadataOnlyFixture = fixture({
     project: { ...base.input.project, shots: [] },
     request: { ...base.input.request, shots: [] },
