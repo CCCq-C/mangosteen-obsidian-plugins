@@ -11,10 +11,14 @@
 ## Organized media cockpit release gate (2026-10-12)
 
 - Release versions: `mangosteen-image` 5.3.27, `mangosteen-video` 5.3.25, and `mangosteen-video-replica` 1.2.0.
-- Source regression: all 27 plugin test files passed after the deployment contract rejected vault paths containing a symlink in any user-supplied path component.
+- Source and installed regressions: all 27 plugin test files passed; both deployment-script tests passed; the source/installed allow-list hashes matched 60/60.
+- The real active-generation gate returned `ACTIVE 0 []` immediately before deployment. A fresh pre-sync backup was saved at `/Users/ziyan/ObsidianVaults/.obsidian/mangosteen-plugin-backups/20261012T111416+0800-591577fc`.
+- Obsidian 1.14.4 was reloaded after those gates passed. The existing 10-shot project reopened as 10/10 complete; 山竹出图 and 山竹视频 both opened and loaded account balance plus model choices without a plugin-load error.
+- The cockpit was visually checked at 1199 px, 719 px, and 358 px content widths without horizontal overflow. The queue collapses to its compact selector at the narrower widths.
+- Queued and processing shots now share one lock rule in the ViewModel, UI, and save boundary; non-queued shots remain selectable and editable. The active-run disabled state for “整理当前项目” is regression-tested, but no live active task was created solely to exercise that state.
 - Migration execution remains **fail-closed**. The current Obsidian Node runtime does not provide a vetted descriptor-relative `openat/*at` filesystem capability, so migration is limited to read-only preview and must not be described as executable offline migration.
 - No old file was moved or reorganized. Existing projects remain readable without automatic migration.
-- No paid image or video generation acceptance was run for this release; Obsidian reload and visual acceptance remain pending.
+- No paid image or video generation acceptance was run for this release. The one-shot billed acceptance remains pending explicit user cost approval.
 
 ## Live outputs
 
