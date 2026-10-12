@@ -8,6 +8,14 @@
 - One bounded H3 acceptance rerun also reached `completed` after sanitized request-shape persistence was enabled.
 - No source-video screenshot was used as a generation reference.
 
+## Organized media cockpit release gate (2026-10-12)
+
+- Release versions: `mangosteen-image` 5.3.27, `mangosteen-video` 5.3.25, and `mangosteen-video-replica` 1.2.0.
+- Source regression: all 27 plugin test files passed after the deployment contract rejected vault paths containing a symlink in any user-supplied path component.
+- Migration execution remains **fail-closed**. The current Obsidian Node runtime does not provide a vetted descriptor-relative `openat/*at` filesystem capability, so migration is limited to read-only preview and must not be described as executable offline migration.
+- No old file was moved or reorganized. Existing projects remain readable without automatic migration.
+- No paid image or video generation acceptance was run for this release; Obsidian reload and visual acceptance remain pending.
+
 ## Live outputs
 
 | Model | Requested | Returned media | Platform cost | Vault output |

@@ -9,10 +9,30 @@ const script = path.join(repoRoot, "scripts/sync-plugin-code-to-vault.sh");
 const temporaryRoots = [];
 const temporary = (prefix) => {
   const result = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
-  temporaryRoots.push(result);
-  return result;
+  const physicalResult = fs.realpathSync(result);
+  temporaryRoots.push(physicalResult);
+  return physicalResult;
 };
 const run = (vault) => spawnSync("bash", [script, vault], { cwd: repoRoot, encoding: "utf8" });
+
+function snapshotTree(root) {
+  const entries = [];
+  const visit = (current, relative = ".") => {
+    const stat = fs.lstatSync(current);
+    if (stat.isSymbolicLink()) {
+      entries.push([relative, "symlink", fs.readlinkSync(current)]);
+      return;
+    }
+    if (stat.isDirectory()) {
+      entries.push([relative, "directory"]);
+      for (const name of fs.readdirSync(current).sort()) visit(path.join(current, name), path.join(relative, name));
+      return;
+    }
+    entries.push([relative, "file", fs.readFileSync(current).toString("base64")]);
+  };
+  visit(root);
+  return entries;
+}
 
 function attackFixture() {
   const vault = temporary("mangosteen-sync-attack-vault-");
@@ -37,7 +57,7 @@ try {
   fs.mkdirSync(target, { recursive: true });
   fs.writeFileSync(path.join(target, "user-owned-sentinel.txt"), "keep");
   const sync = run(vault);
-  assert.strictEqual(sync.status, 0, sync.stderr || sync.stdout);
+  assert.strictEqual(sync.status, 0, `ordinary non-symlink vault must sync\n${sync.stderr || sync.stdout}`);
   const sharedRuntime = path.join(pluginRoot, "migration-safe-fs.cjs");
   assert(fs.lstatSync(sharedRuntime).isFile() && !fs.lstatSync(sharedRuntime).isSymbolicLink(), "missing regular shared migration runtime");
   assert.strictEqual(fs.readFileSync(sharedRuntime, "utf8"), fs.readFileSync(path.join(repoRoot, "plugins/migration-safe-fs.cjs"), "utf8"));
@@ -45,7 +65,7 @@ try {
     "main.js", "replica-core.cjs", "replica-cli.cjs", "replica-editor.cjs", "replica-ui-state.cjs",
     "replica-workbench.cjs", "shot-timeline.cjs", "visual-style.cjs", "tests/plugin-load.test.cjs",
     "tests/replica-editor.test.cjs", "tests/replica-ui-state.test.cjs", "tests/replica-workbench.test.cjs",
-    "tests/visual-style.test.cjs",
+    "replica-cockpit.cjs", "tests/replica-cockpit.test.cjs", "tests/visual-style.test.cjs",
   ]) assert(fs.lstatSync(path.join(target, file)).isFile(), `missing synced allowlist file: ${file}`);
   assert.strictEqual(fs.readFileSync(path.join(target, "user-owned-sentinel.txt"), "utf8"), "keep", "sync must not delete user files");
   fs.writeFileSync(path.join(target, "main.js"), "stale copy");
@@ -79,6 +99,27 @@ try {
     fs.mkdirSync(root, { recursive: true });
     fs.symlinkSync(path.join(outside, "sentinel.txt"), path.join(root, "migration-safe-fs.cjs"));
   });
+
+  {
+    const suppliedPathRoot = temporary("mangosteen-sync-supplied-path-");
+    const outside = temporary("mangosteen-sync-ancestor-outside-");
+    const externalVault = path.join(outside, "vault");
+    const externalTarget = path.join(externalVault, ".obsidian/plugins/mangosteen-image/main.js");
+    fs.mkdirSync(path.dirname(externalTarget), { recursive: true });
+    fs.writeFileSync(path.join(outside, "sentinel.txt"), "outside sentinel");
+    fs.writeFileSync(externalTarget, "external target must stay unchanged");
+    const before = snapshotTree(outside);
+    const ancestorLink = path.join(suppliedPathRoot, "linked-ancestor");
+    fs.symlinkSync(outside, ancestorLink, "dir");
+
+    const result = run(path.join(ancestorLink, "vault"));
+
+    assert.notStrictEqual(result.status, 0, `vault path with a symlink ancestor must fail\n${result.stdout}\n${result.stderr}`);
+    assert.match(result.stderr, /symbolic link/, "ancestor-symlink refusal must state the cause");
+    assert.strictEqual(fs.readFileSync(path.join(outside, "sentinel.txt"), "utf8"), "outside sentinel");
+    assert.strictEqual(fs.readFileSync(externalTarget, "utf8"), "external target must stay unchanged");
+    assert.deepStrictEqual(snapshotTree(outside), before, "ancestor-symlink refusal must not change any external file or directory");
+  }
 } finally {
   for (const root of temporaryRoots.reverse()) fs.rmSync(root, { recursive: true, force: true });
 }

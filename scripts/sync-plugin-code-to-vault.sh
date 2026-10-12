@@ -25,6 +25,33 @@ assert_regular_directory() {
   [[ -d "$candidate" ]] || fail_sync "directory is missing or not regular: $candidate"
 }
 
+assert_no_symlink_components() {
+  local supplied="$1"
+  local candidate current component
+  if [[ "$supplied" == /* ]]; then
+    candidate="$supplied"
+  else
+    candidate="$PWD/$supplied"
+  fi
+  current="/"
+  IFS='/' read -r -a components <<< "$candidate"
+  for component in "${components[@]}"; do
+    case "$component" in
+      ""|.) continue ;;
+      ..)
+        [[ "$current" == "/" ]] || current="$(dirname -- "$current")"
+        continue
+        ;;
+    esac
+    if [[ "$current" == "/" ]]; then
+      current="/$component"
+    else
+      current="$current/$component"
+    fi
+    [[ ! -L "$current" ]] || fail_sync "vault path contains a symbolic link component: $current"
+  done
+}
+
 assert_directory_chain() {
   local base="$1"
   local target="$2"
@@ -111,7 +138,7 @@ safe_copy_file() {
   [[ ! -L "$destination" && -f "$destination" ]] || fail_sync "destination is not a regular file after copy: $destination"
 }
 
-[[ ! -L "$vault_path" ]] || fail_sync "vault path is a symbolic link: $vault_path"
+assert_no_symlink_components "$vault_path"
 assert_regular_directory "$vault_path"
 assert_regular_directory "$vault_path/.obsidian"
 assert_regular_directory "$plugin_root"
