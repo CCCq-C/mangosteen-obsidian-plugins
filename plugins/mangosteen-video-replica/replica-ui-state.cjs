@@ -1,3 +1,5 @@
+const { deriveCockpitModel } = require("./replica-cockpit-model.cjs");
+
 function plainObject(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   const prototype = Object.getPrototypeOf(value);
@@ -70,17 +72,42 @@ function errorStatus(status) {
   return status === "failed" || status === "completed_with_errors" || /_failed$|_error$/.test(text(status));
 }
 
+function activeRunQueueShots(activeRun) {
+  const run = plainObject(activeRun);
+  const shots = plainObject(run.shots);
+  const queue = Array.isArray(run.queue) ? run.queue : Object.keys(shots);
+  return queue.map((id) => {
+    const shot = plainObject(shots[String(id)]);
+    const status = text(shot.status);
+    return {
+      ...plainObject(shot.confirmedPayload),
+      ...shot,
+      id: text(shot.id) || String(id),
+      status: ["queued", "completed", "failed", "stopped"].includes(status) ? status : "processing",
+      error: typeof shot.error === "object" && shot.error ? text(shot.error.message) : text(shot.error),
+    };
+  });
+}
+
 function deriveWorkbenchState(options = {}) {
   const input = plainObject(options);
   const project = plainObject(input.project);
   const request = plainObject(input.request);
+  const suppliedActiveRun = plainObject(input.activeRun);
+  const suppliedCurrentRun = plainObject(input.currentRun);
+  const activeRun = suppliedActiveRun.runId
+    ? suppliedActiveRun
+    : suppliedCurrentRun.runId
+      ? suppliedCurrentRun
+      : {};
+  const hasActiveRun = Boolean(activeRun.runId);
   const loadedGenerationState = plainObject(input.generationState);
   const generationQueue = plainObject(input.generationQueue);
   const requestMtimeMs = typeof input.requestMtimeMs === "number" ? input.requestMtimeMs : Number.NaN;
   const generationRequestMtimeMs = typeof loadedGenerationState.requestMtimeMs === "number"
     ? loadedGenerationState.requestMtimeMs
     : Number.NaN;
-  const generationState = Number.isFinite(requestMtimeMs)
+  const generationState = !hasActiveRun && Number.isFinite(requestMtimeMs)
     && Number.isFinite(generationRequestMtimeMs)
     && generationRequestMtimeMs === requestMtimeMs
     ? loadedGenerationState
@@ -88,25 +115,36 @@ function deriveWorkbenchState(options = {}) {
   const empty = Object.keys(project).length === 0;
   const shots = records(project.shots);
   const processing = generationState.status === "processing";
-  const queueShots = records(generationQueue.shots);
-  const lockedShotIds = queueShots
-    .filter((shot) => shot.status === "queued" || shot.status === "processing")
-    .map((shot) => text(shot.id));
-  const queueActive = lockedShotIds.length > 0
-    && ["idle", "processing"].includes(text(generationQueue.status));
-  const queueKnown = Object.keys(generationQueue).length > 0;
-  const locked = empty || request.confirmed === true || processing
-    || (!queueKnown && !generationState.status && project.status === "generating");
+  const cockpit = deriveCockpitModel({
+    project,
+    draft: request,
+    activeRun,
+    selectedShotId: input.selectedShotId,
+    nowMs: input.nowMs,
+  });
+  const queueShots = hasActiveRun ? activeRunQueueShots(activeRun) : records(generationQueue.shots);
+  const lockedShotIds = hasActiveRun
+    ? cockpit.rail.items.filter((shot) => shot.locked).map((shot) => shot.id)
+    : queueShots
+      .filter((shot) => shot.status === "queued" || shot.status === "processing")
+      .map((shot) => text(shot.id));
+  const queueActive = hasActiveRun
+    ? ["queued", "processing", "stopping"].includes(text(activeRun.status))
+    : lockedShotIds.length > 0 && ["idle", "processing"].includes(text(generationQueue.status));
+  const queueKnown = hasActiveRun || Object.keys(generationQueue).length > 0;
+  const locked = empty || (!hasActiveRun && (request.confirmed === true || processing
+    || (!queueKnown && !generationState.status && project.status === "generating")));
   const requestedSettings = plainObject(request.settings);
   const processingQueueShot = queueShots.find((shot) => shot.status === "processing");
   const processingProjectShot = processingQueueShot
     ? shots.find((shot) => text(shot.id) === text(processingQueueShot.id))
     : null;
-  const queueStep = processingQueueShot
+  const legacyQueueStep = processingQueueShot
     ? `镜头 ${text(processingQueueShot.id, "-")} · ${text(processingProjectShot?.status, "生成中")}`
     : queueShots.some((shot) => shot.status === "queued")
       ? "等待生成下一个镜头"
       : "";
+  const queueStep = hasActiveRun ? cockpit.header.currentText : legacyQueueStep;
   const startedAtMs = Date.parse(text(generationState.startedAt) || text(generationQueue.startedAt) || text(generationQueue.createdAt));
   const currentNowMs = Number.isFinite(input.nowMs) ? input.nowMs : Date.now();
   const elapsedMs = Number.isFinite(startedAtMs)
@@ -121,29 +159,41 @@ function deriveWorkbenchState(options = {}) {
   const authoritativeStatusText = text(generationState.statusText)
     || (["stopped", "failed"].includes(generationState.status) ? stateError : "");
   const progressProject = generationState.status ? { ...project, status: generationState.status } : project;
+  const progress = hasActiveRun
+    ? {
+      percent: cockpit.monitor.progress,
+      indeterminate: queueActive && cockpit.monitor.progress === null,
+      label: "分镜队列",
+    }
+    : calculateStageProgress({ project: progressProject, request, generationState, generationQueue });
+  const activeError = hasActiveRun ? cockpit.monitor.error?.message || "" : "";
+  const activeModel = hasActiveRun ? cockpit.monitor.model : "";
+  const activeElapsedMs = hasActiveRun ? cockpit.monitor.elapsedMs : elapsedMs;
+  const queueStatus = hasActiveRun ? text(activeRun.status) : text(generationQueue.status);
+  const stopRequested = hasActiveRun ? activeRun.stopRequested === true : generationQueue.stopRequested === true;
 
   return {
     empty,
     folder: text(project.folder),
     title: text(project.title),
-    status: text(queueActive ? generationQueue.status : generationState.status || project.status),
-    statusText: queueStep || authoritativeStatusText || text(project.statusText),
+    status: text(hasActiveRun ? activeRun.status : queueActive ? generationQueue.status : generationState.status || project.status),
+    statusText: queueStep || (hasActiveRun ? activeError : authoritativeStatusText) || text(project.statusText),
     locked,
     canConfirm: !locked && project.status === "analysis_ready" && request.confirmed === false,
     canGenerate: !locked
-      && generationQueue.stopRequested !== true
+      && !stopRequested
       && request.confirmed !== true
       && ["analysis_ready", "generating", "completed", "completed_with_errors"].includes(text(project.status)),
-    canStop: (queueActive && generationQueue.stopRequested !== true)
+    canStop: (queueActive && !stopRequested)
       || (processing && !text(generationState.stopRequestedAt)),
-    queueStatus: text(generationQueue.status),
+    queueStatus,
     queueShots,
     lockedShotIds,
-    progress: calculateStageProgress({ project: progressProject, request, generationState, generationQueue }),
+    progress,
     current: {
       step: queueStep || text(generationState.currentStep),
-      model: text(generationState.model || project.videoModel || requestedSettings.videoModel || project.imageModel || requestedSettings.imageModel),
-      elapsedMs,
+      model: text(activeModel || generationState.model || project.videoModel || requestedSettings.videoModel || project.imageModel || requestedSettings.imageModel),
+      elapsedMs: activeElapsedMs,
     },
     assets: {
       character: Object.keys(characterAsset).length ? { ...characterAsset } : null,
@@ -155,7 +205,8 @@ function deriveWorkbenchState(options = {}) {
       finalVideoPath: text(project.finalVideoPath),
       concatError: text(project.concatError),
     },
-    error: stateError || projectError || shotError || null,
+    error: activeError || stateError || projectError || shotError || null,
+    cockpit,
   };
 }
 
@@ -180,6 +231,7 @@ function stateSignature(viewModel) {
     shots: state.shots,
     output: state.output,
     error: state.error,
+    cockpit: state.cockpit,
   });
 }
 

@@ -1,0 +1,187 @@
+const assert = require("assert");
+
+const { deriveCockpitModel } = require("../replica-cockpit-model.cjs");
+
+const nowMs = Date.parse("2026-10-11T15:07:00.000Z");
+const draft = {
+  title: "九镜头样片",
+  shots: Array.from({ length: 9 }, (_, index) => {
+    const id = String(index + 1).padStart(3, "0");
+    return {
+      id,
+      title: `镜头 ${id}`,
+      references: [`${id}-reference.png`],
+      timeline: [{ start: 0, end: 4, action: `动作 ${id}`, dialogue: "", performance: "自然", camera: "中景", environment: "客厅" }],
+      effectiveVideoPrompt: `最终提示词 ${id}`,
+    };
+  }),
+};
+const project = {
+  title: "九镜头样片",
+  videoModel: "旧模型不得覆盖",
+  shots: draft.shots.map((shot, index) => ({
+    id: shot.id,
+    status: index < 7 ? "已完成" : "等待生成",
+    ...(index < 7 ? { videoPath: `${shot.id}.mp4` } : {}),
+  })),
+};
+const activeRun = {
+  runId: "run-8",
+  status: "processing",
+  activeShotId: "008",
+  startedAt: "2026-10-11T15:00:00.000Z",
+  queue: ["008", "009"],
+  shots: {
+    "008": {
+      id: "008",
+      status: "video-processing",
+      stage: "provider-generation",
+      taskId: "task_xxx",
+      progress: 68,
+      elapsedMs: 402000,
+      paidTaskSubmitted: true,
+      generationContext: { settings: { videoModel: "MiniMax-H3" } },
+      confirmedPayload: { ...draft.shots[7], effectiveVideoPrompt: "已确认提示词 008" },
+    },
+    "009": {
+      id: "009",
+      status: "queued",
+      stage: "queued",
+      taskId: null,
+      progress: null,
+      paidTaskSubmitted: false,
+      generationContext: { settings: { videoModel: "MiniMax-H3" } },
+      confirmedPayload: draft.shots[8],
+    },
+  },
+};
+const activeRunSnapshot = JSON.stringify(activeRun);
+
+const model = deriveCockpitModel({ project, draft, activeRun, selectedShotId: "008", nowMs });
+assert.deepStrictEqual(Object.keys(model), ["header", "rail", "editor", "monitor"]);
+assert.strictEqual(model.rail.items[7].status, "processing");
+assert.strictEqual(model.editor.locked, true);
+assert.strictEqual(model.monitor.taskId, "task_xxx");
+assert.strictEqual(model.monitor.progress, 68);
+assert.deepStrictEqual(model.monitor.stages.map((item) => item.status), ["done", "done", "done", "active", "waiting"]);
+assert.strictEqual(model.rail.items[8].paidTaskSubmitted, false);
+assert.deepStrictEqual(model.header, {
+  title: "九镜头样片",
+  completed: 7,
+  total: 9,
+  currentText: "镜头 008 · 生成中",
+  percent: 68,
+});
+assert.strictEqual(model.editor.effectivePrompt, "已确认提示词 008");
+assert.deepStrictEqual(model.editor.references, ["008-reference.png"]);
+assert.deepStrictEqual(model.editor.timeline, draft.shots[7].timeline);
+assert.strictEqual(model.monitor.model, "MiniMax-H3");
+assert.strictEqual(model.monitor.elapsedMs, 402000, "persisted elapsed time is authoritative when present");
+
+const editableQueued = deriveCockpitModel({ project, draft, activeRun, selectedShotId: "009", nowMs });
+assert.strictEqual(editableQueued.editor.locked, false, "an unpaid queued shot must remain editable");
+assert.strictEqual(editableQueued.editor.lockReason, null);
+assert.strictEqual(editableQueued.rail.items[8].locked, false);
+
+const noNumericProgress = deriveCockpitModel({
+  project,
+  draft,
+  activeRun: {
+    ...activeRun,
+    shots: { ...activeRun.shots, "008": { ...activeRun.shots["008"], progress: undefined } },
+  },
+  selectedShotId: "008",
+  nowMs,
+});
+assert.strictEqual(noNumericProgress.monitor.progress, null, "unknown provider progress must not be invented");
+assert.strictEqual(noNumericProgress.header.percent, null);
+
+const failed = deriveCockpitModel({
+  project,
+  draft,
+  activeRun: {
+    ...activeRun,
+    status: "failed",
+    activeShotId: null,
+    shots: {
+      ...activeRun.shots,
+      "008": {
+        ...activeRun.shots["008"],
+        status: "failed",
+        error: { message: "平台查询失败", action: "稍后继续查询原任务" },
+      },
+    },
+  },
+  selectedShotId: "008",
+  nowMs,
+});
+assert.deepStrictEqual(failed.monitor.error, {
+  message: "平台查询失败",
+  nextAction: "稍后继续查询原任务",
+});
+assert.strictEqual(failed.editor.locked, false, "terminal failures must unlock editing");
+
+for (const [status, patch, expectedStatus, expectedLocked] of [
+  ["submission-reserved", { submissionReservation: { reservationId: "reservation-1" } }, "reserved", true],
+  ["recovery-pending", { paidTaskSubmitted: true, taskId: "task-recovery" }, "recovery-pending", true],
+  ["pending", { paidTaskSubmitted: false, taskId: null }, "pending", false],
+]) {
+  const state = deriveCockpitModel({
+    project,
+    draft,
+    activeRun: {
+      ...activeRun,
+      activeShotId: "008",
+      shots: { ...activeRun.shots, "008": { ...activeRun.shots["008"], status, ...patch } },
+    },
+    selectedShotId: "008",
+    nowMs,
+  });
+  assert.strictEqual(state.rail.items[7].status, expectedStatus);
+  assert.strictEqual(state.editor.locked, expectedLocked);
+}
+
+const legacyProject = {
+  title: "旧项目",
+  shots: [{
+    id: "1",
+    title: "旧镜头",
+    status: "正在生成视频",
+    videoTaskId: "legacy-task",
+    videoTaskProgress: 33,
+    plot: "人物举起手机",
+    dialogue: "你好",
+    camera: "中景推进",
+    environment: "摄影棚",
+    videoPrompt: "旧版完整提示词",
+    referenceImagePaths: ["人物.png", "场景.png"],
+  }],
+};
+const legacy = deriveCockpitModel({ project: legacyProject, selectedShotId: "1", nowMs });
+assert.strictEqual(legacy.rail.items[0].status, "processing");
+assert.strictEqual(legacy.editor.shot.id, "1");
+assert.strictEqual(legacy.editor.effectivePrompt, "旧版完整提示词");
+assert.deepStrictEqual(legacy.editor.references, ["人物.png", "场景.png"]);
+assert.deepStrictEqual(legacy.editor.timeline, [{
+  start: 0,
+  end: null,
+  action: "人物举起手机",
+  dialogue: "你好",
+  performance: "",
+  camera: "中景推进",
+  environment: "摄影棚",
+}]);
+assert.strictEqual(legacy.monitor.taskId, "legacy-task");
+assert.strictEqual(legacy.monitor.progress, 33);
+
+assert.deepStrictEqual(project.shots[7], {
+  id: "008",
+  status: "等待生成",
+}, "derivation must not mutate project data");
+assert.strictEqual(JSON.stringify(activeRun), activeRunSnapshot, "derivation must not mutate active-run data");
+assert.deepStrictEqual(
+  Object.keys(require("../replica-cockpit-model.cjs")).sort(),
+  ["deriveCockpitModel"],
+);
+
+console.log("replica-cockpit-model: ok");

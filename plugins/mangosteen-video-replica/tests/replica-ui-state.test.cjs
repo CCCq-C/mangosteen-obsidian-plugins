@@ -27,6 +27,33 @@ assert.deepStrictEqual(empty, {
   shots: [],
   output: { finalVideoPath: "", concatError: "" },
   error: null,
+  cockpit: {
+    header: { title: "", completed: 0, total: 0, currentText: "", percent: null },
+    rail: { items: [] },
+    editor: {
+      shot: null,
+      locked: true,
+      lockReason: "请选择镜头",
+      references: [],
+      timeline: [],
+      effectivePrompt: "",
+    },
+    monitor: {
+      status: "idle",
+      model: "",
+      taskId: null,
+      elapsedMs: 0,
+      progress: null,
+      stages: [
+        { id: "references", label: "参考资产", status: "waiting" },
+        { id: "first-frame", label: "首帧", status: "waiting" },
+        { id: "last-frame", label: "尾帧", status: "waiting" },
+        { id: "provider", label: "视频生成", status: "waiting" },
+        { id: "saving", label: "保存成片", status: "waiting" },
+      ],
+      error: null,
+    },
+  },
 });
 
 const ready = deriveWorkbenchState({
@@ -69,6 +96,79 @@ assert.strictEqual(queued.canGenerate, true, "unlocked shots must remain selecta
 assert.strictEqual(queued.canStop, true);
 assert.deepStrictEqual(queued.progress, { percent: 68, indeterminate: true, label: "分镜队列" });
 assert.deepStrictEqual(queued.current, { step: "镜头 001 · 正在生成产品参考图", model: "MiniMax-H3", elapsedMs: 120000 });
+
+const authoritativeActiveRun = deriveWorkbenchState({
+  project: {
+    folder: "山竹视频复刻/活动运行",
+    title: "活动运行",
+    status: "generating",
+    statusText: "旧项目状态",
+    shots: [{ id: "008", title: "第八镜", status: "正在生成视频" }, { id: "009", title: "第九镜", status: "等待生成" }],
+  },
+  request: {
+    confirmed: false,
+    settings: { videoModel: "旧请求模型" },
+    shots: [{ id: "008", title: "第八镜" }, { id: "009", title: "第九镜" }],
+  },
+  requestMtimeMs: 400,
+  generationState: {
+    status: "failed",
+    requestMtimeMs: 400,
+    currentStep: "旧状态不得覆盖",
+    error: "旧错误不得覆盖",
+  },
+  activeRun: {
+    runId: "run-authoritative",
+    status: "processing",
+    activeShotId: "008",
+    startedAt: "2026-10-11T00:00:00Z",
+    queue: ["008", "009"],
+    shots: {
+      "008": {
+        id: "008",
+        status: "video-processing",
+        stage: "provider-generation",
+        taskId: "task-authoritative",
+        progress: 68,
+        elapsedMs: 120000,
+        paidTaskSubmitted: true,
+        generationContext: { settings: { videoModel: "MiniMax-H3" } },
+      },
+      "009": { id: "009", status: "queued", stage: "queued", progress: null, paidTaskSubmitted: false },
+    },
+  },
+  selectedShotId: "008",
+  nowMs,
+});
+assert.strictEqual(authoritativeActiveRun.status, "processing", "activeRun must override legacy generation state");
+assert.strictEqual(authoritativeActiveRun.statusText, "镜头 008 · 生成中");
+assert.strictEqual(authoritativeActiveRun.error, null);
+assert.deepStrictEqual(authoritativeActiveRun.lockedShotIds, ["008"]);
+assert.strictEqual(authoritativeActiveRun.locked, false, "an active run must not lock the whole draft");
+assert.deepStrictEqual(authoritativeActiveRun.progress, { percent: 68, indeterminate: false, label: "分镜队列" });
+assert.deepStrictEqual(authoritativeActiveRun.current, { step: "镜头 008 · 生成中", model: "MiniMax-H3", elapsedMs: 120000 });
+assert.strictEqual(authoritativeActiveRun.cockpit.monitor.taskId, "task-authoritative");
+assert.strictEqual(authoritativeActiveRun.cockpit.rail.items[1].locked, false, "unpaid queued shots must stay editable");
+
+const activeRunWithoutProgress = deriveWorkbenchState({
+  project: {
+    title: "无数值进度",
+    status: "generating",
+    shots: [{ id: "008", status: "正在生成视频" }],
+  },
+  request: { confirmed: false, shots: [{ id: "008" }] },
+  activeRun: {
+    runId: "run-no-progress",
+    status: "processing",
+    activeShotId: "008",
+    queue: ["008"],
+    shots: { "008": { id: "008", status: "video-processing", stage: "provider-generation", progress: null } },
+  },
+  selectedShotId: "008",
+  nowMs,
+});
+assert.deepStrictEqual(activeRunWithoutProgress.progress, { percent: null, indeterminate: true, label: "分镜队列" });
+assert.strictEqual(activeRunWithoutProgress.cockpit.monitor.progress, null);
 
 const assetsReady = deriveWorkbenchState({
   project: {

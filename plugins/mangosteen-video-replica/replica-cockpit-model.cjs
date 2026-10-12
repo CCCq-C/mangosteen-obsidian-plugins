@@ -1,0 +1,262 @@
+const ACTIVE_RUN_STATUSES = new Set(["queued", "processing", "stopping"]);
+const TERMINAL_STATUSES = new Set(["completed", "failed", "stopped"]);
+
+function plainObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+function clone(value) {
+  if (Array.isArray(value)) return value.map(clone);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, clone(item)]));
+}
+
+function text(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function numericProgress(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 100
+    ? value
+    : null;
+}
+
+function shotId(shot, index) {
+  return text(shot?.id) || String(index + 1).padStart(3, "0");
+}
+
+function runShots(activeRun) {
+  const source = activeRun?.shots;
+  if (Array.isArray(source)) return new Map(source.map((shot, index) => [shotId(shot, index), plainObject(shot)]));
+  if (!source || typeof source !== "object") return new Map();
+  return new Map(Object.entries(source).map(([id, shot]) => [text(shot?.id) || id, plainObject(shot)]));
+}
+
+function normalizedStatus(runShot, projectShot, isActiveShot) {
+  const source = text(runShot.status) || text(projectShot.status);
+  const value = source.toLowerCase();
+  if (value === "completed" || source === "已完成" || text(projectShot.videoPath)) return "completed";
+  if (value === "failed" || source === "失败" || /_failed$|_error$/.test(value)) return "failed";
+  if (value === "stopped") return "stopped";
+  if (runShot.submissionReservation || value === "submission-reserved" || value === "reserved") return "reserved";
+  if (value === "recovery-pending" || value === "recovery") return "recovery-pending";
+  if (["queued", "pending", "waiting", "idle"].includes(value) || source === "等待生成") return "pending";
+  if (isActiveShot || [
+    "processing", "preparing", "image-processing", "reference-processing", "video-submitting",
+    "video-submitted", "video-processing", "saving", "generating",
+  ].includes(value) || /^正在/.test(source)) return "processing";
+  return "ready";
+}
+
+function paidTaskSubmitted(runShot, projectShot) {
+  return runShot.paidTaskSubmitted === true
+    || Boolean(text(runShot.taskId) || text(projectShot.videoTaskId) || runShot.submissionReservation);
+}
+
+function lockState(status, paid, isActiveShot) {
+  if (TERMINAL_STATUSES.has(status) || status === "ready" || status === "pending") {
+    if (status === "pending" && paid) {
+      return { locked: true, lockReason: "付费任务已保留，完成核对前不能编辑" };
+    }
+    return { locked: false, lockReason: null };
+  }
+  if (status === "reserved" || status === "recovery-pending" || paid) {
+    return { locked: true, lockReason: "付费任务已保留，完成核对前不能编辑" };
+  }
+  if (status === "processing" && isActiveShot) {
+    return { locked: true, lockReason: "当前镜头正在生成" };
+  }
+  return { locked: false, lockReason: null };
+}
+
+function normalizedError(error, status, paid) {
+  if (!error && status !== "failed" && status !== "recovery-pending") return null;
+  const source = plainObject(error);
+  const message = text(source.message) || text(error) || (status === "failed" ? "镜头生成失败" : "任务状态需要核对");
+  const nextAction = text(source.action) || text(source.nextAction)
+    || (paid ? "检查供应商任务记录并继续查询原任务" : "检查镜头设置后重试");
+  return { message, nextAction };
+}
+
+function legacyTimeline(shot) {
+  if (Array.isArray(shot.timeline)) return clone(shot.timeline);
+  const hasLegacyFields = ["plot", "dialogue", "voiceDirection", "camera", "environment"]
+    .some((key) => text(shot[key]));
+  if (!hasLegacyFields) return [];
+  const duration = Number(shot.duration);
+  return [{
+    start: 0,
+    end: Number.isFinite(duration) && duration >= 0 ? duration : null,
+    action: text(shot.plot),
+    dialogue: text(shot.dialogue),
+    performance: text(shot.performance) || text(shot.voiceDirection),
+    camera: text(shot.camera),
+    environment: text(shot.environment),
+  }];
+}
+
+function shotReferences(shot, project) {
+  if (Array.isArray(shot.references)) return clone(shot.references);
+  if (Array.isArray(shot.referenceImagePaths)) return clone(shot.referenceImagePaths);
+  const references = [];
+  const characterPath = text(project.characterAsset?.imagePath);
+  if (characterPath) references.push(characterPath);
+  const scene = (Array.isArray(project.sceneAssets) ? project.sceneAssets : [])
+    .find((item) => text(item?.id) === text(shot.sceneId));
+  if (text(scene?.imagePath)) references.push(text(scene.imagePath));
+  const productIds = new Set(Array.isArray(shot.productIds) ? shot.productIds.map(String) : []);
+  for (const product of Array.isArray(project.productAssets) ? project.productAssets : []) {
+    if (productIds.has(String(product?.id)) && text(product?.imagePath)) references.push(text(product.imagePath));
+  }
+  return references;
+}
+
+function effectivePrompt(shot, runShot, locked) {
+  const confirmed = plainObject(runShot.confirmedPayload);
+  const source = locked ? confirmed : shot;
+  return text(source.effectiveVideoPrompt) || text(source.videoPromptOverride) || text(source.videoPrompt)
+    || text(shot.effectiveVideoPrompt) || text(shot.videoPromptOverride) || text(shot.videoPrompt);
+}
+
+function stageIndex(stage) {
+  const value = text(stage).toLowerCase();
+  if (["reference-assets", "preflight"].includes(value)) return 0;
+  if (value === "first-frame") return 1;
+  if (value === "last-frame") return 2;
+  if (["provider-submission", "video-submission", "provider-generation"].includes(value)) return 3;
+  if (value === "saving" || value === "provider-saving") return 4;
+  if (value === "completed") return 4;
+  return -1;
+}
+
+function monitorStages(status, stage) {
+  const items = [
+    { id: "references", label: "参考资产" },
+    { id: "first-frame", label: "首帧" },
+    { id: "last-frame", label: "尾帧" },
+    { id: "provider", label: "视频生成" },
+    { id: "saving", label: "保存成片" },
+  ];
+  if (status === "completed") return items.map((item) => ({ ...item, status: "done" }));
+  const current = stageIndex(stage);
+  return items.map((item, index) => ({
+    ...item,
+    status: current < 0
+      ? "waiting"
+      : index < current
+        ? "done"
+        : index === current
+          ? status === "failed" ? "failed" : "active"
+          : "waiting",
+  }));
+}
+
+function statusLabel(status) {
+  return {
+    completed: "已完成",
+    failed: "生成失败",
+    stopped: "已停止",
+    reserved: "付费任务已保留",
+    "recovery-pending": "待恢复",
+    processing: "生成中",
+    pending: "等待生成",
+    ready: "可编辑",
+  }[status] || "";
+}
+
+function deriveCockpitModel(options = {}) {
+  const input = plainObject(options);
+  const project = plainObject(input.project);
+  const draft = plainObject(input.draft);
+  const activeRun = plainObject(input.activeRun);
+  const draftShots = Array.isArray(draft.shots) ? draft.shots : [];
+  const projectShots = Array.isArray(project.shots) ? project.shots : [];
+  const sourceShots = draftShots.length ? draftShots : projectShots;
+  const projectById = new Map(projectShots.map((shot, index) => [shotId(shot, index), plainObject(shot)]));
+  const activeShots = runShots(activeRun);
+  const activeShotId = text(activeRun.activeShotId);
+
+  const items = sourceShots.map((sourceShot, index) => {
+    const id = shotId(sourceShot, index);
+    const projectShot = projectById.get(id) || {};
+    const shot = { ...clone(projectShot), ...clone(plainObject(sourceShot)), id };
+    const runShot = activeShots.get(id) || {};
+    const isActiveShot = activeShotId === id;
+    const status = normalizedStatus(runShot, projectShot, isActiveShot);
+    const paid = paidTaskSubmitted(runShot, projectShot);
+    const lock = lockState(status, paid, isActiveShot);
+    return {
+      id,
+      title: text(shot.title),
+      status,
+      selected: false,
+      locked: lock.locked,
+      lockReason: lock.lockReason,
+      paidTaskSubmitted: paid,
+      taskId: text(runShot.taskId) || text(projectShot.videoTaskId) || null,
+      progress: numericProgress(runShot.progress ?? projectShot.videoTaskProgress),
+      error: normalizedError(runShot.error || projectShot.error, status, paid),
+      shot,
+      runShot,
+    };
+  });
+
+  const requestedId = text(input.selectedShotId);
+  const selected = items.find((item) => item.id === requestedId)
+    || items.find((item) => item.id === activeShotId)
+    || items[0]
+    || null;
+  if (selected) selected.selected = true;
+
+  const selectedRunShot = plainObject(selected?.runShot);
+  const selectedShot = plainObject(selected?.shot);
+  const selectedStatus = selected?.status || "idle";
+  const selectedPaid = selected?.paidTaskSubmitted === true;
+  const startedAtMs = Date.parse(text(activeRun.startedAt) || text(activeRun.createdAt));
+  const nowMs = Number.isFinite(input.nowMs) ? input.nowMs : Date.now();
+  const persistedElapsedMs = Number(selectedRunShot.elapsedMs);
+  const elapsedMs = Number.isFinite(persistedElapsedMs) && persistedElapsedMs >= 0
+    ? Math.round(persistedElapsedMs)
+    : Number.isFinite(startedAtMs)
+      ? Math.max(0, nowMs - startedAtMs)
+      : 0;
+  const monitorProgress = selected
+    ? numericProgress(selectedRunShot.progress ?? selectedShot.videoTaskProgress)
+    : null;
+  const generationContext = plainObject(selectedRunShot.generationContext);
+  const settings = plainObject(generationContext.settings);
+  const monitorError = normalizedError(selectedRunShot.error || selectedShot.error, selectedStatus, selectedPaid);
+  const completed = items.filter((item) => item.status === "completed").length;
+  const currentText = selected ? `镜头 ${selected.id} · ${statusLabel(selectedStatus)}` : "";
+
+  const railItems = items.map(({ shot, runShot, ...item }) => item);
+  return {
+    header: {
+      title: text(project.title) || text(draft.title),
+      completed,
+      total: items.length,
+      currentText,
+      percent: monitorProgress,
+    },
+    rail: { items: railItems },
+    editor: {
+      shot: selected ? clone(selectedShot) : null,
+      locked: selected ? selected.locked : true,
+      lockReason: selected ? selected.lockReason : "请选择镜头",
+      references: selected ? shotReferences(selectedShot, project) : [],
+      timeline: selected ? legacyTimeline(selectedShot) : [],
+      effectivePrompt: selected ? effectivePrompt(selectedShot, selectedRunShot, selected.locked) : "",
+    },
+    monitor: {
+      status: selectedStatus,
+      model: text(settings.videoModel) || text(activeRun.videoModel) || text(project.videoModel) || text(draft.settings?.videoModel),
+      taskId: selected?.taskId || null,
+      elapsedMs,
+      progress: monitorProgress,
+      stages: monitorStages(selectedStatus, selectedRunShot.stage || selectedShot.stage),
+      error: monitorError,
+    },
+  };
+}
+
+module.exports = { deriveCockpitModel };
