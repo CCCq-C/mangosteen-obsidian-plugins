@@ -170,6 +170,65 @@ const activeRunWithoutProgress = deriveWorkbenchState({
 assert.deepStrictEqual(activeRunWithoutProgress.progress, { percent: null, indeterminate: true, label: "分镜队列" });
 assert.strictEqual(activeRunWithoutProgress.cockpit.monitor.progress, null);
 
+const legacyCurrentRunFailed = deriveWorkbenchState({
+  project: {
+    folder: "山竹视频复刻/旧失败状态",
+    title: "旧失败状态",
+    status: "generating",
+    shots: [{ id: "001", title: "旧镜头", status: "等待生成" }],
+  },
+  request: { confirmed: false, shots: [{ id: "001", title: "旧镜头" }] },
+  currentRun: {
+    runId: "legacy-state-failed",
+    compatibilitySource: "legacy-state",
+    status: "failed",
+    stage: "镜头 001",
+    error: { message: "旧任务失败", action: "检查旧任务记录后重试" },
+    queue: [],
+    shots: {},
+  },
+  selectedShotId: "001",
+  nowMs,
+});
+assert.strictEqual(legacyCurrentRunFailed.status, "failed");
+assert.strictEqual(legacyCurrentRunFailed.statusText, "旧任务失败");
+assert.deepStrictEqual(legacyCurrentRunFailed.current, { step: "镜头 001", model: "", elapsedMs: 0 });
+assert.strictEqual(legacyCurrentRunFailed.error, "旧任务失败");
+assert.strictEqual(legacyCurrentRunFailed.cockpit.monitor.status, "failed");
+assert.deepStrictEqual(legacyCurrentRunFailed.cockpit.monitor.error, {
+  message: "旧任务失败",
+  nextAction: "检查旧任务记录后重试",
+});
+
+const legacyCurrentRunStopped = deriveWorkbenchState({
+  project: {
+    folder: "山竹视频复刻/旧停止状态",
+    title: "旧停止状态",
+    status: "generating",
+    shots: [{ id: "001", title: "旧镜头", status: "等待生成" }],
+  },
+  request: { confirmed: false, shots: [{ id: "001", title: "旧镜头" }] },
+  currentRun: {
+    runId: "legacy-state-stopped",
+    compatibilitySource: "legacy-state",
+    status: "stopped",
+    stage: "镜头 001",
+    error: { message: "用户停止", action: "可重新选择镜头生成" },
+    queue: [],
+    shots: {},
+  },
+  selectedShotId: "001",
+  nowMs,
+});
+assert.strictEqual(legacyCurrentRunStopped.status, "stopped");
+assert.strictEqual(legacyCurrentRunStopped.statusText, "用户停止");
+assert.deepStrictEqual(legacyCurrentRunStopped.current, { step: "镜头 001", model: "", elapsedMs: 0 });
+assert.strictEqual(legacyCurrentRunStopped.error, "用户停止");
+assert.deepStrictEqual(legacyCurrentRunStopped.cockpit.monitor.error, {
+  message: "用户停止",
+  nextAction: "可重新选择镜头生成",
+});
+
 const assetsReady = deriveWorkbenchState({
   project: {
     folder: "山竹视频复刻/资产完成",

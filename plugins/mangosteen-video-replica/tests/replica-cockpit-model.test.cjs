@@ -96,6 +96,46 @@ const noNumericProgress = deriveCockpitModel({
 assert.strictEqual(noNumericProgress.monitor.progress, null, "unknown provider progress must not be invented");
 assert.strictEqual(noNumericProgress.header.percent, null);
 
+const oldCompletedProject = {
+  ...project,
+  shots: project.shots.map((shot) => shot.id === "008" ? {
+    ...shot,
+    status: "已完成",
+    videoPath: "旧成片-008.mp4",
+    videoTaskId: "legacy-task-must-not-leak",
+    videoTaskProgress: 72,
+    error: "旧错误不得覆盖活动运行",
+  } : shot),
+};
+const regeneratingOldShot = deriveCockpitModel({
+  project: oldCompletedProject,
+  draft,
+  activeRun: {
+    ...activeRun,
+    shots: {
+      ...activeRun.shots,
+      "008": {
+        ...activeRun.shots["008"],
+        status: "video-processing",
+        taskId: null,
+        paidTaskSubmitted: false,
+        progress: null,
+        error: null,
+      },
+    },
+  },
+  selectedShotId: "008",
+  nowMs,
+});
+assert.strictEqual(regeneratingOldShot.rail.items[7].status, "processing", "active-run status must override an old videoPath");
+assert.strictEqual(regeneratingOldShot.editor.locked, true, "regenerating an old completed shot must stay locked");
+assert.strictEqual(regeneratingOldShot.rail.items[7].taskId, null, "legacy task IDs must not leak into active-run shots");
+assert.strictEqual(regeneratingOldShot.rail.items[7].paidTaskSubmitted, false, "legacy paid markers must not leak into active-run shots");
+assert.strictEqual(regeneratingOldShot.monitor.progress, null, "an explicit active-run null must override legacy progress");
+assert.strictEqual(regeneratingOldShot.header.percent, null);
+assert.strictEqual(regeneratingOldShot.monitor.error, null, "legacy errors must not leak into active-run shots");
+assert.strictEqual(regeneratingOldShot.header.completed, 7, "the old completed artifact must not relabel the active regeneration");
+
 const failed = deriveCockpitModel({
   project,
   draft,
@@ -120,6 +160,74 @@ assert.deepStrictEqual(failed.monitor.error, {
   nextAction: "稍后继续查询原任务",
 });
 assert.strictEqual(failed.editor.locked, false, "terminal failures must unlock editing");
+
+const legacyStateProject = {
+  title: "旧运行状态",
+  shots: [{ id: "001", title: "旧镜头", status: "等待生成" }],
+};
+const legacyStateDraft = { shots: [{ id: "001", title: "旧镜头" }] };
+const legacyStateFailed = deriveCockpitModel({
+  project: legacyStateProject,
+  draft: legacyStateDraft,
+  activeRun: {
+    runId: "legacy-state-failed",
+    compatibilitySource: "legacy-state",
+    status: "failed",
+    stage: "镜头 001",
+    error: { message: "旧任务失败", action: "检查旧任务记录后重试" },
+    queue: ["001"],
+    shots: { "001": { id: "001", status: "queued", stage: "queued", error: null } },
+  },
+  selectedShotId: "001",
+  nowMs,
+});
+assert.strictEqual(legacyStateFailed.monitor.status, "failed");
+assert.strictEqual(legacyStateFailed.header.currentText, "镜头 001");
+assert.deepStrictEqual(legacyStateFailed.monitor.error, {
+  message: "旧任务失败",
+  nextAction: "检查旧任务记录后重试",
+});
+
+const legacyStateStopped = deriveCockpitModel({
+  project: legacyStateProject,
+  draft: legacyStateDraft,
+  activeRun: {
+    runId: "legacy-state-stopped",
+    compatibilitySource: "legacy-state",
+    status: "stopped",
+    stage: "镜头 001",
+    error: { message: "用户停止", action: "可重新选择镜头生成" },
+    queue: [],
+    shots: {},
+  },
+  selectedShotId: "001",
+  nowMs,
+});
+assert.strictEqual(legacyStateStopped.monitor.status, "stopped");
+assert.deepStrictEqual(legacyStateStopped.monitor.error, {
+  message: "用户停止",
+  nextAction: "可重新选择镜头生成",
+});
+
+const runLevelRecovery = deriveCockpitModel({
+  project: legacyStateProject,
+  draft: legacyStateDraft,
+  activeRun: {
+    runId: "run-level-recovery",
+    status: "recovery-pending",
+    stage: "provider-generation",
+    error: { message: "供应商状态待核对", action: "继续查询原任务，禁止重复提交" },
+    queue: [],
+    shots: {},
+  },
+  selectedShotId: "001",
+  nowMs,
+});
+assert.strictEqual(runLevelRecovery.monitor.status, "recovery-pending");
+assert.deepStrictEqual(runLevelRecovery.monitor.error, {
+  message: "供应商状态待核对",
+  nextAction: "继续查询原任务，禁止重复提交",
+});
 
 for (const [status, patch, expectedStatus, expectedLocked] of [
   ["submission-reserved", { submissionReservation: { reservationId: "reservation-1" } }, "reserved", true],

@@ -145,6 +145,7 @@ function deriveWorkbenchState(options = {}) {
       ? "等待生成下一个镜头"
       : "";
   const queueStep = hasActiveRun ? cockpit.header.currentText : legacyQueueStep;
+  const currentStep = hasActiveRun ? text(activeRun.stage) || queueStep : queueStep || text(generationState.currentStep);
   const startedAtMs = Date.parse(text(generationState.startedAt) || text(generationQueue.startedAt) || text(generationQueue.createdAt));
   const currentNowMs = Number.isFinite(input.nowMs) ? input.nowMs : Date.now();
   const elapsedMs = Number.isFinite(startedAtMs)
@@ -171,13 +172,17 @@ function deriveWorkbenchState(options = {}) {
   const activeElapsedMs = hasActiveRun ? cockpit.monitor.elapsedMs : elapsedMs;
   const queueStatus = hasActiveRun ? text(activeRun.status) : text(generationQueue.status);
   const stopRequested = hasActiveRun ? activeRun.stopRequested === true : generationQueue.stopRequested === true;
+  const activeErrorStatus = ["failed", "stopped", "recovery-pending"].includes(cockpit.monitor.status);
 
   return {
     empty,
     folder: text(project.folder),
     title: text(project.title),
     status: text(hasActiveRun ? activeRun.status : queueActive ? generationQueue.status : generationState.status || project.status),
-    statusText: queueStep || (hasActiveRun ? activeError : authoritativeStatusText) || text(project.statusText),
+    statusText: (hasActiveRun && activeErrorStatus ? activeError : "")
+      || queueStep
+      || (hasActiveRun ? activeError : authoritativeStatusText)
+      || text(project.statusText),
     locked,
     canConfirm: !locked && project.status === "analysis_ready" && request.confirmed === false,
     canGenerate: !locked
@@ -191,7 +196,7 @@ function deriveWorkbenchState(options = {}) {
     lockedShotIds,
     progress,
     current: {
-      step: queueStep || text(generationState.currentStep),
+      step: currentStep,
       model: text(activeModel || generationState.model || project.videoModel || requestedSettings.videoModel || project.imageModel || requestedSettings.imageModel),
       elapsedMs: activeElapsedMs,
     },

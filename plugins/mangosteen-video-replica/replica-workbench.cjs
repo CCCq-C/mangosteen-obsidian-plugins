@@ -128,7 +128,7 @@ function createVideoReplicaWorkbenchView(ItemView) {
     this.activeTab = "overview";
     this.selectedFolder = "";
     this.projects = [];
-    this.snapshot = { project: {}, request: {}, generationState: {} };
+    this.snapshot = { project: {}, request: {}, activeRun: {}, currentRun: {}, generationState: {} };
     this.viewModel = deriveWorkbenchState();
     this.draft = null;
     this.dirty = false;
@@ -218,13 +218,19 @@ function createVideoReplicaWorkbenchView(ItemView) {
       const previousFolder = text(this.snapshot.project?.folder);
       const loaded = this.selectedFolder
         ? await this.plugin.loadWorkbenchProject(this.selectedFolder)
-        : { project: {}, request: {}, generationState: {} };
+        : { project: {}, request: {}, activeRun: {}, currentRun: {}, generationState: {} };
       const nextSnapshot = {
         project: loaded?.project && typeof loaded.project === "object" ? loaded.project : {},
         request: loaded?.request && typeof loaded.request === "object" ? loaded.request : {},
         requestMtimeMs: typeof loaded?.requestMtimeMs === "number" && Number.isFinite(loaded.requestMtimeMs)
           ? loaded.requestMtimeMs
           : null,
+        activeRun: loaded?.activeRun && typeof loaded.activeRun === "object"
+          ? loaded.activeRun
+          : {},
+        currentRun: loaded?.currentRun && typeof loaded.currentRun === "object"
+          ? loaded.currentRun
+          : {},
         generationState: loaded?.generationState && typeof loaded.generationState === "object"
           ? loaded.generationState
           : {},

@@ -32,11 +32,12 @@ function runShots(activeRun) {
   return new Map(Object.entries(source).map(([id, shot]) => [text(shot?.id) || id, plainObject(shot)]));
 }
 
-function normalizedStatus(runShot, projectShot, isActiveShot) {
-  const source = text(runShot.status) || text(projectShot.status);
+function normalizedStatus(runShot, projectShot, isActiveShot, hasRunShot) {
+  const source = hasRunShot ? text(runShot.status) : text(projectShot.status);
   const value = source.toLowerCase();
-  if (value === "completed" || source === "已完成" || text(projectShot.videoPath)) return "completed";
-  if (value === "failed" || source === "失败" || /_failed$|_error$/.test(value)) return "failed";
+  if (value === "completed" || source === "已完成" || (!hasRunShot && text(projectShot.videoPath))) return "completed";
+  if (["failed", "partial-failure", "completed_with_errors"].includes(value)
+      || source === "失败" || /_failed$|_error$/.test(value)) return "failed";
   if (value === "stopped") return "stopped";
   if (runShot.submissionReservation || value === "submission-reserved" || value === "reserved") return "reserved";
   if (value === "recovery-pending" || value === "recovery") return "recovery-pending";
@@ -48,9 +49,12 @@ function normalizedStatus(runShot, projectShot, isActiveShot) {
   return "ready";
 }
 
-function paidTaskSubmitted(runShot, projectShot) {
-  return runShot.paidTaskSubmitted === true
-    || Boolean(text(runShot.taskId) || text(projectShot.videoTaskId) || runShot.submissionReservation);
+function paidTaskSubmitted(runShot, projectShot, hasRunShot) {
+  if (hasRunShot) {
+    return runShot.paidTaskSubmitted === true
+      || Boolean(text(runShot.taskId) || runShot.submissionReservation);
+  }
+  return Boolean(text(projectShot.videoTaskId));
 }
 
 function lockState(status, paid, isActiveShot) {
@@ -180,10 +184,11 @@ function deriveCockpitModel(options = {}) {
     const id = shotId(sourceShot, index);
     const projectShot = projectById.get(id) || {};
     const shot = { ...clone(projectShot), ...clone(plainObject(sourceShot)), id };
+    const hasRunShot = activeShots.has(id);
     const runShot = activeShots.get(id) || {};
     const isActiveShot = activeShotId === id;
-    const status = normalizedStatus(runShot, projectShot, isActiveShot);
-    const paid = paidTaskSubmitted(runShot, projectShot);
+    const status = normalizedStatus(runShot, projectShot, isActiveShot, hasRunShot);
+    const paid = paidTaskSubmitted(runShot, projectShot, hasRunShot);
     const lock = lockState(status, paid, isActiveShot);
     return {
       id,
@@ -193,11 +198,12 @@ function deriveCockpitModel(options = {}) {
       locked: lock.locked,
       lockReason: lock.lockReason,
       paidTaskSubmitted: paid,
-      taskId: text(runShot.taskId) || text(projectShot.videoTaskId) || null,
-      progress: numericProgress(runShot.progress ?? projectShot.videoTaskProgress),
-      error: normalizedError(runShot.error || projectShot.error, status, paid),
+      taskId: (hasRunShot ? text(runShot.taskId) : text(projectShot.videoTaskId)) || null,
+      progress: hasRunShot ? numericProgress(runShot.progress) : numericProgress(projectShot.videoTaskProgress),
+      error: normalizedError(hasRunShot ? runShot.error : projectShot.error, status, paid),
       shot,
       runShot,
+      hasRunShot,
     };
   });
 
@@ -209,27 +215,48 @@ function deriveCockpitModel(options = {}) {
   if (selected) selected.selected = true;
 
   const selectedRunShot = plainObject(selected?.runShot);
+  const selectedHasRunShot = selected?.hasRunShot === true;
   const selectedShot = plainObject(selected?.shot);
   const selectedStatus = selected?.status || "idle";
   const selectedPaid = selected?.paidTaskSubmitted === true;
+  const useRunLevel = Boolean(activeRun.runId)
+    && (activeRun.compatibilitySource === "legacy-state" || !selectedHasRunShot);
+  const monitorSource = useRunLevel ? activeRun : selectedRunShot;
+  const monitorStatus = useRunLevel
+    ? normalizedStatus(activeRun, {}, ACTIVE_RUN_STATUSES.has(text(activeRun.status)), true)
+    : selectedStatus;
+  const monitorPaid = useRunLevel
+    ? activeRun.paidTaskSubmitted === true || Boolean(text(activeRun.taskId))
+    : selectedPaid;
   const startedAtMs = Date.parse(text(activeRun.startedAt) || text(activeRun.createdAt));
   const nowMs = Number.isFinite(input.nowMs) ? input.nowMs : Date.now();
-  const persistedElapsedMs = Number(selectedRunShot.elapsedMs);
+  const persistedElapsedMs = Number(monitorSource.elapsedMs);
   const elapsedMs = Number.isFinite(persistedElapsedMs) && persistedElapsedMs >= 0
     ? Math.round(persistedElapsedMs)
     : Number.isFinite(startedAtMs)
       ? Math.max(0, nowMs - startedAtMs)
       : 0;
-  const monitorProgress = selected
-    ? numericProgress(selectedRunShot.progress ?? selectedShot.videoTaskProgress)
-    : null;
-  const generationContext = plainObject(selectedRunShot.generationContext);
+  let monitorProgress = null;
+  if (selected) {
+    if (useRunLevel) monitorProgress = numericProgress(activeRun.progress);
+    else if (selectedHasRunShot) monitorProgress = numericProgress(selectedRunShot.progress);
+    else monitorProgress = numericProgress(selectedShot.videoTaskProgress);
+  }
+  const generationContext = plainObject(monitorSource.generationContext);
   const settings = plainObject(generationContext.settings);
-  const monitorError = normalizedError(selectedRunShot.error || selectedShot.error, selectedStatus, selectedPaid);
+  const monitorError = normalizedError(
+    useRunLevel ? activeRun.error : selectedHasRunShot ? selectedRunShot.error : selectedShot.error,
+    monitorStatus,
+    monitorPaid,
+  );
   const completed = items.filter((item) => item.status === "completed").length;
-  const currentText = selected ? `镜头 ${selected.id} · ${statusLabel(selectedStatus)}` : "";
+  const currentText = useRunLevel && text(activeRun.stage)
+    ? text(activeRun.stage)
+    : selected
+      ? `镜头 ${selected.id} · ${statusLabel(selectedStatus)}`
+      : text(activeRun.stage);
 
-  const railItems = items.map(({ shot, runShot, ...item }) => item);
+  const railItems = items.map(({ shot, runShot, hasRunShot, ...item }) => item);
   return {
     header: {
       title: text(project.title) || text(draft.title),
@@ -248,12 +275,12 @@ function deriveCockpitModel(options = {}) {
       effectivePrompt: selected ? effectivePrompt(selectedShot, selectedRunShot, selected.locked) : "",
     },
     monitor: {
-      status: selectedStatus,
+      status: monitorStatus,
       model: text(settings.videoModel) || text(activeRun.videoModel) || text(project.videoModel) || text(draft.settings?.videoModel),
-      taskId: selected?.taskId || null,
+      taskId: (useRunLevel ? text(activeRun.taskId) : selected?.taskId) || null,
       elapsedMs,
       progress: monitorProgress,
-      stages: monitorStages(selectedStatus, selectedRunShot.stage || selectedShot.stage),
+      stages: monitorStages(monitorStatus, monitorSource.stage || selectedShot.stage),
       error: monitorError,
     },
   };

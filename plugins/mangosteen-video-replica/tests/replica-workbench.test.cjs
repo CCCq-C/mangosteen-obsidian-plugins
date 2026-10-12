@@ -699,6 +699,66 @@ function createView(plugin) {
       { ...clone(request.shots[0]), id: "002", title: "第二镜", videoPrompt: "第二镜动作" },
     ],
   };
+  const currentRunPlugin = createPlugin({
+    ...clone(readySnapshot),
+    request: partialLockRequest,
+    project: {
+      ...clone(readySnapshot.project),
+      status: "generating",
+      shots: [
+        {
+          id: "001",
+          title: "开场",
+          status: "已完成",
+          videoPath: "旧成片-001.mp4",
+          videoTaskId: "legacy-task",
+          videoTaskProgress: 72,
+        },
+        { id: "002", title: "第二镜", status: "等待生成" },
+      ],
+    },
+    currentRun: {
+      runId: "current-run-authoritative",
+      status: "processing",
+      activeShotId: "001",
+      queue: ["001", "002"],
+      shots: {
+        "001": {
+          id: "001",
+          status: "video-processing",
+          stage: "provider-generation",
+          taskId: "task-current",
+          paidTaskSubmitted: true,
+          progress: null,
+        },
+        "002": {
+          id: "002",
+          status: "queued",
+          stage: "queued",
+          taskId: null,
+          paidTaskSubmitted: false,
+          progress: null,
+        },
+      },
+    },
+    generationQueue: {
+      status: "processing",
+      shots: [
+        { id: "001", status: "processing" },
+        { id: "002", status: "queued" },
+      ],
+    },
+  });
+  const currentRunView = createView(currentRunPlugin);
+  await currentRunView.onOpen();
+  assert.strictEqual(currentRunView.snapshot.currentRun.runId, "current-run-authoritative", "the loaded currentRun must survive the workbench snapshot boundary");
+  assert.deepStrictEqual(currentRunView.viewModel.lockedShotIds, ["001"], "only the processing current-run shot may be locked");
+  assert.strictEqual(currentRunView.viewModel.cockpit.rail.items[1].locked, false, "an unpaid queued current-run shot must stay editable");
+  assert.strictEqual(currentRunView.viewModel.cockpit.monitor.taskId, "task-current");
+  assert.strictEqual(currentRunView.viewModel.cockpit.monitor.progress, null, "missing provider progress must remain null through the workbench snapshot");
+  assert.strictEqual(currentRunView.viewModel.progress.percent, null);
+  await currentRunView.onClose();
+
   const partialLockView = createView(createPlugin({
     ...clone(readySnapshot),
     request: partialLockRequest,
