@@ -156,6 +156,32 @@ try {
     assert.strictEqual(fs.readFileSync(externalTarget, "utf8"), "external target must stay unchanged");
     assert.deepStrictEqual(snapshotTree(outside), before, "control-character refusal must not change any external file or directory");
   }
+
+  {
+    const suppliedPathRoot = temporary("mangosteen-sync-relative-pwd-");
+    const outside = temporary("mangosteen-sync-relative-outside-");
+    const externalVault = path.join(outside, "base/vault");
+    const externalTarget = path.join(externalVault, ".obsidian/plugins/mangosteen-image/main.js");
+    fs.mkdirSync(path.dirname(externalTarget), { recursive: true });
+    fs.writeFileSync(path.join(outside, "sentinel.txt"), "outside sentinel");
+    fs.writeFileSync(externalTarget, "external target must stay unchanged");
+    const before = snapshotTree(outside);
+    const ancestorLink = path.join(suppliedPathRoot, "linked\nancestor");
+    fs.symlinkSync(outside, ancestorLink, "dir");
+    const logicalCwd = path.join(ancestorLink, "base");
+
+    const result = spawnSync(
+      "bash",
+      ["-c", 'cd -L -- "$1" && bash "$2" vault', "bash", logicalCwd, script],
+      { cwd: repoRoot, encoding: "utf8" },
+    );
+
+    assert.notStrictEqual(result.status, 0, `relative vault path from newline-symlink PWD must fail\n${result.stdout}\n${result.stderr}`);
+    assert.match(result.stderr, /absolute/, "relative vault-path refusal must require an absolute path");
+    assert.strictEqual(fs.readFileSync(path.join(outside, "sentinel.txt"), "utf8"), "outside sentinel");
+    assert.strictEqual(fs.readFileSync(externalTarget, "utf8"), "external target must stay unchanged");
+    assert.deepStrictEqual(snapshotTree(outside), before, "relative-path refusal must not change any external file or directory");
+  }
 } finally {
   for (const root of temporaryRoots.reverse()) fs.rmSync(root, { recursive: true, force: true });
 }

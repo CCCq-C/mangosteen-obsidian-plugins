@@ -19,6 +19,7 @@ fail_sync() {
 assert_safe_vault_path_text() {
   local supplied="$1"
   local LC_ALL=C
+  [[ "$supplied" == /* ]] || fail_sync "vault path must be absolute"
   [[ ! "$supplied" =~ [[:cntrl:]] ]] || fail_sync "vault path contains a control character"
 }
 
@@ -36,12 +37,7 @@ assert_regular_directory() {
 
 assert_no_symlink_components() {
   local supplied="$1"
-  local candidate current component
-  if [[ "$supplied" == /* ]]; then
-    candidate="$supplied"
-  else
-    candidate="$PWD/$supplied"
-  fi
+  local candidate="$supplied" current component
   current="/"
   IFS='/' read -r -a components <<< "$candidate"
   for component in "${components[@]}"; do
