@@ -105,6 +105,7 @@ if (output.includes("%03d")) {
   const oldPrepareFfprobe = process.env.MANGOSTEEN_FFPROBE;
   process.env.MANGOSTEEN_FFMPEG = fakePrepareFfmpeg;
   process.env.MANGOSTEEN_FFPROBE = fakeFfprobe;
+  const prepareProgress = [];
   let created;
   try {
     created = await prepareProject({
@@ -112,6 +113,7 @@ if (output.includes("%03d")) {
       vaultPath: creationVault,
       projectFolder: "山竹视频复刻/project-stable",
       pluginRoot: path.resolve(__dirname, ".."),
+      onProgress: (event) => prepareProgress.push(event),
     });
   } finally {
     if (oldPrepareFfmpeg === undefined) delete process.env.MANGOSTEEN_FFMPEG; else process.env.MANGOSTEEN_FFMPEG = oldPrepareFfmpeg;
@@ -125,6 +127,17 @@ if (output.includes("%03d")) {
   assert.strictEqual(created.layoutVersion, 6);
   assert.strictEqual(created.projectId, "project-stable");
   assert.strictEqual(created.id, "project-stable", "the compatibility ID must remain stable");
+  assert.deepStrictEqual(
+    prepareProgress.map((event) => event.stage),
+    ["probe", "project", "frames", "frames-complete", "audio", "prepared"],
+    "local preparation must report every visible stage in order",
+  );
+  assert.deepStrictEqual(
+    prepareProgress.map((event) => event.percent),
+    [5, 12, 20, 45, 52, 70],
+    "local preparation progress must be monotonic and leave room for AI analysis",
+  );
+  assert.match(prepareProgress[3].label, /2 张/);
   assert.strictEqual(created.sourcePath, "山竹视频复刻/project-stable/01-原始素材/原视频.mov");
   assert.strictEqual(fs.readFileSync(path.join(createdRoot, "01-原始素材/原视频.mov"), "utf8"), "source-video");
   assert(fs.existsSync(path.join(createdRoot, "01-原始素材/台词转写.md")));

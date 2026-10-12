@@ -15,6 +15,43 @@
   color: var(--text-muted);
 }
 
+.mangosteen-replica-prepare-progress {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+  background: var(--background-secondary);
+}
+
+.mangosteen-replica-prepare-progress.is-hidden {
+  display: none;
+}
+
+.mangosteen-replica-prepare-progress.is-error {
+  border-color: var(--background-modifier-error);
+}
+
+.mangosteen-replica-prepare-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.mangosteen-replica-prepare-progress-head span,
+.mangosteen-replica-prepare-progress-meta,
+.mangosteen-replica-prepare-progress-hint {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.mangosteen-replica-prepare-progress-meta {
+  font-family: var(--font-monospace);
+  font-variant-numeric: tabular-nums;
+}
+
 .mangosteen-replica-workbench {
   container-type: inline-size;
   --replica-gap: clamp(8px, 1.2cqi, 18px);

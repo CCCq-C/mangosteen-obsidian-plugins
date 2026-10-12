@@ -643,6 +643,21 @@ function createView(plugin) {
   assert.strictEqual(unavailableView.contentEl.emptyCalls, unavailableRenderCount, "unchanged unavailable polling must preserve the DOM");
   await unavailableView.onClose();
 
+  const guardedOpenPlugin = createPlugin();
+  const guardedOpenView = createView(guardedOpenPlugin);
+  await guardedOpenView.onOpen();
+  guardedOpenView.dirty = true;
+  const guardedOriginalFolder = guardedOpenView.selectedFolder;
+  const guardedOriginalTitle = guardedOpenView.draft.shots[0].title;
+  await assert.rejects(
+    () => guardedOpenView.openProject("山竹视频复刻/自动跳转新项目", "overview"),
+    /未保存修改/,
+    "automatic project opening must not discard another project's dirty draft",
+  );
+  assert.strictEqual(guardedOpenView.selectedFolder, guardedOriginalFolder);
+  assert.strictEqual(guardedOpenView.draft.shots[0].title, guardedOriginalTitle);
+  await guardedOpenView.onClose();
+
   const refreshErrorPlugin = createPlugin();
   const refreshErrorView = createView(refreshErrorPlugin);
   await refreshErrorView.onOpen();

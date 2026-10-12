@@ -49,6 +49,13 @@ const WORKBENCH_SHOT_FIELDS = [
 
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
+function formatPrepareElapsed(startedAt) {
+  const totalSeconds = Math.max(0, Math.floor((Date.now() - Number(startedAt || Date.now())) / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
 function atomicWrite(filePath, content) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const temporary = `${filePath}.tmp-${process.pid}-${crypto.randomUUID()}`;
@@ -215,7 +222,13 @@ function mergeVersionSixDraftEnvelope(currentRequest, identifiedDraft, validated
 }
 
 class PrepareModal extends Modal {
-  constructor(plugin) { super(plugin.app); this.plugin = plugin; this.sourcePath = ""; }
+  constructor(plugin) {
+    super(plugin.app);
+    this.plugin = plugin;
+    this.sourcePath = "";
+    this.progressTimer = null;
+    this.progressStartedAt = 0;
+  }
 
   onOpen() {
     const { contentEl } = this;
@@ -236,7 +249,36 @@ class PrepareModal extends Modal {
     }).open());
     const picker = contentEl.createEl("input", { attr: { type: "file", accept: ".mp4,.mov,.m4v,video/mp4,video/quicktime" } });
     const status = contentEl.createDiv({ cls: "mangosteen-replica-status", text: "等待选择视频" });
+    const progressPanel = contentEl.createDiv({ cls: "mangosteen-replica-prepare-progress is-hidden" });
+    const progressHead = progressPanel.createDiv({ cls: "mangosteen-replica-prepare-progress-head" });
+    const progressLabel = progressHead.createEl("strong", { text: "等待开始" });
+    const progressPercent = progressHead.createEl("span", { text: "0%" });
+    const progressTrack = progressPanel.createDiv({
+      cls: "mangosteen-replica-progress-track",
+      attr: { role: "progressbar", "aria-label": "本地视频拆解进度", "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": "0" },
+    });
+    const progressBar = progressTrack.createDiv({ cls: "mangosteen-replica-progress-bar" });
+    progressBar.style.width = "0%";
+    const progressMeta = progressPanel.createDiv({ cls: "mangosteen-replica-prepare-progress-meta", text: "阶段 0/6 · 已用 00:00" });
+    progressPanel.createDiv({ cls: "mangosteen-replica-prepare-progress-hint", text: "本地拆解一般需要 1–5 分钟，后续 AI 分析通常需要 2–8 分钟。" });
     const button = contentEl.createEl("button", { cls: "mod-cta", text: "开始本地拆解" });
+    let currentProgress = { step: 0, percent: 0 };
+    const refreshMeta = () => {
+      progressMeta.setText(`阶段 ${currentProgress.step}/6 · 已用 ${formatPrepareElapsed(this.progressStartedAt)}`);
+    };
+    const setProgress = ({ percent = currentProgress.percent, step = currentProgress.step, label = "处理中", indeterminate = false, error = false } = {}) => {
+      const value = Math.max(0, Math.min(100, Number(percent) || 0));
+      currentProgress = { step: Math.max(0, Math.min(6, Number(step) || 0)), percent: value };
+      progressPanel.removeClass("is-hidden");
+      progressPanel.toggleClass?.("is-error", error === true);
+      progressLabel.setText(label);
+      progressPercent.setText(`${Math.round(value)}%`);
+      progressBar.style.width = `${value}%`;
+      progressBar.toggleClass?.("is-indeterminate", indeterminate === true);
+      progressTrack.setAttr?.("aria-valuenow", String(Math.round(value)));
+      status.setText(label);
+      refreshMeta();
+    };
 
     picker.addEventListener("change", () => {
       const file = picker.files?.[0];
@@ -249,26 +291,47 @@ class PrepareModal extends Modal {
 
     button.addEventListener("click", async () => {
       if (!this.sourcePath) { new Notice("请先选择本地视频。", 4000); return; }
+      let preparationToken;
+      try { preparationToken = this.plugin.acquireVideoPreparation(this.sourcePath); }
+      catch (error) { new Notice(String(error?.message || error), 6000); return; }
       button.disabled = true;
-      status.setText("正在抽取画面并识别台词，请不要关闭 Obsidian…");
+      button.setText?.("正在拆解…");
+      this.progressStartedAt = Date.now();
+      setProgress({ percent: 2, step: 1, label: "正在启动本地拆解", indeterminate: true });
+      this.progressTimer = window.setInterval(refreshMeta, 1000);
       try {
-        const project = await this.plugin.prepareVideo(this.sourcePath);
-        status.setText("本地拆解完成，AI 正在分析人物、场景和分镜…");
+        const project = await this.plugin.prepareVideo(this.sourcePath, { onProgress: setProgress });
+        setProgress({ percent: 72, step: 5, label: "本地拆解完成，AI 正在分析人物、场景和分镜", indeterminate: true });
         try {
           await this.plugin.analyzeProject(project.folder);
-          status.setText("AI 分析完成，正在打开项目总览。");
+          setProgress({ percent: 100, step: 6, label: "拆解与 AI 分析完成，正在打开制作总览", indeterminate: false });
           new Notice("分镜草案已生成。检查后运行“确认并开始付费生成最近项目”。", 9000);
         } catch (error) {
-          status.setText("本地拆解已完成，但 AI 分析失败。");
+          setProgress({ percent: 70, step: 5, label: "本地拆解已完成，但 AI 分析失败；请切换分析模型后重试", indeterminate: false, error: true });
           new Notice(`AI 分析失败：${String(error?.message || error)}。可运行“分析最近的视频复刻项目”重试。`, 12000);
         }
-        await this.plugin.openVaultPath(`${project.folder}/00-项目总览.md`);
+        try {
+          await this.plugin.openWorkbenchProject(project.folder, "overview");
+        } catch (navigationError) {
+          new Notice(`项目已经创建，但制作总览打开失败：${String(navigationError?.message || navigationError)}。请点击左侧“山竹视频复刻”手动打开。`, 12000);
+        }
         this.close();
       } catch (error) {
-        status.setText(`失败：${String(error?.message || error)}`);
+        setProgress({ percent: currentProgress.percent, step: currentProgress.step, label: `本地拆解失败：${String(error?.message || error)}`, indeterminate: false, error: true });
         new Notice(String(error?.message || error), 9000);
-      } finally { button.disabled = false; }
+      } finally {
+        if (this.progressTimer !== null) window.clearInterval(this.progressTimer);
+        this.progressTimer = null;
+        this.plugin.releaseVideoPreparation(preparationToken);
+        button.disabled = false;
+        button.setText?.("开始本地拆解");
+      }
     });
+  }
+
+  onClose() {
+    if (this.progressTimer !== null) window.clearInterval(this.progressTimer);
+    this.progressTimer = null;
   }
 }
 
@@ -380,6 +443,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     this.activeQueueObjects = new Map();
     this.queueRunnerLocks = new Map();
     this.queueRunnerLockRequired = new Set();
+    this.videoPreparationLock = null;
     const savedSettings = typeof this.loadData === "function" ? await this.loadData() : null;
     this.settings = Object.assign({}, DEFAULT_SETTINGS, savedSettings && typeof savedSettings === "object" ? savedSettings : {});
     this.registerView(this.workbenchViewType, (leaf) => new VideoReplicaWorkbenchView(leaf, this));
@@ -449,14 +513,38 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     return realRoot;
   }
 
-  async prepareVideo(sourcePath) {
+  async prepareVideo(sourcePath, options = {}) {
     this.ensureReplicaRoot();
-    const project = await workflow.prepareProject({ sourcePath, vaultPath: this.vaultPath(), pluginRoot: this.pluginRoot });
+    const project = await workflow.prepareProject({
+      sourcePath,
+      vaultPath: this.vaultPath(),
+      pluginRoot: this.pluginRoot,
+      onProgress: options.onProgress,
+    });
     this.checkedWorkbenchProjectFolder(project.folder);
     return project;
   }
 
-  openPrepareModal() { return new PrepareModal(this).open(); }
+  acquireVideoPreparation(sourcePath) {
+    if (this.videoPreparationLock) throw new Error("已有视频正在拆解和分析，请等待完成后再新建项目。");
+    const token = crypto.randomUUID();
+    this.videoPreparationLock = { token, sourcePath: String(sourcePath || ""), startedAt: new Date().toISOString() };
+    return token;
+  }
+
+  releaseVideoPreparation(token) {
+    if (!token || this.videoPreparationLock?.token !== token) return false;
+    this.videoPreparationLock = null;
+    return true;
+  }
+
+  openPrepareModal() {
+    if (this.videoPreparationLock) {
+      new Notice("已有视频正在拆解和分析，完成后会自动打开制作总览。", 7000);
+      return null;
+    }
+    return new PrepareModal(this).open();
+  }
 
   openAnalysisModelModal() { return new AnalysisModelModal(this).open(); }
 
@@ -467,6 +555,23 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     const leaf = existing || this.app.workspace.getLeaf(true);
     if (!existing) await leaf.setViewState({ type: this.workbenchViewType, active: true });
     await this.app.workspace.revealLeaf(leaf);
+    return leaf;
+  }
+
+  async openWorkbenchProject(projectFolder, tab = "overview") {
+    const folder = this.checkedWorkbenchProjectFolder(projectFolder).folder;
+    const activeTab = ["overview", "assets", "shots", "output", "settings"].includes(tab) ? tab : "overview";
+    const leaves = this.app.workspace.getLeavesOfType(this.workbenchViewType);
+    let leaf = leaves.find((candidate) => String(candidate?.view?.selectedFolder || "") === folder)
+      || leaves.find((candidate) => candidate?.view?.dirty !== true);
+    if (!leaf) {
+      leaf = this.app.workspace.getLeaf(true);
+      await leaf.setViewState({ type: this.workbenchViewType, active: true });
+    }
+    await this.app.workspace.revealLeaf(leaf);
+    if (typeof leaf?.view?.openProject !== "function") throw new Error("视频复刻工作台版本过低，未能打开项目总览。");
+    await leaf.view.openProject(folder, activeTab);
+    if (String(leaf.view.snapshot?.project?.folder || "") !== folder) throw new Error("未能打开项目总览，请手动刷新后重试。");
     return leaf;
   }
 
@@ -2321,7 +2426,6 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         analysisModel: response?.model || selection.model,
       });
       this.requestWorkbenchRefresh();
-      await this.openVaultPath(`${checkedFolder}/00-项目总览.md`);
       return result;
     } catch (error) {
       const message = String(error?.message || error);
@@ -2371,10 +2475,16 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     try {
       new Notice("AI 正在分析最近项目，通常需要 2–8 分钟。", 6000);
       await this.analyzeProject(record.project.folder);
-      new Notice("分镜草案已生成，等待确认付费生成。", 8000);
     } catch (error) {
       new Notice(`AI 分析失败：${String(error?.message || error)}`, 10000);
+      return;
     }
+    try { await this.openWorkbenchProject(record.project.folder, "overview"); }
+    catch (error) {
+      new Notice(`分析已完成，但制作总览打开失败：${String(error?.message || error)}。请点击左侧“山竹视频复刻”手动打开。`, 12000);
+      return;
+    }
+    new Notice("分镜草案已生成，等待确认付费生成。", 8000);
   }
 
   async confirmLatestGeneration() {

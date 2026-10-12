@@ -87,6 +87,11 @@ function writeJson(filePath, value) {
   atomicWrite(filePath, `${JSON.stringify(value, null, 2)}\n`);
 }
 
+function reportPreparationProgress(onProgress, event) {
+  if (typeof onProgress !== "function") return;
+  try { onProgress({ ...event }); } catch (_) { /* progress UI must never stop local preparation */ }
+}
+
 function uniqueProjectFolder(vaultPath, preferred) {
   let folder = preferred;
   let suffix = 2;
@@ -304,14 +309,16 @@ function initialStoryboard(project) {
   return lines.join("\n");
 }
 
-async function prepareProject({ sourcePath, vaultPath, projectFolder = "", pluginRoot = __dirname } = {}) {
+async function prepareProject({ sourcePath, vaultPath, projectFolder = "", pluginRoot = __dirname, onProgress = null } = {}) {
   const vault = path.resolve(String(vaultPath || ""));
   if (!fs.statSync(vault, { throwIfNoEntry: false })?.isDirectory()) throw new Error("找不到 Obsidian 知识库目录。");
   const source = core.validateSourceVideo(sourcePath);
   const runtime = resolveRuntimes(pluginRoot);
   if (!runtime.ffmpeg || !runtime.ffprobe) throw new Error("缺少 FFmpeg/ffprobe。请重新安装山竹视频复刻组件。");
+  reportPreparationProgress(onProgress, { stage: "probe", percent: 5, step: 1, label: "正在读取视频信息", indeterminate: true });
   const metadata = await probeVideo(runtime.ffprobe, source.absolute);
   core.validateSourceVideo(source.absolute, { duration: metadata.duration });
+  reportPreparationProgress(onProgress, { stage: "project", percent: 12, step: 2, label: "正在创建项目并复制源视频", indeterminate: true });
   const preferred = projectFolder ? core.normalizeVaultPath(projectFolder) : core.createProjectFolder(source.absolute);
   const folder = uniqueProjectFolder(vault, preferred);
   const resolveSafe = createProjectResolver(vault, folder);
@@ -357,10 +364,14 @@ async function prepareProject({ sourcePath, vaultPath, projectFolder = "", plugi
   const workFolder = fs.mkdtempSync(path.join(os.tmpdir(), "mangosteen-video-replica-"));
 
   try {
+    reportPreparationProgress(onProgress, { stage: "frames", percent: 20, step: 3, label: "正在抽取关键画面", indeterminate: true });
     const extracted = await extractFrames(runtime.ffmpeg, sourceVideoAbsolute, resolveSafe(frameFolderPath, { directory: true }), metadata.duration);
     project.frames = extracted.map((frame, index) => ({ index: index + 1, timestamp: frame.timestamp, path: `${frameFolderPath}/${frame.name}` }));
+    reportPreparationProgress(onProgress, { stage: "frames-complete", percent: 45, step: 3, label: `已抽取 ${project.frames.length} 张关键画面`, indeterminate: false });
     const audioPath = path.join(workFolder, "原片音频.wav");
+    reportPreparationProgress(onProgress, { stage: "audio", percent: 52, step: 4, label: metadata.hasAudio ? "正在提取音频" : "原视频没有音轨，跳过音频提取", indeterminate: metadata.hasAudio });
     const hasAudio = metadata.hasAudio && await extractAudio(runtime.ffmpeg, sourceVideoAbsolute, audioPath);
+    if (hasAudio) reportPreparationProgress(onProgress, { stage: "transcript", percent: 58, step: 4, label: "正在识别台词", indeterminate: true });
     const transcript = hasAudio ? await transcribeAudio(runtime, audioPath, workFolder, project.title) : { segments: [], markdown: transcriptMarkdown([], project.title) };
     draft.transcriptSegments = transcript.segments;
     draft.analysisStatus = "prepared";
@@ -368,6 +379,7 @@ async function prepareProject({ sourcePath, vaultPath, projectFolder = "", plugi
     atomicWrite(resolveSafe(transcriptPath, { createParents: true }), transcript.markdown);
     project.updatedAt = new Date().toISOString();
     saveProject();
+    reportPreparationProgress(onProgress, { stage: "prepared", percent: 70, step: 4, label: "本地拆解完成", indeterminate: false });
     return project;
   } catch (error) {
     draft.analysisStatus = "failed";

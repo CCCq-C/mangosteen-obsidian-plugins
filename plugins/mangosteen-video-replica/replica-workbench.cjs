@@ -200,6 +200,22 @@ function createVideoReplicaWorkbenchView(ItemView) {
     return this.refreshPromise;
   }
 
+  async openProject(folder, tab = "overview") {
+    const nextFolder = text(folder);
+    if (!nextFolder) throw new Error("项目路径不能为空。");
+    if (this.dirty && this.selectedFolder && this.selectedFolder !== nextFolder) {
+      throw new Error("当前项目还有未保存修改，不能覆盖打开新项目。");
+    }
+    this.selectedFolder = nextFolder;
+    this.activeTab = TABS.some(([id]) => id === tab) ? tab : "overview";
+    this.savedScrollTop = 0;
+    await this.refresh({ force: true });
+    if (text(this.snapshot.project?.folder) !== nextFolder) {
+      throw new Error(this.refreshFeedback || "未能打开项目总览，请手动刷新后重试。");
+    }
+    return true;
+  }
+
   async loadAndRender(force) {
     try {
       const nextProjects = normalizeProjects(await this.plugin.listWorkbenchProjects());

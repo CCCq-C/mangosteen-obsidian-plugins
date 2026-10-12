@@ -52,7 +52,17 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   const workbenchLeaves = [];
   const workbenchView = {
     refreshCalls: 0,
+    refreshOptions: [],
+    dirty: false,
+    snapshot: { project: {} },
     requestRefresh() { this.refreshCalls += 1; },
+    async refresh(options) { this.refreshOptions.push(options); },
+    async openProject(folder, tab) {
+      this.selectedFolder = folder;
+      this.activeTab = tab;
+      await this.refresh({ force: true });
+      this.snapshot.project = { folder };
+    },
   };
   let openedViewState = null;
   let revealedLeaf = null;
@@ -131,6 +141,55 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   assert.strictEqual(revealedLeaf, workbenchLeaf);
   await plugin.activateWorkbench();
   assert.strictEqual(setViewStateCalls, 1, "opening the cockpit twice must reuse its native ItemView leaf");
+  const checkedWorkbenchProjectFolderBeforeOpen = plugin.checkedWorkbenchProjectFolder;
+  plugin.checkedWorkbenchProjectFolder = (folder) => ({ folder });
+  await plugin.openWorkbenchProject("山竹视频复刻/新项目", "overview");
+  plugin.checkedWorkbenchProjectFolder = checkedWorkbenchProjectFolderBeforeOpen;
+  assert.strictEqual(workbenchView.selectedFolder, "山竹视频复刻/新项目");
+  assert.strictEqual(workbenchView.activeTab, "overview");
+  assert.deepStrictEqual(workbenchView.refreshOptions.at(-1), { force: true });
+
+  const preparationToken = plugin.acquireVideoPreparation("/tmp/source.mp4");
+  assert.throws(
+    () => plugin.acquireVideoPreparation("/tmp/source.mp4"),
+    /已有视频正在拆解和分析/,
+    "one plugin instance must reject duplicate local preparation while the first flow is active",
+  );
+  assert.strictEqual(plugin.releaseVideoPreparation("wrong-token"), false);
+  assert.strictEqual(plugin.releaseVideoPreparation(preparationToken), true);
+  assert.doesNotThrow(() => plugin.acquireVideoPreparation("/tmp/source.mp4"));
+  plugin.releaseVideoPreparation(plugin.videoPreparationLock.token);
+
+  workbenchView.dirty = true;
+  workbenchView.selectedFolder = "山竹视频复刻/未保存旧项目";
+  const freshView = {
+    dirty: false,
+    snapshot: { project: {} },
+    async openProject(folder, tab) {
+      this.selectedFolder = folder;
+      this.activeTab = tab;
+      this.snapshot.project = { folder };
+    },
+  };
+  const freshLeaf = {
+    view: freshView,
+    async setViewState(state) {
+      openedViewState = state;
+      workbenchLeaves.push(this);
+    },
+  };
+  workspace.getLeaf = () => freshLeaf;
+  plugin.checkedWorkbenchProjectFolder = (folder) => ({ folder });
+  await plugin.openWorkbenchProject("山竹视频复刻/自动跳转新项目", "overview");
+  assert.strictEqual(workbenchView.selectedFolder, "山竹视频复刻/未保存旧项目", "automatic navigation must not replace a dirty project draft");
+  assert.strictEqual(freshView.selectedFolder, "山竹视频复刻/自动跳转新项目", "a dirty cockpit must cause the new project to open in another leaf");
+  freshView.openProject = async (folder) => { freshView.selectedFolder = folder; freshView.snapshot.project = { folder: "" }; };
+  await assert.rejects(
+    () => plugin.openWorkbenchProject("山竹视频复刻/无法打开的项目", "overview"),
+    /未能打开项目总览/,
+    "navigation must verify the project actually displayed after refresh",
+  );
+  plugin.checkedWorkbenchProjectFolder = checkedWorkbenchProjectFolderBeforeOpen;
   const refreshCallsBeforeModify = workbenchView.refreshCalls;
   vaultEvents.modify({ name: "project.json", path: "山竹视频复刻/事件刷新/project.json" });
   assert.strictEqual(workbenchView.refreshCalls, refreshCallsBeforeModify + 1);
@@ -1305,6 +1364,21 @@ process.exit(1);
   assert.strictEqual(modelErrorProject.analysisErrorCode, "REMOTE_REJECTED");
   assert.match(modelErrorProject.statusText, /gpt-5\.6-sol.*请更换分析模型/);
   plugin.app.plugins = { getPlugin: (id) => id === "mangosteen-agent" ? agent : id === "mangosteen-video" ? { settings: { model: "MiniMax-H3", resolution: "768p" } } : null };
+
+  const latestProjectBeforeNavigationFailure = plugin.latestProject;
+  const analyzeProjectBeforeNavigationFailure = plugin.analyzeProject;
+  const openWorkbenchBeforeNavigationFailure = plugin.openWorkbenchProject;
+  plugin.latestProject = () => ({ project: { folder: analysisFolder } });
+  plugin.analyzeProject = async () => ({ project: { folder: analysisFolder } });
+  plugin.openWorkbenchProject = async () => { throw new Error("injected overview failure"); };
+  const noticesBeforeNavigationFailure = noticeMessages.length;
+  await plugin.analyzeLatestProject();
+  const navigationNotices = noticeMessages.slice(noticesBeforeNavigationFailure);
+  assert(navigationNotices.some((message) => /分析已完成，但制作总览打开失败/.test(message)));
+  assert(!navigationNotices.some((message) => /AI 分析失败/.test(message)), "successful analysis must not be reported as failed when only navigation fails");
+  plugin.latestProject = latestProjectBeforeNavigationFailure;
+  plugin.analyzeProject = analyzeProjectBeforeNavigationFailure;
+  plugin.openWorkbenchProject = openWorkbenchBeforeNavigationFailure;
 
   plugin.concatProject = async (value) => {
     const output = `${value.folder}/04-最终成片/最终成片.mp4`;
