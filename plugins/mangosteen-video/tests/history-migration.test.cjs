@@ -273,7 +273,15 @@ function adapters(initial, options = {}) {
 
   const originalLoad = Module._load;
   const notices = [];
+  const migrationRuntimePath = path.resolve(__dirname, "../../migration-safe-fs.cjs");
+  let absoluteMigrationRuntimeLoads = 0;
   Module._load = function patchedLoad(request, parent, isMain) {
+    if (request === "../migration-safe-fs.cjs") {
+      const error = new Error("Cannot find module '../migration-safe-fs.cjs'\nRequire stack: electron/js2c/renderer_init");
+      error.code = "MODULE_NOT_FOUND";
+      throw error;
+    }
+    if (request === migrationRuntimePath) absoluteMigrationRuntimeLoads += 1;
     if (request === "obsidian") return {
       Modal: class Modal {}, Plugin: class Plugin {},
       Notice: class Notice { constructor(message) { notices.push(String(message)); } },
@@ -282,8 +290,9 @@ function adapters(initial, options = {}) {
     return originalLoad.call(this, request, parent, isMain);
   };
   delete require.cache[require.resolve("../main.js")];
-  const VideoPlugin = require("../main.js");
-  Module._load = originalLoad;
+  let VideoPlugin;
+  try { VideoPlugin = require("../main.js"); }
+  catch (error) { Module._load = originalLoad; throw error; }
   const plugin = new VideoPlugin();
   const commands = [];
   plugin.api = {};
@@ -294,7 +303,9 @@ function adapters(initial, options = {}) {
   plugin.addCommand = (command) => commands.push(command);
   const originalWindow = global.window;
   global.window = { setInterval: () => ({ unref() {} }) };
-  await plugin.onload();
+  try { await plugin.onload(); }
+  finally { Module._load = originalLoad; }
+  assert.strictEqual(absoluteMigrationRuntimeLoads, 1, "Obsidian onload must load migration-safe-fs.cjs by its absolute installed path");
   const command = commands.find((item) => item.name === "整理山竹视频历史记录");
   assert.ok(command);
   let executions = 0;

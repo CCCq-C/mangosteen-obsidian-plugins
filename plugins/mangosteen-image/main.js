@@ -1,12 +1,12 @@
 const { Plugin, Modal, Notice, requestUrl } = require("obsidian");
 const path = require("path");
-const { MIGRATION_SAFE_FS_UNAVAILABLE, createSafeMigrationFs } = require("../migration-safe-fs.cjs");
 const historyMigration = require("./history-migration.cjs");
 const { normalizeImageOutputTarget, standaloneImagePath } = require("./output-storage.cjs");
 
 const API_BASE = "https://apimodel.aihubkit.com";
 const HISTORY_ROOT = "生图记录";
 const IMAGE_TASK_WAIT_ATTEMPTS = 450;
+const MIGRATION_SAFE_FS_UNAVAILABLE_FALLBACK = "MIGRATION_SAFE_FS_UNAVAILABLE";
 const DEFAULT_SETTINGS = { imageTasks: [], submissionMarkers: [], model: "gpt-image-2", size: "1024x1024", count: 1, editCount: 1 };
 const cloneMigrationValue = (value) => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
 const preferredImageModel = (models, current) => models.includes(current)
@@ -392,7 +392,13 @@ module.exports = class MangosteenImagePlugin extends Plugin {
     const adapter = this.app?.vault?.adapter;
     const vaultBasePath = adapter?.getBasePath?.() || adapter?.basePath;
     if (!vaultBasePath) throw new Error("无法定位山竹生图插件目录");
-    const apiPath = path.join(vaultBasePath, ...String(this.manifest.dir || "").split(/[\\/]/), "image-api.cjs");
+    const pluginRoot = path.join(vaultBasePath, ...String(this.manifest.dir || "").split(/[\\/]/).filter(Boolean));
+    this.migrationRuntime = require(path.join(path.dirname(pluginRoot), "migration-safe-fs.cjs"));
+    this.createSafeMigrationFs = this.migrationRuntime.createSafeMigrationFs;
+    this.migrationSafeFsUnavailable = this.migrationRuntime.MIGRATION_SAFE_FS_UNAVAILABLE;
+    if (typeof this.createSafeMigrationFs !== "function") throw new Error("山竹生图迁移安全运行时无效");
+    this._migrationSafeFs ||= this.createSafeMigrationFs({ vaultRoot: vaultBasePath });
+    const apiPath = path.join(pluginRoot, "image-api.cjs");
     this.api = require(apiPath);
     this.imageTaskViews = new Set();
     this.addRibbonIcon("image-plus", "山竹出图", () => void this.openModal());
@@ -408,9 +414,16 @@ module.exports = class MangosteenImagePlugin extends Plugin {
 
   async saveSettings() { await this.saveData(this.settings); }
   migrationSafeFs() {
-    return this._migrationSafeFs || createSafeMigrationFs({
+    if (this._migrationSafeFs) return this._migrationSafeFs;
+    const createSafeMigrationFs = this.createSafeMigrationFs || this.migrationRuntime?.createSafeMigrationFs;
+    if (typeof createSafeMigrationFs !== "function") {
+      const code = this.migrationSafeFsUnavailable || MIGRATION_SAFE_FS_UNAVAILABLE_FALLBACK;
+      throw Object.assign(new Error(`${code}：共享迁移安全运行时尚未加载。`), { code });
+    }
+    this._migrationSafeFs = createSafeMigrationFs({
       vaultRoot: this.app?.vault?.adapter?.getBasePath?.() || this.app?.vault?.adapter?.basePath || "",
     });
+    return this._migrationSafeFs;
   }
   imageHistoryMigrationFiles() {
     const output = [];
@@ -530,7 +543,7 @@ module.exports = class MangosteenImagePlugin extends Plugin {
       const current = await this.previewImageHistoryMigration(plan.plannedAt);
       if (current.blocked || historyMigration.imageHistoryPlanId(current) !== plan.planId) throw new Error(`确认后任务状态已变化：${current.reasons.join("；") || "整理清单不再一致"}`);
       if (!this.migrationSafeFs().capability.available) {
-        new Notice(`${MIGRATION_SAFE_FS_UNAVAILABLE}：${this.migrationSafeFs().capability.reason}`, 10000);
+        new Notice(`${this.migrationSafeFsUnavailable || MIGRATION_SAFE_FS_UNAVAILABLE_FALLBACK}：${this.migrationSafeFs().capability.reason}`, 10000);
         return false;
       }
       await this.executeImageHistoryMigration(current);
