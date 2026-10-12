@@ -61,9 +61,12 @@ const model = deriveCockpitModel({ project, draft, activeRun, selectedShotId: "0
 assert.deepStrictEqual(Object.keys(model), ["header", "rail", "editor", "monitor"]);
 assert.strictEqual(model.rail.items[7].status, "processing");
 assert.strictEqual(model.editor.locked, true);
+assert.strictEqual(model.monitor.shotId, "008");
+assert.strictEqual(model.monitor.paidTaskSubmitted, true);
 assert.strictEqual(model.monitor.taskId, "task_xxx");
+assert.strictEqual(model.monitor.taskIdAvailability, "available");
 assert.strictEqual(model.monitor.progress, 68);
-assert.deepStrictEqual(model.monitor.stages.map((item) => item.status), ["done", "done", "done", "active", "waiting"]);
+assert.deepStrictEqual(model.monitor.stages.map((item) => item.status), ["done", "done", "skipped", "active", "waiting"]);
 assert.strictEqual(model.rail.items[8].paidTaskSubmitted, false);
 assert.deepStrictEqual(model.header, {
   title: "九镜头样片",
@@ -82,6 +85,143 @@ const editableQueued = deriveCockpitModel({ project, draft, activeRun, selectedS
 assert.strictEqual(editableQueued.editor.locked, false, "an unpaid queued shot must remain editable");
 assert.strictEqual(editableQueued.editor.lockReason, null);
 assert.strictEqual(editableQueued.rail.items[8].locked, false);
+assert.strictEqual(editableQueued.monitor.shotId, "008", "editing another queued shot must keep the active shot authoritative in the monitor");
+assert.strictEqual(editableQueued.monitor.taskId, "task_xxx");
+assert.strictEqual(editableQueued.monitor.progress, 68);
+
+const threeShotDraft = {
+  ...draft,
+  shots: draft.shots.slice(0, 3),
+};
+const threeShotProject = {
+  ...project,
+  shots: project.shots.slice(0, 3).map((shot) => ({ ...shot, status: "等待生成", videoPath: undefined })),
+};
+const activeFirstShot = {
+  runId: "run-active-001",
+  status: "processing",
+  activeShotId: "001",
+  startedAt: "2026-10-11T15:00:00.000Z",
+  queue: ["001", "002"],
+  shots: {
+    "001": {
+      id: "001",
+      status: "video-processing",
+      stage: "provider-generation",
+      taskId: "task-001",
+      progress: 68,
+      paidTaskSubmitted: true,
+      generationContext: { requestVersion: 5, settings: { videoModel: "MiniMax-H3" } },
+      confirmedPayload: threeShotDraft.shots[0],
+    },
+    "002": {
+      id: "002",
+      status: "queued",
+      stage: "queued",
+      taskId: null,
+      progress: null,
+      paidTaskSubmitted: false,
+      generationContext: { requestVersion: 5, settings: { videoModel: "MiniMax-H3" } },
+      confirmedPayload: threeShotDraft.shots[1],
+    },
+  },
+};
+for (const selectedShotId of ["002", "003"]) {
+  const editingAnotherShot = deriveCockpitModel({
+    project: threeShotProject,
+    draft: threeShotDraft,
+    activeRun: activeFirstShot,
+    selectedShotId,
+    nowMs,
+  });
+  assert.strictEqual(editingAnotherShot.editor.shot.id, selectedShotId);
+  assert.strictEqual(editingAnotherShot.editor.locked, false);
+  assert.strictEqual(editingAnotherShot.monitor.shotId, "001");
+  assert.strictEqual(editingAnotherShot.monitor.taskId, "task-001");
+  assert.strictEqual(editingAnotherShot.monitor.progress, 68);
+  assert.strictEqual(editingAnotherShot.monitor.status, "processing");
+}
+
+for (const [status, patch, expectedAvailability] of [
+  ["submission-reserved", { submissionReservation: { reservationId: "reserved-without-id" }, paidTaskSubmitted: true }, "platform-pending"],
+  ["recovery-pending", { paidTaskSubmitted: true, recoveryContext: { boundary: "video-submission" } }, "recovery-pending"],
+  ["pending", { paidTaskSubmitted: false }, "not-submitted"],
+]) {
+  const taskIdentity = deriveCockpitModel({
+    project: threeShotProject,
+    draft: threeShotDraft,
+    activeRun: {
+      ...activeFirstShot,
+      activeShotId: "001",
+      shots: {
+        ...activeFirstShot.shots,
+        "001": { ...activeFirstShot.shots["001"], status, taskId: null, submissionReservation: null, ...patch },
+      },
+    },
+    selectedShotId: "002",
+    nowMs,
+  });
+  assert.strictEqual(taskIdentity.monitor.shotId, "001");
+  assert.strictEqual(taskIdentity.monitor.taskId, null);
+  assert.strictEqual(taskIdentity.monitor.taskIdAvailability, expectedAvailability);
+}
+
+function stageFixture({ videoModel, requestVersion, timeline, lastImagePrompt, stage = "provider-generation" }) {
+  const confirmedPayload = {
+    id: "001",
+    title: "阶段测试",
+    timeline,
+    lastImagePrompt,
+  };
+  return deriveCockpitModel({
+    project: { title: "阶段测试", shots: [{ id: "001", status: "等待生成" }] },
+    draft: { shots: [confirmedPayload] },
+    activeRun: {
+      runId: "stage-run",
+      status: "processing",
+      activeShotId: "001",
+      shots: {
+        "001": {
+          id: "001",
+          status: "video-processing",
+          stage,
+          paidTaskSubmitted: true,
+          taskId: "stage-task",
+          generationContext: { requestVersion, settings: { videoModel } },
+          confirmedPayload,
+        },
+      },
+    },
+    selectedShotId: "001",
+    nowMs,
+  });
+}
+
+const directReferenceStages = stageFixture({ videoModel: "seedance-2.5", requestVersion: 5, timeline: draft.shots[0].timeline });
+assert.deepStrictEqual(
+  directReferenceStages.monitor.stages.map(({ id, status }) => [id, status]),
+  [["references", "done"], ["first-frame", "skipped"], ["last-frame", "skipped"], ["provider", "active"], ["saving", "waiting"]],
+  "Seedance structured direct-reference mode must not claim skipped frames completed",
+);
+
+const firstFrameOnlyStages = stageFixture({ videoModel: "MiniMax-H3", requestVersion: 5, timeline: draft.shots[0].timeline });
+assert.deepStrictEqual(
+  firstFrameOnlyStages.monitor.stages.map(({ id, status }) => [id, status]),
+  [["references", "done"], ["first-frame", "done"], ["last-frame", "skipped"], ["provider", "active"], ["saving", "waiting"]],
+  "structured MiniMax runs must report only the required first frame",
+);
+
+const noLastFrameStages = stageFixture({ videoModel: "MiniMax-H3", requestVersion: 3, timeline: [], lastImagePrompt: "" });
+assert.strictEqual(noLastFrameStages.monitor.stages.find((stage) => stage.id === "last-frame").status, "skipped");
+
+const unknownStage = stageFixture({
+  videoModel: "MiniMax-H3",
+  requestVersion: 5,
+  timeline: draft.shots[0].timeline,
+  stage: "provider-awaiting-capacity",
+});
+assert(unknownStage.monitor.stages.some((stage) => stage.label === "provider-awaiting-capacity"), "unknown stages must keep their raw name");
+assert.strictEqual(unknownStage.monitor.stages.some((stage) => stage.status === "done"), false, "unknown stages must not invent completed steps");
 
 const noNumericProgress = deriveCockpitModel({
   project,
@@ -130,6 +270,7 @@ const regeneratingOldShot = deriveCockpitModel({
 assert.strictEqual(regeneratingOldShot.rail.items[7].status, "processing", "active-run status must override an old videoPath");
 assert.strictEqual(regeneratingOldShot.editor.locked, true, "regenerating an old completed shot must stay locked");
 assert.strictEqual(regeneratingOldShot.rail.items[7].taskId, null, "legacy task IDs must not leak into active-run shots");
+assert.strictEqual(regeneratingOldShot.monitor.taskId, null, "the active-run monitor must not fall back to an older project task ID");
 assert.strictEqual(regeneratingOldShot.rail.items[7].paidTaskSubmitted, false, "legacy paid markers must not leak into active-run shots");
 assert.strictEqual(regeneratingOldShot.monitor.progress, null, "an explicit active-run null must override legacy progress");
 assert.strictEqual(regeneratingOldShot.header.percent, null);

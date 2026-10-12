@@ -11,7 +11,7 @@ class FakeClassList {
 }
 
 class FakeElement {
-  constructor(tagName = "div") {
+  constructor(tagName = "div", ownerDocument = null) {
     this.tagName = String(tagName).toUpperCase();
     this.children = [];
     this.classList = new FakeClassList();
@@ -26,6 +26,10 @@ class FakeElement {
     this.scrollTop = 0;
     this.open = false;
     this.emptyCalls = 0;
+    this.ownerDocument = ownerDocument || { activeElement: null };
+    this.selectionStart = 0;
+    this.selectionEnd = 0;
+    this.selectionDirection = "none";
   }
 
   set innerHTML(_) { throw new Error("runtime UI must not inject HTML strings"); }
@@ -37,7 +41,7 @@ class FakeElement {
   setAttr(name, value) { this.attributes[name] = String(value); }
 
   createEl(tagName, options = {}) {
-    const child = new FakeElement(tagName);
+    const child = new FakeElement(tagName, this.ownerDocument);
     child.parentElement = this;
     if (options.cls) child.addClass(...(Array.isArray(options.cls) ? options.cls : [options.cls]));
     if (options.text !== undefined) child.setText(options.text);
@@ -61,6 +65,14 @@ class FakeElement {
 
   async dispatch(type) {
     for (const listener of this.listeners[type] || []) await listener({ currentTarget: this, target: this });
+  }
+
+  focus() { this.ownerDocument.activeElement = this; }
+
+  setSelectionRange(start, end, direction = "none") {
+    this.selectionStart = start;
+    this.selectionEnd = end;
+    this.selectionDirection = direction;
   }
 
   find(predicate) {
@@ -771,6 +783,38 @@ function createView(plugin) {
     "overview must not invent a percentage when the provider has not returned one",
   );
   assert(currentRunView.contentEl.find((element) => element.textContent === "活动中"));
+  await currentRunView.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "分镜").dispatch("click");
+  await currentRunView.contentEl.find((element) => element.tagName === "BUTTON" && element.dataset.selectShotId === "002").dispatch("click");
+  const monitorWhileEditing = currentRunView.contentEl.find((element) => element.classList.contains("generation-monitor"));
+  assert(monitorWhileEditing.find((element) => element.textContent === "镜头 001"), "selecting shot 002 must keep shot 001 in the monitor");
+  assert(monitorWhileEditing.find((element) => element.textContent === "task-current"));
+
+  const editingTitle = currentRunView.contentEl.find((element) => (
+    element.tagName === "INPUT" && element.dataset.shotIndex === "1" && element.dataset.field === "title"
+  ));
+  editingTitle.value = "第二镜后台更新不打断";
+  await editingTitle.dispatch("input");
+  editingTitle.focus();
+  editingTitle.setSelectionRange(3, 7, "forward");
+  const openPrompt = currentRunView.contentEl.find((element) => element.classList.contains("mangosteen-replica-prompt-disclosure"));
+  openPrompt.open = true;
+  currentRunPlugin.snapshot.currentRun.shots["001"].progress = 54;
+  currentRunPlugin.snapshot.currentRun.shots["001"].elapsedMs = 405000;
+  currentRunPlugin.snapshot.currentRun.shots["001"].stage = "saving";
+  await currentRunView.refresh();
+  const restoredTitle = currentRunView.contentEl.find((element) => (
+    element.tagName === "INPUT" && element.dataset.shotIndex === "1" && element.dataset.field === "title"
+  ));
+  assert.notStrictEqual(restoredTitle, editingTitle, "the regression must exercise a background-triggered full render");
+  assert.strictEqual(currentRunView.contentEl.ownerDocument.activeElement, restoredTitle, "background monitor updates must restore editor focus");
+  assert.strictEqual(restoredTitle.selectionStart, 3);
+  assert.strictEqual(restoredTitle.selectionEnd, 7);
+  assert.strictEqual(restoredTitle.selectionDirection, "forward");
+  assert.strictEqual(
+    currentRunView.contentEl.find((element) => element.classList.contains("mangosteen-replica-prompt-disclosure")).open,
+    true,
+    "background monitor updates must preserve the full-prompt disclosure state",
+  );
   await currentRunView.onClose();
 
   const partialLockView = createView(createPlugin({

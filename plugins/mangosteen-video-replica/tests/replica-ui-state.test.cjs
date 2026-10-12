@@ -39,9 +39,12 @@ assert.deepStrictEqual(empty, {
       effectivePrompt: "",
     },
     monitor: {
+      shotId: null,
       status: "idle",
+      paidTaskSubmitted: false,
       model: "",
       taskId: null,
+      taskIdAvailability: "not-submitted",
       elapsedMs: 0,
       progress: null,
       stages: [

@@ -1,3 +1,5 @@
+const { classifyModel } = require("./generation-policy.cjs");
+
 const ACTIVE_RUN_STATUSES = new Set(["queued", "processing", "stopping"]);
 const TERMINAL_STATUSES = new Set(["completed", "failed", "stopped"]);
 
@@ -133,26 +135,90 @@ function stageIndex(stage) {
   return -1;
 }
 
-function monitorStages(status, stage) {
+function stageRequirements(runShot, fallbackShot) {
+  const source = plainObject(runShot);
+  const fallback = plainObject(fallbackShot);
+  if (!Object.keys(source).length && !Object.keys(fallback).length) {
+    return { needsFirstFrame: null, needsLastFrame: null };
+  }
+  const context = plainObject(source.generationContext);
+  const confirmed = Object.keys(plainObject(source.confirmedPayload)).length
+    ? plainObject(source.confirmedPayload)
+    : fallback;
+  const explicitPlan = plainObject(source.stagePlan);
+  const explicitFirst = typeof source.needsFirstFrame === "boolean"
+    ? source.needsFirstFrame
+    : typeof explicitPlan.needsFirstFrame === "boolean"
+      ? explicitPlan.needsFirstFrame
+      : typeof context.needsFirstFrame === "boolean"
+        ? context.needsFirstFrame
+        : null;
+  const explicitLast = typeof source.needsLastFrame === "boolean"
+    ? source.needsLastFrame
+    : typeof explicitPlan.needsLastFrame === "boolean"
+      ? explicitPlan.needsLastFrame
+      : typeof context.needsLastFrame === "boolean"
+        ? context.needsLastFrame
+        : null;
+  const structuredTimeline = Number(context.requestVersion) >= 4
+    && Array.isArray(confirmed.timeline) && confirmed.timeline.length > 0;
+  const model = text(plainObject(context.settings).videoModel);
+  const directReferenceMode = structuredTimeline && classifyModel(model) === "seedance";
+  return {
+    needsFirstFrame: explicitFirst === null ? !directReferenceMode : explicitFirst,
+    needsLastFrame: explicitLast === null
+      ? !structuredTimeline && Boolean(text(confirmed.lastImagePrompt))
+      : explicitLast,
+  };
+}
+
+function monitorStages(status, stage, requirements) {
   const items = [
     { id: "references", label: "参考资产" },
-    { id: "first-frame", label: "首帧" },
-    { id: "last-frame", label: "尾帧" },
+    { id: "first-frame", label: "首帧", required: requirements.needsFirstFrame },
+    { id: "last-frame", label: "尾帧", required: requirements.needsLastFrame },
     { id: "provider", label: "视频生成" },
     { id: "saving", label: "保存成片" },
   ];
-  if (status === "completed") return items.map((item) => ({ ...item, status: "done" }));
+  if (status === "completed") {
+    return items.map(({ required, ...item }) => ({
+      ...item,
+      status: required === false ? "skipped" : "done",
+    }));
+  }
   const current = stageIndex(stage);
-  return items.map((item, index) => ({
+  const stages = items.map(({ required, ...item }, index) => ({
     ...item,
-    status: current < 0
-      ? "waiting"
-      : index < current
-        ? "done"
-        : index === current
-          ? status === "failed" ? "failed" : "active"
-          : "waiting",
+    status: required === false
+      ? "skipped"
+      : current < 0
+        ? "waiting"
+        : index < current
+          ? "done"
+          : index === current
+            ? status === "failed" ? "failed" : "active"
+            : "waiting",
   }));
+  const rawStage = text(stage);
+  if (current < 0 && rawStage) {
+    stages.push({
+      id: `raw:${rawStage}`,
+      label: rawStage,
+      status: status === "failed"
+        ? "failed"
+        : ACTIVE_RUN_STATUSES.has(status) || ["processing", "reserved", "recovery-pending"].includes(status)
+          ? "active"
+          : "waiting",
+    });
+  }
+  return stages;
+}
+
+function taskIdAvailability(taskId, status, paid) {
+  if (text(taskId)) return "available";
+  if (status === "recovery-pending") return "recovery-pending";
+  if (paid || status === "reserved") return "platform-pending";
+  return "not-submitted";
 }
 
 function statusLabel(status) {
@@ -219,15 +285,24 @@ function deriveCockpitModel(options = {}) {
   const selectedShot = plainObject(selected?.shot);
   const selectedStatus = selected?.status || "idle";
   const selectedPaid = selected?.paidTaskSubmitted === true;
-  const useRunLevel = Boolean(activeRun.runId)
+  const activeMonitorRunShot = activeShotId ? plainObject(activeShots.get(activeShotId)) : {};
+  const useActiveShot = Boolean(activeShotId && activeShots.has(activeShotId));
+  const useRunLevel = !useActiveShot && Boolean(activeRun.runId)
     && (activeRun.compatibilitySource === "legacy-state" || !selectedHasRunShot);
-  const monitorSource = useRunLevel ? activeRun : selectedRunShot;
+  const monitorSource = useActiveShot ? activeMonitorRunShot : useRunLevel ? activeRun : selectedRunShot;
+  const monitorShotId = useActiveShot ? activeShotId : useRunLevel ? activeShotId || null : selected?.id || null;
+  const monitorProjectShot = monitorShotId ? projectById.get(monitorShotId) || {} : selectedShot;
+  const monitorHasRunShot = useActiveShot || (!useRunLevel && selectedHasRunShot);
   const monitorStatus = useRunLevel
     ? normalizedStatus(activeRun, {}, ACTIVE_RUN_STATUSES.has(text(activeRun.status)), true)
-    : selectedStatus;
+    : useActiveShot
+      ? normalizedStatus(activeMonitorRunShot, monitorProjectShot, true, true)
+      : selectedStatus;
   const monitorPaid = useRunLevel
-    ? activeRun.paidTaskSubmitted === true || Boolean(text(activeRun.taskId))
-    : selectedPaid;
+    ? activeRun.paidTaskSubmitted === true || Boolean(text(activeRun.taskId) || activeRun.submissionReservation)
+    : useActiveShot
+      ? paidTaskSubmitted(activeMonitorRunShot, monitorProjectShot, true)
+      : selectedPaid;
   const startedAtMs = Date.parse(text(activeRun.startedAt) || text(activeRun.createdAt));
   const nowMs = Number.isFinite(input.nowMs) ? input.nowMs : Date.now();
   const persistedElapsedMs = Number(monitorSource.elapsedMs);
@@ -237,24 +312,30 @@ function deriveCockpitModel(options = {}) {
       ? Math.max(0, nowMs - startedAtMs)
       : 0;
   let monitorProgress = null;
-  if (selected) {
+  if (monitorShotId || useRunLevel) {
     if (useRunLevel) monitorProgress = numericProgress(activeRun.progress);
-    else if (selectedHasRunShot) monitorProgress = numericProgress(selectedRunShot.progress);
-    else monitorProgress = numericProgress(selectedShot.videoTaskProgress);
+    else if (monitorHasRunShot) monitorProgress = numericProgress(monitorSource.progress);
+    else monitorProgress = numericProgress(monitorProjectShot.videoTaskProgress);
   }
   const generationContext = plainObject(monitorSource.generationContext);
   const settings = plainObject(generationContext.settings);
   const monitorError = normalizedError(
-    useRunLevel ? activeRun.error : selectedHasRunShot ? selectedRunShot.error : selectedShot.error,
+    useRunLevel ? activeRun.error : monitorHasRunShot ? monitorSource.error : monitorProjectShot.error,
     monitorStatus,
     monitorPaid,
   );
   const completed = items.filter((item) => item.status === "completed").length;
   const currentText = useRunLevel && text(activeRun.stage)
     ? text(activeRun.stage)
-    : selected
-      ? `镜头 ${selected.id} · ${statusLabel(selectedStatus)}`
+    : monitorShotId
+      ? `镜头 ${monitorShotId} · ${statusLabel(monitorStatus)}`
       : text(activeRun.stage);
+  const monitorTaskId = (useRunLevel
+    ? text(activeRun.taskId)
+    : monitorHasRunShot
+      ? text(monitorSource.taskId)
+      : text(monitorProjectShot.videoTaskId)) || null;
+  const requirements = stageRequirements(monitorSource, monitorProjectShot);
 
   const railItems = items.map(({ shot, runShot, hasRunShot, ...item }) => item);
   return {
@@ -275,12 +356,15 @@ function deriveCockpitModel(options = {}) {
       effectivePrompt: selected ? effectivePrompt(selectedShot, selectedRunShot, selected.locked) : "",
     },
     monitor: {
+      shotId: monitorShotId,
       status: monitorStatus,
+      paidTaskSubmitted: monitorPaid,
       model: text(settings.videoModel) || text(activeRun.videoModel) || text(project.videoModel) || text(draft.settings?.videoModel),
-      taskId: (useRunLevel ? text(activeRun.taskId) : selected?.taskId) || null,
+      taskId: monitorTaskId,
+      taskIdAvailability: taskIdAvailability(monitorTaskId, monitorStatus, monitorPaid),
       elapsedMs,
       progress: monitorProgress,
-      stages: monitorStages(monitorStatus, monitorSource.stage || selectedShot.stage),
+      stages: monitorStages(monitorStatus, monitorSource.stage || monitorProjectShot.stage, requirements),
       error: monitorError,
     },
   };

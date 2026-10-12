@@ -153,21 +153,22 @@ function cockpitModel(selectedShotId = "001", progress = 68) {
       effectivePrompt: `完整最终提示词 ${selectedShotId}`,
     },
     monitor: {
-      status: selectedShotId === "001" ? "processing" : "ready",
+      shotId: "001",
+      paidTaskSubmitted: true,
+      taskIdAvailability: "available",
+      status: "processing",
       model: "MiniMax-H3",
-      taskId: selectedShotId === "001" ? "task_real_001" : null,
+      taskId: "task_real_001",
       elapsedMs: 402000,
-      progress: selectedShotId === "001" ? progress : null,
+      progress,
       stages: [
         { id: "references", label: "参考资产", status: "done" },
         { id: "first-frame", label: "首帧", status: "done" },
-        { id: "last-frame", label: "尾帧", status: "done" },
-        { id: "provider", label: "视频生成", status: selectedShotId === "001" ? "active" : "waiting" },
+        { id: "last-frame", label: "尾帧", status: "skipped" },
+        { id: "provider", label: "视频生成", status: "active" },
         { id: "saving", label: "保存成片", status: "waiting" },
       ],
-      error: selectedShotId === "001"
-        ? { message: "平台查询失败", nextAction: "继续查询原任务，禁止重复提交" }
-        : null,
+      error: { message: "平台查询失败", nextAction: "继续查询原任务，禁止重复提交" },
     },
     controls: {
       canGenerate: true,
@@ -258,6 +259,10 @@ assert.deepStrictEqual(
     element.tagName === "INPUT" && element.dataset.section === "shot" && element.dataset.field === "title"
   ));
   assert.strictEqual(editableTitle.disabled, false, "a non-processing shot must remain editable");
+  const activeMonitorText = textTree(parent.find((element) => element.classList.contains("generation-monitor")));
+  assert.match(activeMonitorText, /镜头 001/, "monitor identity must stay on the authoritative active shot");
+  assert.match(activeMonitorText, /task_real_001/);
+  assert.match(activeMonitorText, /68%/);
   assert.doesNotMatch(
     textTree(parent.find((element) => element.classList.contains("mangosteen-replica-cockpit-header"))),
     /活动中/,
@@ -272,6 +277,7 @@ assert.deepStrictEqual(
   assert.match(monitorText, /已等待 06:42/, "monitor must show elapsed waiting time");
   assert.match(monitorText, /参考资产/);
   assert.match(monitorText, /视频生成/);
+  assert.match(monitorText, /尾帧 无需/, "skipped stages must be shown as unnecessary, not completed");
   assert.match(monitorText, /平台查询失败/);
   assert.match(monitorText, /继续查询原任务，禁止重复提交/, "monitor errors must include a clear next action");
 
@@ -290,6 +296,25 @@ assert.deepStrictEqual(
   const unknownMonitor = textTree(unknownParent.find((element) => element.classList.contains("generation-monitor")));
   assert.match(unknownMonitor, /平台未提供百分比/);
   assert.doesNotMatch(unknownMonitor, /(?:^|\s)\d+%(?:\s|$)/, "unknown progress must not be converted into a percentage");
+
+  for (const [status, paidTaskSubmitted, taskIdAvailability, expectedText] of [
+    ["reserved", true, "platform-pending", "平台未返回"],
+    ["recovery-pending", true, "recovery-pending", "待恢复核对"],
+    ["pending", false, "not-submitted", "尚未提交"],
+  ]) {
+    const taskStateParent = new FakeElement();
+    const taskStateModel = cockpitModel("002", null);
+    taskStateModel.monitor = {
+      ...taskStateModel.monitor,
+      status,
+      paidTaskSubmitted,
+      taskId: null,
+      taskIdAvailability,
+      error: null,
+    };
+    renderGenerationMonitor(taskStateParent, taskStateModel, actions);
+    assert.match(textTree(taskStateParent), new RegExp(expectedText), `${status} must render its truthful missing task-ID state`);
+  }
 
   console.log("replica-cockpit: ok");
 })().catch((error) => {

@@ -143,6 +143,7 @@ function createVideoReplicaWorkbenchView(ItemView) {
     this.savedScrollTop = 0;
     this.collapsedSections = new Map();
     this.detailElements = [];
+    this.activeControlState = null;
     this.contentScrollEl = null;
     this.widthLabelEl = null;
     this.saveButtons = [];
@@ -302,6 +303,65 @@ function createVideoReplicaWorkbenchView(ItemView) {
   captureUiState() {
     if (this.contentScrollEl) this.savedScrollTop = Number(this.contentScrollEl.scrollTop) || 0;
     for (const { key, element } of this.detailElements) this.collapsedSections.set(key, Boolean(element.open));
+    const activeElement = this.contentEl?.ownerDocument?.activeElement;
+    const editableTags = new Set(["INPUT", "TEXTAREA", "SELECT"]);
+    if (!activeElement || !editableTags.has(String(activeElement.tagName || "").toUpperCase()) || !this.containsElement(activeElement)) {
+      this.activeControlState = null;
+      return;
+    }
+    const dataset = {};
+    for (const key of ["section", "field", "index", "shotIndex", "segmentIndex", "shotId", "selectShotId"]) {
+      if (activeElement.dataset?.[key] !== undefined) dataset[key] = String(activeElement.dataset[key]);
+    }
+    this.activeControlState = {
+      tagName: String(activeElement.tagName || "").toUpperCase(),
+      ariaLabel: this.elementAttribute(activeElement, "aria-label"),
+      dataset,
+      selectionStart: Number.isInteger(activeElement.selectionStart) ? activeElement.selectionStart : null,
+      selectionEnd: Number.isInteger(activeElement.selectionEnd) ? activeElement.selectionEnd : null,
+      selectionDirection: String(activeElement.selectionDirection || "none"),
+    };
+  }
+
+  elementAttribute(element, name) {
+    if (typeof element?.getAttribute === "function") return String(element.getAttribute(name) || "");
+    return String(element?.attributes?.[name] || "");
+  }
+
+  containsElement(element) {
+    if (typeof this.contentEl?.contains === "function") return this.contentEl.contains(element);
+    let current = element;
+    while (current) {
+      if (current === this.contentEl) return true;
+      current = current.parentElement;
+    }
+    return false;
+  }
+
+  editableControls() {
+    if (typeof this.contentEl?.querySelectorAll === "function") {
+      return [...this.contentEl.querySelectorAll("input, textarea, select")];
+    }
+    if (typeof this.contentEl?.findAll === "function") {
+      return this.contentEl.findAll((element) => ["INPUT", "TEXTAREA", "SELECT"].includes(String(element.tagName || "").toUpperCase()));
+    }
+    return [];
+  }
+
+  restoreActiveControl() {
+    const state = this.activeControlState;
+    if (!state) return;
+    const control = this.editableControls().find((element) => {
+      if (String(element.tagName || "").toUpperCase() !== state.tagName) return false;
+      if (this.elementAttribute(element, "aria-label") !== state.ariaLabel) return false;
+      return Object.entries(state.dataset).every(([key, value]) => String(element.dataset?.[key]) === value);
+    });
+    if (!control || control.disabled || typeof control.focus !== "function") return;
+    try { control.focus({ preventScroll: true }); } catch (_) { control.focus(); }
+    if (state.selectionStart === null || state.selectionEnd === null) return;
+    if (typeof control.setSelectionRange === "function") {
+      control.setSelectionRange(state.selectionStart, state.selectionEnd, state.selectionDirection);
+    }
   }
 
   render() {
@@ -332,6 +392,7 @@ function createVideoReplicaWorkbenchView(ItemView) {
     else this.renderOverview(content);
 
     content.scrollTop = this.savedScrollTop;
+    this.restoreActiveControl();
   }
 
   renderToolbar(parent) {
@@ -540,6 +601,12 @@ function createVideoReplicaWorkbenchView(ItemView) {
       registerButton: (kind, button, guardDisabled) => this.registerCockpitButton(kind, button, guardDisabled),
       registerSaveStatus: (element) => this.saveStatusElements.push(element),
       registerPromptPreview: (shotIndex, element) => this.promptPreviewElements.set(Number(shotIndex), element),
+      registerDisclosure: (key, element) => {
+        const storageKey = `cockpit:${key}`;
+        element.open = this.collapsedSections.has(storageKey) ? this.collapsedSections.get(storageKey) : Boolean(element.open);
+        element.addEventListener("toggle", () => this.collapsedSections.set(storageKey, Boolean(element.open)));
+        this.detailElements.push({ key: storageKey, element });
+      },
     });
   }
 

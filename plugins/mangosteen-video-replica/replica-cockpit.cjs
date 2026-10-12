@@ -47,8 +47,18 @@ function stageStatusLabel(status) {
     done: "完成",
     active: "处理中",
     failed: "失败",
+    skipped: "无需",
     waiting: "等待",
   })[String(status)] || text(status, "等待");
+}
+
+function taskIdStatusLabel(availability) {
+  return ({
+    available: "",
+    "not-submitted": "尚未提交",
+    "platform-pending": "平台未返回",
+    "recovery-pending": "待恢复核对",
+  })[String(availability)] || "尚未提交";
 }
 
 async function runAction(actions, action) {
@@ -110,12 +120,6 @@ function createField(parent, labelText, tagName, value, target, options = {}, ac
     });
   }
   return control;
-}
-
-function selectedRailItem(model) {
-  return list(model?.rail?.items).find((item) => item?.selected)
-    || list(model?.rail?.items).find((item) => text(item?.id) === text(model?.editor?.shot?.id))
-    || null;
 }
 
 function renderCockpitHeader(parent, model, actions) {
@@ -333,6 +337,7 @@ function renderShotEditor(parent, model, actions = {}) {
 
   const disclosure = body.createEl("details", { cls: "mangosteen-replica-prompt-disclosure" });
   disclosure.open = false;
+  actions.registerDisclosure?.(`prompt:${text(shot.id)}`, disclosure);
   disclosure.createEl("summary", { text: "查看完整视频提示词" });
   const prompt = disclosure.createEl("textarea", {
     attr: { readonly: "true", "aria-label": "最终视频提示词预览" },
@@ -364,7 +369,6 @@ function renderShotEditor(parent, model, actions = {}) {
 function renderGenerationMonitor(parent, model, actions = {}) {
   const monitor = plainObject(model?.monitor);
   const controls = plainObject(model?.controls);
-  const selected = selectedRailItem(model) || {};
   const panel = parent.createEl("aside", { cls: "generation-monitor mangosteen-replica-generation-monitor" });
   const head = panel.createDiv({ cls: "mangosteen-replica-pane-head" });
   head.createEl("h3", { text: "生成监控" });
@@ -373,12 +377,12 @@ function renderGenerationMonitor(parent, model, actions = {}) {
   const body = panel.createDiv({ cls: "mangosteen-replica-monitor-body" });
   const task = body.createDiv({ cls: `mangosteen-replica-task-card is-${text(monitor.status, "idle")}` });
   const taskTop = task.createDiv({ cls: "mangosteen-replica-task-top" });
-  taskTop.createEl("strong", { text: text(selected.id) ? `镜头 ${selected.id}` : "尚未选择镜头" });
+  taskTop.createEl("strong", { text: text(monitor.shotId) ? `镜头 ${monitor.shotId}` : "尚无活动镜头" });
   taskTop.createEl("span", { text: statusLabel(monitor.status) });
 
   const taskId = task.createDiv({ cls: "mangosteen-replica-task-id" });
   taskId.createEl("span", { text: "TASK ID" });
-  taskId.createEl("code", { text: text(monitor.taskId, "尚未提交") });
+  taskId.createEl("code", { text: text(monitor.taskId, taskIdStatusLabel(monitor.taskIdAvailability)) });
 
   const progress = numericProgress(monitor.progress);
   const progressBlock = task.createDiv({ cls: "mangosteen-replica-task-progress" });
@@ -408,7 +412,7 @@ function renderGenerationMonitor(parent, model, actions = {}) {
     const currentStage = list(monitor.stages).find((stage) => ["active", "failed"].includes(stage?.status));
     const errorBox = body.createDiv({ cls: "mangosteen-replica-monitor-error" });
     errorBox.createEl("strong", { text: text(error.message, "任务发生错误") });
-    errorBox.createEl("p", { text: `阶段：${text(currentStage?.label, "状态核对")} · ${selected.paidTaskSubmitted ? "已提交付费任务" : "尚未提交付费任务"}` });
+    errorBox.createEl("p", { text: `阶段：${text(currentStage?.label, "状态核对")} · ${monitor.paidTaskSubmitted ? "已提交付费任务" : "尚未提交付费任务"}` });
     errorBox.createEl("p", { cls: "mangosteen-replica-next-action", text: `下一步：${text(error.nextAction, "检查任务记录后再操作")}` });
   }
 
