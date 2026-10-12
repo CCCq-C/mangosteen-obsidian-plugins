@@ -1,4 +1,5 @@
 const { classifyModel } = require("./generation-policy.cjs");
+const { lockedShotIds } = require("./generation-queue.cjs");
 
 const ACTIVE_RUN_STATUSES = new Set(["queued", "processing", "stopping"]);
 const TERMINAL_STATUSES = new Set(["completed", "failed", "stopped"]);
@@ -59,7 +60,12 @@ function paidTaskSubmitted(runShot, projectShot, hasRunShot) {
   return Boolean(text(projectShot.videoTaskId));
 }
 
-function lockState(status, paid, isActiveShot) {
+function lockState(status, paid, isActiveShot, queued) {
+  if (queued) {
+    return status === "processing"
+      ? { locked: true, lockReason: "当前镜头正在生成" }
+      : { locked: true, lockReason: "已加入生成队列，完成或停止前不能编辑" };
+  }
   if (TERMINAL_STATUSES.has(status) || status === "ready" || status === "pending") {
     if (status === "pending" && paid) {
       return { locked: true, lockReason: "付费任务已保留，完成核对前不能编辑" };
@@ -244,6 +250,7 @@ function deriveCockpitModel(options = {}) {
   const sourceShots = draftShots.length ? draftShots : projectShots;
   const projectById = new Map(projectShots.map((shot, index) => [shotId(shot, index), plainObject(shot)]));
   const activeShots = runShots(activeRun);
+  const queueLockedIds = new Set(lockedShotIds(activeRun));
   const activeShotId = text(activeRun.activeShotId);
 
   const items = sourceShots.map((sourceShot, index) => {
@@ -255,7 +262,7 @@ function deriveCockpitModel(options = {}) {
     const isActiveShot = activeShotId === id;
     const status = normalizedStatus(runShot, projectShot, isActiveShot, hasRunShot);
     const paid = paidTaskSubmitted(runShot, projectShot, hasRunShot);
-    const lock = lockState(status, paid, isActiveShot);
+    const lock = lockState(status, paid, isActiveShot, queueLockedIds.has(id));
     return {
       id,
       title: text(shot.title),

@@ -1,4 +1,5 @@
 const { deriveCockpitModel } = require("./replica-cockpit-model.cjs");
+const { lockedShotIds: queueLockedShotIds } = require("./generation-queue.cjs");
 
 function plainObject(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
@@ -123,11 +124,7 @@ function deriveWorkbenchState(options = {}) {
     nowMs: input.nowMs,
   });
   const queueShots = hasActiveRun ? activeRunQueueShots(activeRun) : records(generationQueue.shots);
-  const lockedShotIds = hasActiveRun
-    ? cockpit.rail.items.filter((shot) => shot.locked).map((shot) => shot.id)
-    : queueShots
-      .filter((shot) => shot.status === "queued" || shot.status === "processing")
-      .map((shot) => text(shot.id));
+  const lockedShotIds = queueLockedShotIds(hasActiveRun ? activeRun : generationQueue);
   const queueActive = hasActiveRun
     ? ["queued", "processing", "stopping"].includes(text(activeRun.status))
     : lockedShotIds.length > 0 && ["idle", "processing"].includes(text(generationQueue.status));

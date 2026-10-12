@@ -146,12 +146,12 @@ const authoritativeActiveRun = deriveWorkbenchState({
 assert.strictEqual(authoritativeActiveRun.status, "processing", "activeRun must override legacy generation state");
 assert.strictEqual(authoritativeActiveRun.statusText, "镜头 008 · 生成中");
 assert.strictEqual(authoritativeActiveRun.error, null);
-assert.deepStrictEqual(authoritativeActiveRun.lockedShotIds, ["008"]);
+assert.deepStrictEqual(authoritativeActiveRun.lockedShotIds, ["008", "009"]);
 assert.strictEqual(authoritativeActiveRun.locked, false, "an active run must not lock the whole draft");
 assert.deepStrictEqual(authoritativeActiveRun.progress, { percent: 68, indeterminate: false, label: "分镜队列" });
 assert.deepStrictEqual(authoritativeActiveRun.current, { step: "镜头 008 · 生成中", model: "MiniMax-H3", elapsedMs: 120000 });
 assert.strictEqual(authoritativeActiveRun.cockpit.monitor.taskId, "task-authoritative");
-assert.strictEqual(authoritativeActiveRun.cockpit.rail.items[1].locked, false, "unpaid queued shots must stay editable");
+assert.strictEqual(authoritativeActiveRun.cockpit.rail.items[1].locked, true, "confirmed queued shots must lock before paid submission starts");
 
 const activeRunWithoutProgress = deriveWorkbenchState({
   project: {

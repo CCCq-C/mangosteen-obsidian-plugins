@@ -716,6 +716,7 @@ function createView(plugin) {
     shots: [
       clone(request.shots[0]),
       { ...clone(request.shots[0]), id: "002", title: "第二镜", videoPrompt: "第二镜动作" },
+      { ...clone(request.shots[0]), id: "003", title: "第三镜", videoPrompt: "第三镜动作" },
     ],
   };
   const currentRunPlugin = createPlugin({
@@ -734,6 +735,7 @@ function createView(plugin) {
           videoTaskProgress: 72,
         },
         { id: "002", title: "第二镜", status: "等待生成" },
+        { id: "003", title: "第三镜", status: "等待生成" },
       ],
     },
     currentRun: {
@@ -771,8 +773,9 @@ function createView(plugin) {
   const currentRunView = createView(currentRunPlugin);
   await currentRunView.onOpen();
   assert.strictEqual(currentRunView.snapshot.currentRun.runId, "current-run-authoritative", "the loaded currentRun must survive the workbench snapshot boundary");
-  assert.deepStrictEqual(currentRunView.viewModel.lockedShotIds, ["001"], "only the processing current-run shot may be locked");
-  assert.strictEqual(currentRunView.viewModel.cockpit.rail.items[1].locked, false, "an unpaid queued current-run shot must stay editable");
+  assert.deepStrictEqual(currentRunView.viewModel.lockedShotIds, ["001", "002"], "processing and queued current-run shots must both be locked");
+  assert.strictEqual(currentRunView.viewModel.cockpit.rail.items[1].locked, true, "a confirmed queued shot must lock before paid submission starts");
+  assert.strictEqual(currentRunView.viewModel.cockpit.rail.items[2].locked, false, "a shot outside the queue must remain editable");
   assert.strictEqual(currentRunView.viewModel.cockpit.monitor.taskId, "task-current");
   assert.strictEqual(currentRunView.viewModel.cockpit.monitor.progress, null, "missing provider progress must remain null through the workbench snapshot");
   assert.strictEqual(currentRunView.viewModel.progress.percent, null);
@@ -785,14 +788,28 @@ function createView(plugin) {
   assert(currentRunView.contentEl.find((element) => element.textContent === "活动中"));
   await currentRunView.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "分镜").dispatch("click");
   await currentRunView.contentEl.find((element) => element.tagName === "BUTTON" && element.dataset.selectShotId === "002").dispatch("click");
+  const queuedTitle = currentRunView.contentEl.find((element) => (
+    element.tagName === "INPUT" && element.dataset.shotIndex === "1" && element.dataset.field === "title"
+  ));
+  assert.strictEqual(queuedTitle.disabled, true, "queued shot fields must be disabled in the cockpit");
+  const queuedCheckbox = currentRunView.contentEl.find((element) => (
+    element.tagName === "INPUT" && element.attributes.type === "checkbox" && element.dataset.shotId === "002"
+  ));
+  assert.strictEqual(queuedCheckbox.disabled, true, "queued shots must not be selectable again");
+  await currentRunView.contentEl.find((element) => element.tagName === "BUTTON" && element.dataset.selectShotId === "003").dispatch("click");
   const monitorWhileEditing = currentRunView.contentEl.find((element) => element.classList.contains("generation-monitor"));
-  assert(monitorWhileEditing.find((element) => element.textContent === "镜头 001"), "selecting shot 002 must keep shot 001 in the monitor");
+  assert(monitorWhileEditing.find((element) => element.textContent === "镜头 001"), "selecting an unqueued shot must keep shot 001 in the monitor");
   assert(monitorWhileEditing.find((element) => element.textContent === "task-current"));
 
   const editingTitle = currentRunView.contentEl.find((element) => (
-    element.tagName === "INPUT" && element.dataset.shotIndex === "1" && element.dataset.field === "title"
+    element.tagName === "INPUT" && element.dataset.shotIndex === "2" && element.dataset.field === "title"
   ));
-  editingTitle.value = "第二镜后台更新不打断";
+  assert.strictEqual(editingTitle.disabled, false, "a shot outside the queue must remain editable");
+  const editableCheckbox = currentRunView.contentEl.find((element) => (
+    element.tagName === "INPUT" && element.attributes.type === "checkbox" && element.dataset.shotId === "003"
+  ));
+  assert.strictEqual(editableCheckbox.disabled, false, "a shot outside the queue must remain selectable");
+  editingTitle.value = "第三镜后台更新不打断";
   await editingTitle.dispatch("input");
   editingTitle.focus();
   editingTitle.setSelectionRange(3, 7, "forward");
@@ -803,7 +820,7 @@ function createView(plugin) {
   currentRunPlugin.snapshot.currentRun.shots["001"].stage = "saving";
   await currentRunView.refresh();
   const restoredTitle = currentRunView.contentEl.find((element) => (
-    element.tagName === "INPUT" && element.dataset.shotIndex === "1" && element.dataset.field === "title"
+    element.tagName === "INPUT" && element.dataset.shotIndex === "2" && element.dataset.field === "title"
   ));
   assert.notStrictEqual(restoredTitle, editingTitle, "the regression must exercise a background-triggered full render");
   assert.strictEqual(currentRunView.contentEl.ownerDocument.activeElement, restoredTitle, "background monitor updates must restore editor focus");

@@ -373,6 +373,38 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   assert.strictEqual(fs.readFileSync(path.join(versionSixRoot, "03-分镜/001/视频.mp4"), "utf8"), "artifact-one");
   assert.strictEqual(fs.readFileSync(path.join(versionSixRoot, "03-分镜/002/视频.mp4"), "utf8"), "artifact-two");
 
+  const versionSixActiveRunPath = path.join(versionSixMetadata, "active-run.json");
+  fs.writeFileSync(versionSixActiveRunPath, JSON.stringify({
+    runId: "queued-save-contract",
+    queueId: "queued-save-contract",
+    status: "processing",
+    activeShotId: null,
+    queue: ["001"],
+    shots: {
+      "001": { id: "001", status: "queued", stage: "queued", paidTaskSubmitted: false },
+    },
+  }));
+  const queuedSaveDraft = plugin.loadWorkbenchProject(versionSixFolder).request;
+  const editableShotIndex = queuedSaveDraft.shots.findIndex((shot) => shot.id === "002");
+  const savedWhileQueued = await plugin.saveWorkbenchDraft(
+    versionSixFolder,
+    replicaEditor.updateDraftField(queuedSaveDraft, { section: "shot", index: editableShotIndex, field: "title" }, "第二镜排队期间仍可编辑"),
+  );
+  assert.strictEqual(savedWhileQueued.shots.find((shot) => shot.id === "002").title, "第二镜排队期间仍可编辑");
+  assert.strictEqual(savedWhileQueued.shots.find((shot) => shot.id === "001").title, "第一镜已编辑");
+  const lockedShotIndex = savedWhileQueued.shots.findIndex((shot) => shot.id === "001");
+  await assert.rejects(
+    () => plugin.saveWorkbenchDraft(
+      versionSixFolder,
+      replicaEditor.updateDraftField(savedWhileQueued, { section: "shot", index: lockedShotIndex, field: "title" }, "排队镜头不应被改写"),
+    ),
+    /镜头 001.*队列|不能修改/,
+    "the save boundary must accept editable shots and reject the same queued shot the UI locks",
+  );
+  fs.rmSync(versionSixActiveRunPath, { force: true });
+  plugin.queueApis.delete(versionSixFolder);
+  plugin.activeQueueObjects.delete(versionSixFolder);
+
   const pluginConcatSuccess = path.join(vault, "fake-plugin-concat-success");
   const pluginConcatFailure = path.join(vault, "fake-plugin-concat-failure");
   fs.writeFileSync(pluginConcatSuccess, `#!/usr/bin/env node

@@ -81,13 +81,13 @@ assert.deepStrictEqual(model.editor.timeline, draft.shots[7].timeline);
 assert.strictEqual(model.monitor.model, "MiniMax-H3");
 assert.strictEqual(model.monitor.elapsedMs, 402000, "persisted elapsed time is authoritative when present");
 
-const editableQueued = deriveCockpitModel({ project, draft, activeRun, selectedShotId: "009", nowMs });
-assert.strictEqual(editableQueued.editor.locked, false, "an unpaid queued shot must remain editable");
-assert.strictEqual(editableQueued.editor.lockReason, null);
-assert.strictEqual(editableQueued.rail.items[8].locked, false);
-assert.strictEqual(editableQueued.monitor.shotId, "008", "editing another queued shot must keep the active shot authoritative in the monitor");
-assert.strictEqual(editableQueued.monitor.taskId, "task_xxx");
-assert.strictEqual(editableQueued.monitor.progress, 68);
+const lockedQueued = deriveCockpitModel({ project, draft, activeRun, selectedShotId: "009", nowMs });
+assert.strictEqual(lockedQueued.editor.locked, true, "a confirmed queued shot must lock before paid submission starts");
+assert.match(lockedQueued.editor.lockReason, /生成队列|不能编辑/);
+assert.strictEqual(lockedQueued.rail.items[8].locked, true);
+assert.strictEqual(lockedQueued.monitor.shotId, "008", "viewing another queued shot must keep the active shot authoritative in the monitor");
+assert.strictEqual(lockedQueued.monitor.taskId, "task_xxx");
+assert.strictEqual(lockedQueued.monitor.progress, 68);
 
 const threeShotDraft = {
   ...draft,
@@ -126,7 +126,7 @@ const activeFirstShot = {
     },
   },
 };
-for (const selectedShotId of ["002", "003"]) {
+for (const [selectedShotId, expectedLocked] of [["002", true], ["003", false]]) {
   const editingAnotherShot = deriveCockpitModel({
     project: threeShotProject,
     draft: threeShotDraft,
@@ -135,7 +135,7 @@ for (const selectedShotId of ["002", "003"]) {
     nowMs,
   });
   assert.strictEqual(editingAnotherShot.editor.shot.id, selectedShotId);
-  assert.strictEqual(editingAnotherShot.editor.locked, false);
+  assert.strictEqual(editingAnotherShot.editor.locked, expectedLocked, "only shots already in the queue may be locked");
   assert.strictEqual(editingAnotherShot.monitor.shotId, "001");
   assert.strictEqual(editingAnotherShot.monitor.taskId, "task-001");
   assert.strictEqual(editingAnotherShot.monitor.progress, 68);
@@ -373,7 +373,7 @@ assert.deepStrictEqual(runLevelRecovery.monitor.error, {
 for (const [status, patch, expectedStatus, expectedLocked] of [
   ["submission-reserved", { submissionReservation: { reservationId: "reservation-1" } }, "reserved", true],
   ["recovery-pending", { paidTaskSubmitted: true, taskId: "task-recovery" }, "recovery-pending", true],
-  ["pending", { paidTaskSubmitted: false, taskId: null }, "pending", false],
+  ["pending", { paidTaskSubmitted: false, taskId: null }, "pending", true],
 ]) {
   const state = deriveCockpitModel({
     project,

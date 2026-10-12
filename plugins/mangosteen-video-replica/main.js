@@ -1606,11 +1606,12 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     const lockedIds = new Set(api.lockedShotIds(queue));
     if (lockedIds.size) {
       const normalizedCurrent = core.normalizeGenerationRequest({ ...currentRequest, confirmed: true });
-      if (JSON.stringify(normalizedCurrent.visualStyle) !== JSON.stringify(savedRequest.visualStyle)) {
+      const normalizedSaved = core.normalizeGenerationRequest({ ...savedRequest, confirmed: true });
+      if (JSON.stringify(normalizedCurrent.visualStyle) !== JSON.stringify(normalizedSaved.visualStyle)) {
         throw new Error("项目统一视觉风格正在被生成队列使用，完成或停止后才能修改。");
       }
       const currentById = new Map(normalizedCurrent.shots.map((shot) => [String(shot.id), shot]));
-      const nextById = new Map(savedRequest.shots.map((shot) => [String(shot.id), shot]));
+      const nextById = new Map(normalizedSaved.shots.map((shot) => [String(shot.id), shot]));
       for (const id of lockedIds) {
         const currentShot = currentById.get(id);
         const nextShot = nextById.get(id);
@@ -1621,7 +1622,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         });
         if (!currentShot || !nextShot
           || JSON.stringify(snapshot(currentShot, Number(normalizedCurrent.version) < 4))
-            !== JSON.stringify(snapshot(nextShot, Number(savedRequest.version) < 4))) {
+            !== JSON.stringify(snapshot(nextShot, Number(normalizedSaved.version) < 4))) {
           throw new Error(`镜头 ${id} 正在队列中，完成或停止前不能修改。`);
         }
       }
