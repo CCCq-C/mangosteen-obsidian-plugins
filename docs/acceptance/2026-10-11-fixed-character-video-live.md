@@ -18,7 +18,7 @@
 - Queued and processing shots now share one lock rule in the ViewModel, UI, and save boundary; non-queued shots remain selectable and editable. The active-run disabled state for “整理当前项目” is regression-tested, but no live active task was created solely to exercise that state.
 - Migration execution remains **fail-closed**. The current Obsidian Node runtime does not provide a vetted descriptor-relative `openat/*at` filesystem capability, so migration is limited to read-only preview and must not be described as executable offline migration.
 - No old file was moved or reorganized. Existing projects remain readable without automatic migration.
-- No paid image or video generation acceptance was run for this release. The one-shot billed acceptance remains pending explicit user cost approval.
+- At the original release gate no paid task was run. The explicitly approved one-shot billed acceptance was completed later on 2026-10-12; see the section below.
 
 ## Live outputs
 
@@ -63,3 +63,16 @@ One extra first-frame image task was accepted before a full Obsidian restart loa
 - The first H3 call predates request-shape persistence; the bounded final H3 rerun supplies the missing direct field-presence evidence without altering earlier outputs.
 - Two short, single-character shots do not establish long-form or multi-character identity locking.
 - Two completed image tasks had not yet received matched usage cost at inspection time; they are recorded as unknown, not zero.
+
+## Organized cockpit billed acceptance (2026-10-12)
+
+- Project: `山竹视频复刻/付费验收-新版稳定存储-2026-10-12`.
+- Run: `run_3ddc20032e7454191c3813509bc66562f8106cd5f52afa42a403bdb09139e891`; terminal state `completed`; one selected shot, one completed, zero failed.
+- First frame: task `task_Qy4Ul4kTgRUmTHksiG31DnGuns9HqEuf`; cost `$0.02835`; saved to `03-分镜/001/首帧.png`; SHA-256 `6292e780a49b0e2f998fe13eaed884a8c0b16bc988337927661f4dcf41d84b1f`.
+- Video: task `task_gFgLkbeeuaz4tsQJp3aVwhmM4ZZhZH3u`; usage request `202610120633421018607128268d9d69YxH6yS5`; MiniMax-H3, requested 4 seconds at 768p with one first-image reference; cost `$0.8712`.
+- Shot output: `03-分镜/001/视频.mp4`; 3,054,084 bytes; 4.458333 seconds; 768×832, H.264/AAC, 24 fps; SHA-256 `17ddb535598b8e2f1e8b45ff3a290431144dbd6c185a9f82ac526bfc605f692e`.
+- Final output: `04-最终成片/最终成片.mp4`; 3,053,501 bytes; 4.490315 seconds; 768×832, H.264/AAC, 24 fps; SHA-256 `d8d19fa7bfc1ccdcfed77e75bcee56cf118363623e45acc9b612b64a435b88a6`.
+- Total billed cost: `$0.89955`. Exactly one first-frame task and one video task were submitted; no duplicate video was created.
+- Restart recovery was exercised between first-frame submission and video continuation. The completed image was reused from its exact durable output target and the queue continued without a duplicate paid image request.
+- Follow-up hardening persists the exact resolved runtime fingerprint before a paid frame request, retries transient model-catalog startup races, periodically reconciles completed image reservations, and exposes the latest archived task ID without reactivating the completed queue.
+- Post-fix verification: video-replica 19/19, image 4/4, video 4/4, deployment scripts 2/2, plus `git diff --check`.

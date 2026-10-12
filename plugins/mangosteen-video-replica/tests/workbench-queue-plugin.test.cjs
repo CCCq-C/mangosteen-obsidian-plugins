@@ -90,6 +90,28 @@ function request() {
     workspace: { getLeavesOfType: () => [] },
     plugins: { getPlugin: () => null },
   };
+  let startupVideoCatalogCalls = 0;
+  const startupImagePlugin = {
+    generateText: async () => ({}),
+    generateEdit: async () => ({}),
+    refreshAgentAccess: async () => ({ imageModelKeys: { "gpt-image-2-w": "image-key" } }),
+  };
+  const startupVideoPlugin = {
+    settings: { resolution: "768p" },
+    submitVideo: async () => ({}),
+    refreshVideoTasks: async () => {},
+    refreshAgentAccess: async () => {
+      startupVideoCatalogCalls += 1;
+      if (startupVideoCatalogCalls === 1) throw new Error("视频模型暂未同步，请稍后重试。");
+      return { videoModelKeys: { "MiniMax-H3": "video-key" } };
+    },
+  };
+  plugin.app.plugins.getPlugin = (id) => id === "mangosteen-image" ? startupImagePlugin : id === "mangosteen-video" ? startupVideoPlugin : null;
+  plugin.generationCatalogRetryDelayMs = 0;
+  const startupRuntime = await plugin.resolveQueueGenerationRuntime(request().settings);
+  assert.strictEqual(startupRuntime.model, "MiniMax-H3");
+  assert.strictEqual(startupVideoCatalogCalls, 2, "startup recovery must retry a transiently unsynchronized video catalog");
+  plugin.app.plugins.getPlugin = () => null;
   plugin.refreshGenerationModelCatalog = async () => ({
     imageModels: ["gpt-image-2-w"],
     videoModels: ["MiniMax-H3"],
@@ -350,6 +372,11 @@ function request() {
     directRunStateUpdates.some((patch) => patch.stage === "first-frame" && patch.paidTaskSubmitted === true),
     true,
     "a completed paid image submission must mark the active run even before a video task ID exists",
+  );
+  assert.match(
+    String(directRunStateUpdates.find((patch) => patch.generationFingerprint)?.generationFingerprint || ""),
+    /^sha256:/,
+    "the exact resolved generation fingerprint must be durable before paid image submission",
   );
   duringVideo.shots.find((shot) => shot.id === "001").title = "用户生成期间修改的第一镜";
   fs.writeFileSync(path.join(root, "project.json"), JSON.stringify(duringVideo));
@@ -1536,6 +1563,181 @@ function request() {
   plugin.copyVaultFile = () => { v6RecoveryCopyCalls += 1; throw new Error("v6 recovery must never copy"); };
   const paidSubmissionsBeforeActiveRunRecovery = submittedVideoOptions.length;
   const v6RecoveryVideoPath = projectStorage.shotArtifactPaths(v6Folder, "001").video;
+
+  const imageRecoveryFolder = "山竹视频复刻/版本六首帧恢复";
+  const imageRecoveryRoot = path.join(vault, ...imageRecoveryFolder.split("/"));
+  const imageRecoveryMetadata = path.join(imageRecoveryRoot, ".mangosteen");
+  const imageRecoveryArtifacts = projectStorage.shotArtifactPaths(imageRecoveryFolder, "001");
+  fs.mkdirSync(path.join(imageRecoveryMetadata, "runs"), { recursive: true });
+  fs.mkdirSync(path.join(vault, ...imageRecoveryArtifacts.folder.split("/")), { recursive: true });
+  fs.writeFileSync(path.join(vault, ...imageRecoveryArtifacts.firstFrame.split("/")), "completed-first-frame");
+  fs.writeFileSync(path.join(imageRecoveryMetadata, "project.json"), JSON.stringify({
+    schemaVersion: 6,
+    layoutVersion: 6,
+    projectId: "版本六首帧恢复",
+    id: "版本六首帧恢复",
+    folder: imageRecoveryFolder,
+    title: "版本六首帧恢复",
+    status: "generating",
+    shots: [
+      { id: "001", title: "第一镜", currentArtifacts: {}, generationFingerprint: "", firstImagePath: "", imagePath: "", lastImagePath: "", videoPath: "" },
+      { id: "002", title: "第二镜", currentArtifacts: {}, generationFingerprint: "", firstImagePath: "", imagePath: "", lastImagePath: "", videoPath: "" },
+    ],
+    characterAsset: { id: "hero", contentHash: "character-hero-hash" },
+    sceneAssets: [{ id: "room", contentHash: "scene-room-hash" }],
+    productAssets: [{ id: "phone", contentHash: "product-phone-hash" }],
+  }));
+  const imageRecoveryRequest = request();
+  imageRecoveryRequest.settings = { ...imageRecoveryRequest.settings, videoModel: "minimax-h3", resolution: "" };
+  fs.writeFileSync(path.join(imageRecoveryMetadata, "draft.json"), JSON.stringify({ ...imageRecoveryRequest, schemaVersion: 6 }));
+  const imageRecoveryPreview = await plugin.previewWorkbenchGeneration(imageRecoveryFolder, ["001"]);
+  const imageRecoveryPlan = confirmGenerationPlan(
+    imageRecoveryPreview,
+    JSON.parse(fs.readFileSync(path.join(imageRecoveryMetadata, "draft.json"), "utf8")),
+  );
+  const imageRecoveryRun = createGenerationQueue(imageRecoveryPlan, { now: "2026-10-12T05:57:47.216Z" });
+  imageRecoveryRun.runId = "v6-first-frame-recovery";
+  imageRecoveryRun.queueId = imageRecoveryRun.runId;
+  imageRecoveryRun.status = "processing";
+  imageRecoveryRun.activeShotId = "001";
+  Object.assign(imageRecoveryRun.shots["001"], {
+    status: "recovery-pending",
+    stage: "first-frame",
+    paidTaskSubmitted: true,
+    submissionUncertain: true,
+    submissionReservation: {
+      runId: imageRecoveryRun.runId,
+      shotId: "001",
+      boundary: "first-frame",
+      reservationId: "first-frame-reservation",
+      createdAt: "2026-10-12T05:57:47.568Z",
+      status: "submission-reserved",
+      previousStatus: "image-processing",
+      previousStage: "first-frame",
+    },
+  });
+  imageRecoveryRun.shots["001"].generationFingerprint = generationPolicy.createGenerationFingerprint({
+    requestVersion: imageRecoveryPlan.requestVersion,
+    visualStyle: imageRecoveryPlan.visualStyle,
+    character: { ...imageRecoveryPlan.character, contentHash: "character-hero-hash" },
+    scene: { ...imageRecoveryPlan.scenes.find((scene) => scene.id === "room"), contentHash: "scene-room-hash" },
+    products: imageRecoveryPlan.products.map((product) => ({ ...product, contentHash: `product-${product.id}-hash` })),
+    shot: imageRecoveryPlan.shots.find((shot) => shot.id === "001"),
+    model: "MiniMax-H3",
+    ratio: imageRecoveryPlan.settings.ratio,
+    resolution: "768p",
+  });
+  const imageRecoveryActivePath = path.join(imageRecoveryMetadata, "active-run.json");
+  fs.writeFileSync(imageRecoveryActivePath, JSON.stringify(imageRecoveryRun));
+  const recoveredImageTask = {
+    id: "task-completed-first-frame",
+    createdAt: "2026-10-12T05:58:02.482Z",
+    status: "completed",
+    saved: true,
+    imagePaths: [imageRecoveryArtifacts.firstFrame],
+    outputTarget: {
+      owner: "video-replica",
+      projectId: "版本六首帧恢复",
+      shotId: "001",
+      assetType: "first-frame",
+      destinationPath: imageRecoveryArtifacts.firstFrame,
+      overwrite: "replace-current",
+    },
+  };
+  const getGenerationPluginsBeforeImageRecovery = plugin.getGenerationPlugins;
+  const runWorkbenchQueueShotBeforeImageRecovery = plugin.runWorkbenchQueueShot;
+  const ensureReferenceAssetBeforeImageRecovery = plugin.ensureReferenceAsset;
+  const resolveRuntimeBeforeImageRecovery = plugin.resolveQueueGenerationRuntime;
+  const generateImageBeforeImageRecovery = plugin.generateImageMulti;
+  const waitForVideoBeforeImageRecovery = plugin.waitForVideo;
+  let recoveredImageSubmissions = 0;
+  let recoveredVideoSubmissions = 0;
+  let imageReservationResolvedBeforeRunner = false;
+  const recoveredImagePlugin = { settings: { imageTasks: [recoveredImageTask] } };
+  const recoveredVideoPlugin = {
+    settings: { videoTasks: [], resolution: "768p" },
+    submitVideo: async (options) => {
+      recoveredVideoSubmissions += 1;
+      recoveredVideoPlugin.settings.videoTasks = [{ id: "video-after-first-frame-recovery", status: "processing", outputTarget: options.outputTarget }];
+      return { id: "video-after-first-frame-recovery" };
+    },
+  };
+  plugin.getGenerationPlugins = () => ({ image: recoveredImagePlugin, video: recoveredVideoPlugin });
+  plugin.runWorkbenchQueueShot = async (...args) => {
+    const recoveredActive = JSON.parse(fs.readFileSync(imageRecoveryActivePath, "utf8"));
+    assert.strictEqual(recoveredActive.shots["001"].submissionReservation, null);
+    assert.strictEqual(recoveredActive.shots["001"].submissionUncertain, false);
+    assert.strictEqual(recoveredActive.shots["001"].recoveryContext.imageTaskId, recoveredImageTask.id);
+    assert.strictEqual(recoveredActive.shots["001"].recoveryContext.imagePath, imageRecoveryArtifacts.firstFrame);
+    imageReservationResolvedBeforeRunner = true;
+    return runWorkbenchQueueShotBeforeImageRecovery(...args);
+  };
+  plugin.ensureReferenceAsset = async (_image, asset) => ({
+    ...asset,
+    imagePath: `山竹视频资产库/${asset.kind}/${asset.id}.png`,
+    metadataPath: `山竹视频资产库/${asset.kind}/${asset.id}.json`,
+    contentHash: `${asset.kind}-${asset.id}-hash`,
+    reused: true,
+  });
+  plugin.resolveQueueGenerationRuntime = async () => ({
+    image: recoveredImagePlugin,
+    video: recoveredVideoPlugin,
+    imageModel: imageRecoveryPlan.settings.imageModel,
+    model: "MiniMax-H3",
+    resolution: "768p",
+  });
+  plugin.generateImageMulti = async () => {
+    recoveredImageSubmissions += 1;
+    throw new Error("completed first frame must not be submitted again");
+  };
+  plugin.waitForVideo = async (_video, taskId, _timeout, _progress, expectedPath) => {
+    assert.strictEqual(taskId, "video-after-first-frame-recovery");
+    assert.strictEqual(expectedPath, imageRecoveryArtifacts.video);
+    fs.writeFileSync(path.join(vault, ...expectedPath.split("/")), "video-after-first-frame-recovery");
+    recoveredVideoPlugin.settings.videoTasks = [{ id: taskId, status: "completed", saved: true, localPath: expectedPath }];
+    return recoveredVideoPlugin.settings.videoTasks[0];
+  };
+  recoveredImageTask.status = "processing";
+  recoveredImageTask.saved = false;
+  const prematureImageRecovery = await plugin.recoverWorkbenchQueue(imageRecoveryFolder);
+  assert.strictEqual(prematureImageRecovery, false, "an image still processing must remain recoverable without a duplicate submission");
+  const pendingImageRecovery = JSON.parse(fs.readFileSync(imageRecoveryActivePath, "utf8"));
+  assert.strictEqual(pendingImageRecovery.shots["001"].status, "recovery-pending");
+  recoveredImageTask.status = "completed";
+  recoveredImageTask.saved = true;
+  const imageRecoveryStarted = await plugin.recoverWorkbenchQueue(imageRecoveryFolder);
+  assert.strictEqual(
+    imageRecoveryStarted,
+    true,
+    "a completed output-target image task must resolve the stale reservation and resume the same queue",
+  );
+  await plugin.queueRuns.get(imageRecoveryFolder);
+  assert.strictEqual(imageReservationResolvedBeforeRunner, true);
+  assert.strictEqual(recoveredImageSubmissions, 0, "restart recovery must reuse the completed first frame");
+  assert.strictEqual(recoveredVideoSubmissions, 1, "restart recovery must continue with exactly one video submission");
+  const recoveredProject = JSON.parse(fs.readFileSync(path.join(imageRecoveryMetadata, "project.json"), "utf8"));
+  const recoveredShot = recoveredProject.shots.find((shot) => shot.id === "001");
+  assert.strictEqual(recoveredShot.firstImagePath, imageRecoveryArtifacts.firstFrame);
+  assert.strictEqual(recoveredShot.imagePath, imageRecoveryArtifacts.firstFrame);
+  assert.strictEqual(recoveredShot.videoPath, imageRecoveryArtifacts.video);
+  assert.match(recoveredShot.generationFingerprint, /^sha256:/);
+  const imageRecoveryArchive = fs.readdirSync(path.join(imageRecoveryMetadata, "runs"))
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => JSON.parse(fs.readFileSync(path.join(imageRecoveryMetadata, "runs", name), "utf8")))
+    .find((run) => run.runId === imageRecoveryRun.runId);
+  assert.strictEqual(imageRecoveryArchive.shots["001"].status, "completed");
+  assert.strictEqual(imageRecoveryArchive.shots["001"].submissionReservation, null);
+  assert.strictEqual(imageRecoveryArchive.shots["001"].submissionUncertain, false);
+  const archivedWorkbench = plugin.loadWorkbenchProject(imageRecoveryFolder);
+  assert.strictEqual(archivedWorkbench.currentRun, null, "archived history must not become an active queue");
+  assert.strictEqual(archivedWorkbench.latestRun.runId, imageRecoveryRun.runId, "the cockpit must read the newest archived run after completion");
+  assert.strictEqual(archivedWorkbench.latestRun.shots["001"].taskId, "video-after-first-frame-recovery");
+  plugin.getGenerationPlugins = getGenerationPluginsBeforeImageRecovery;
+  plugin.runWorkbenchQueueShot = runWorkbenchQueueShotBeforeImageRecovery;
+  plugin.ensureReferenceAsset = ensureReferenceAssetBeforeImageRecovery;
+  plugin.resolveQueueGenerationRuntime = resolveRuntimeBeforeImageRecovery;
+  plugin.generateImageMulti = generateImageBeforeImageRecovery;
+  plugin.waitForVideo = waitForVideoBeforeImageRecovery;
 
   await writeV6RecoveryRun("v6-active-run-mismatch", "active-run-mismatch-task", "2026-10-12T00:00:01.000Z");
   let mismatchExpectedPath = "";

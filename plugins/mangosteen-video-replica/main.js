@@ -394,7 +394,11 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     this.addCommand({ id: "stop-latest-generation", name: "停止最近的视频复刻任务", callback: () => void this.stopLatestGeneration() });
     this.addCommand({ id: "scan-generation-requests", name: "检查已确认的视频复刻任务", callback: () => void this.scanRequests(true) });
     this.addCommand({ id: "organize-current-video-replica-project", name: "整理当前视频复刻项目", callback: () => this.organizeCurrentReplicaProject() });
-    this.registerInterval(window.setInterval(() => void this.scanRequests(false), 5000));
+    this.registerInterval(window.setInterval(() => {
+      void this.recoverWorkbenchQueues()
+        .catch(() => {})
+        .finally(() => { void this.scanRequests(false).catch(() => {}); });
+    }, 5000));
     const handleProjectFileChange = (file) => {
       if (this.isWorkbenchDataFile(file)) this.requestWorkbenchRefresh();
       if (file?.name === REQUEST_FILE) void this.processRequestByVaultPath(file.path, true);
@@ -402,7 +406,9 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     this.registerEvent(this.app.vault.on("create", handleProjectFileChange));
     this.registerEvent(this.app.vault.on("modify", handleProjectFileChange));
     const startupTimeout = window.setTimeout(() => {
-      void this.recoverWorkbenchQueues().finally(() => this.scanRequests(false));
+      void this.recoverWorkbenchQueues()
+        .catch(() => {})
+        .finally(() => { void this.scanRequests(false).catch(() => {}); });
     }, 1500);
     this.register(() => window.clearTimeout(startupTimeout));
   }
@@ -749,6 +755,34 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     };
   }
 
+  latestArchivedWorkbenchRun(paths, readErrors = null) {
+    if (!paths?.isV6 || !paths.runsRelativePath) return null;
+    let runsRoot;
+    try { runsRoot = this.checkedProjectPath(paths.folder, paths.runsRelativePath); }
+    catch (error) {
+      if (readErrors) readErrors.archivedRuns = String(error?.message || error);
+      return null;
+    }
+    const stat = fs.statSync(runsRoot, { throwIfNoEntry: false });
+    if (!stat?.isDirectory()) return null;
+    let latest = null;
+    let latestAt = -1;
+    for (const entry of fs.readdirSync(runsRoot, { withFileTypes: true })) {
+      if (!entry.isFile() || !/^[A-Za-z0-9_-]+\.json$/.test(entry.name)) continue;
+      try {
+        const run = this.readJson(this.checkedProjectPath(paths.folder, `${paths.runsRelativePath}/${entry.name}`));
+        if (`${String(run?.runId || "")}.json` !== entry.name) continue;
+        const archivedAt = Date.parse(String(run.archivedAt || run.completedAt || run.updatedAt || ""));
+        if (!Number.isFinite(archivedAt) || archivedAt < latestAt) continue;
+        latest = run;
+        latestAt = archivedAt;
+      } catch (error) {
+        if (readErrors) readErrors.archivedRuns = String(error?.message || error);
+      }
+    }
+    return latest;
+  }
+
   currentRunQueueView(currentRun) {
     if (!currentRun || !Array.isArray(currentRun.queue) || !currentRun.shots || Array.isArray(currentRun.shots)) return {};
     const status = currentRun.status === "queued" ? "idle"
@@ -792,7 +826,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     const paths = this.workbenchProjectPaths(folder);
     const output = {
       project: {}, request: {}, requestMtimeMs: null, currentRun: null,
-      generationState: {}, generationQueue: {}, readErrors: {},
+      latestRun: null, generationState: {}, generationQueue: {}, readErrors: {},
     };
     try {
       const documents = this.readProjectDocuments(paths.folder);
@@ -814,6 +848,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       output.project = versionSixProjectView(output.project, output.request);
     }
     output.currentRun = runState.selectCurrentRun(this.currentRunInputs(paths, output.requestMtimeMs, output.readErrors));
+    if (!output.currentRun && paths.isV6) output.latestRun = this.latestArchivedWorkbenchRun(paths, output.readErrors);
     output.generationQueue = this.currentRunQueueView(output.currentRun);
     output.generationState = this.currentRunStateView(output.currentRun);
     return output;
@@ -1465,6 +1500,34 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
           const shot = queue.shots[id];
           if (!shot || ["queued", "completed", "failed", "stopped"].includes(String(shot.status))) continue;
           if (shot.submissionReservation?.status === "submission-reserved") {
+            const recoveredImage = this.recoverCompletedImageReservation(paths, shot, project);
+            if (recoveredImage) {
+              const recoveredAt = new Date().toISOString();
+              replaceObject(queue, runState.updateShotState(queue, id, {
+                status: "queued",
+                stage: "preflight",
+                submissionReservation: null,
+                submissionUncertain: false,
+                error: null,
+                paidTaskSubmitted: true,
+                lastSubmissionResult: {
+                  runId: String(queue.runId || queue.queueId || ""),
+                  shotId: String(id),
+                  boundary: recoveredImage.boundary,
+                  reservationId: recoveredImage.reservationId,
+                  status: "resolved",
+                  resolvedAt: recoveredAt,
+                },
+                recoveryContext: {
+                  boundary: recoveredImage.boundary,
+                  imageTaskId: recoveredImage.imageTaskId,
+                  imagePath: recoveredImage.destinationPath,
+                  recoveredAt,
+                },
+                now: recoveredAt,
+              }));
+              continue;
+            }
             const unsafe = new Error("检测到未决付费提交。为避免重复付费，已停止自动恢复，请人工检查供应商记录。");
             unsafe.code = "UNSAFE_PAID_SUBMISSION_RECOVERY";
             shot.status = "recovery-pending";
@@ -1561,10 +1624,16 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
   }
 
   async recoverWorkbenchQueues() {
-    for (const { project } of this.projectRecords()) {
-      try { await this.recoverWorkbenchQueue(project.folder); }
-      catch (_) { /* one damaged project must not block recovery of the others */ }
-    }
+    if (this.workbenchRecoveryPromise) return this.workbenchRecoveryPromise;
+    const pending = (async () => {
+      for (const { project } of this.projectRecords()) {
+        try { await this.recoverWorkbenchQueue(project.folder); }
+        catch (_) { /* one damaged project must not block recovery of the others */ }
+      }
+    })();
+    this.workbenchRecoveryPromise = pending;
+    try { return await pending; }
+    finally { if (this.workbenchRecoveryPromise === pending) this.workbenchRecoveryPromise = null; }
   }
 
   currentWorkbenchLock(paths) {
@@ -2923,25 +2992,45 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
   }
 
   async resolveQueueGenerationRuntime(settings = {}) {
-    const { image, video } = this.getGenerationPlugins();
-    const [imageAccess, videoAccess] = await Promise.all([image.refreshAgentAccess(), video.refreshAgentAccess()]);
-    const exact = (models, requested) => models.find((candidate) => candidate === requested)
-      || models.find((candidate) => candidate.toLowerCase() === requested.toLowerCase());
-    const requestedImageModel = String(settings.imageModel || "").trim();
-    const requestedVideoModel = String(settings.videoModel || "").trim();
-    const imageModels = Object.keys(imageAccess?.imageModelKeys || {});
-    const videoModels = generationPolicy.eligibleModels(Object.keys(videoAccess?.videoModelKeys || {}));
-    const imageModel = exact(imageModels, requestedImageModel);
-    const model = exact(videoModels, requestedVideoModel);
-    if (!imageModel) throw this.unavailableGenerationModel("image", requestedImageModel, imageModels);
-    if (!model) throw this.unavailableGenerationModel("video", requestedVideoModel, videoModels);
-    return {
-      image,
-      video,
-      imageModel,
-      model,
-      resolution: String(settings.resolution || video.settings?.resolution || "").trim(),
-    };
+    const attempts = Math.max(1, Number(this.generationCatalogRetryAttempts) || 5);
+    const configuredRetryDelayMs = Number(this.generationCatalogRetryDelayMs);
+    const retryDelayMs = Number.isFinite(configuredRetryDelayMs)
+      ? Math.max(0, configuredRetryDelayMs)
+      : 1500;
+    let lastError = null;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      try {
+        const { image, video } = this.getGenerationPlugins();
+        const [imageAccess, videoAccess] = await Promise.all([image.refreshAgentAccess(), video.refreshAgentAccess()]);
+        const exact = (models, requested) => models.find((candidate) => candidate === requested)
+          || models.find((candidate) => candidate.toLowerCase() === requested.toLowerCase());
+        const requestedImageModel = String(settings.imageModel || "").trim();
+        const requestedVideoModel = String(settings.videoModel || "").trim();
+        const imageModels = Object.keys(imageAccess?.imageModelKeys || {});
+        const videoModels = generationPolicy.eligibleModels(Object.keys(videoAccess?.videoModelKeys || {}));
+        if ((!imageModels.length || !videoModels.length) && attempt < attempts) {
+          await sleep(retryDelayMs);
+          continue;
+        }
+        const imageModel = exact(imageModels, requestedImageModel);
+        const model = exact(videoModels, requestedVideoModel);
+        if (!imageModel) throw this.unavailableGenerationModel("image", requestedImageModel, imageModels);
+        if (!model) throw this.unavailableGenerationModel("video", requestedVideoModel, videoModels);
+        return {
+          image,
+          video,
+          imageModel,
+          model,
+          resolution: String(settings.resolution || video.settings?.resolution || "").trim(),
+        };
+      } catch (error) {
+        lastError = error;
+        const transient = /暂未同步|正在更新|稍后重试|未启用或版本不兼容/.test(String(error?.message || error));
+        if (!transient || attempt >= attempts) throw error;
+        await sleep(retryDelayMs);
+      }
+    }
+    throw lastError || new Error("生成模型目录暂不可用，请稍后重试。");
   }
 
   projectFileExists(projectFolder, vaultPath) {
@@ -2951,6 +3040,61 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     } catch (_) {
       return false;
     }
+  }
+
+  recoverCompletedImageReservation(paths, queueShot, project) {
+    const reservation = queueShot?.submissionReservation;
+    const boundary = String(reservation?.boundary || "");
+    if (!paths?.isV6 || !["first-frame", "last-frame"].includes(boundary)) return null;
+    const shotId = String(queueShot?.id || "").trim();
+    if (!shotId) return null;
+    const artifacts = projectStorage.shotArtifactPaths(paths.folder, shotId);
+    const destinationPath = boundary === "first-frame" ? artifacts.firstFrame : artifacts.lastFrame;
+    const expectedTarget = this.replicaOutputTarget(paths.folder, shotId, boundary, destinationPath);
+    const reservedAt = Date.parse(String(reservation.createdAt || ""));
+    if (!Number.isFinite(reservedAt)) return null;
+    let imagePlugin;
+    try { imagePlugin = this.getGenerationPlugins().image; }
+    catch (_) { return null; }
+    const matches = (imagePlugin?.settings?.imageTasks || []).filter((task) => {
+      const target = task?.outputTarget;
+      const createdAt = Date.parse(String(task?.createdAt || ""));
+      return task?.status === "completed"
+        && task?.saved === true
+        && Number.isFinite(createdAt)
+        && createdAt >= reservedAt
+        && target?.owner === expectedTarget.owner
+        && String(target?.projectId || "") === expectedTarget.projectId
+        && String(target?.shotId || "") === expectedTarget.shotId
+        && target?.assetType === expectedTarget.assetType
+        && target?.destinationPath === expectedTarget.destinationPath
+        && Array.isArray(task.imagePaths)
+        && task.imagePaths.length === 1
+        && task.imagePaths[0] === destinationPath;
+    });
+    if (matches.length !== 1) return null;
+    this.assertDurableProjectArtifact(paths.folder, destinationPath);
+    const generationFingerprint = String(queueShot?.generationFingerprint || "").trim();
+    if (!/^sha256:[a-f0-9]{64}$/.test(generationFingerprint)) return null;
+    const imageTask = matches[0];
+    this.updateProjectShot(paths.folder, shotId, boundary === "first-frame" ? {
+      generationFingerprint,
+      firstImagePath: destinationPath,
+      imagePath: destinationPath,
+      status: "首帧已恢复",
+      error: "",
+    } : {
+      generationFingerprint,
+      lastImagePath: destinationPath,
+      status: "尾帧已恢复",
+      error: "",
+    });
+    return {
+      boundary,
+      destinationPath,
+      imageTaskId: String(imageTask.id || ""),
+      reservationId: String(reservation.reservationId || ""),
+    };
   }
 
   async runWorkbenchQueueShot(projectFolder, shot, context) {
@@ -3185,6 +3329,10 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       model,
       ratio: context.settings.ratio,
       resolution,
+    });
+    await report({
+      generationFingerprint: fingerprint,
+      resolvedRuntime: { imageModel, videoModel: model, resolution },
     });
     const latestProject = this.readJson(paths.projectPath);
     const existing = (latestProject.shots || []).find((item) => String(item.id) === String(shot.id)) || {};

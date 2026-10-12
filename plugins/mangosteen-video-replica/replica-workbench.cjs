@@ -231,9 +231,11 @@ function createVideoReplicaWorkbenchView(ItemView) {
         activeRun: loaded?.activeRun && typeof loaded.activeRun === "object"
           ? loaded.activeRun
           : {},
-        currentRun: loaded?.currentRun && typeof loaded.currentRun === "object"
+        currentRun: loaded?.currentRun?.runId
           ? loaded.currentRun
-          : {},
+          : loaded?.latestRun?.runId
+            ? loaded.latestRun
+            : {},
         generationState: loaded?.generationState && typeof loaded.generationState === "object"
           ? loaded.generationState
           : {},
