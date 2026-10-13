@@ -27,6 +27,7 @@ const PROCESSING_LEASE_MS = 2 * 60 * 1000;
 const SUBMISSION_GATE_TIMEOUT_MS = 2 * 60 * 1000;
 const SUBMISSION_GATE_STALE_MS = 5 * 60 * 1000;
 const SUBMISSION_GATE_RETRY_MS = 25;
+const ANALYSIS_TIMEOUT_MS = 8 * 60 * 1000;
 const DEFAULT_SETTINGS = { analysisGroup: "", analysisModel: "", imageModel: "", videoModel: "" };
 const WORKBENCH_SHOT_FIELDS = [
   "id",
@@ -475,6 +476,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     this.processing = new Set();
     this.confirmingProjects = new Set();
     this.referenceAssetPromises = new Map();
+    this.activeAnalyses = new Set();
     this.queueApis = new Map();
     this.queueRuns = new Map();
     this.activeQueueObjects = new Map();
@@ -777,6 +779,71 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     }
   }
 
+  getAnalysisTimeoutMs() {
+    const override = Number(this.analysisRequestTimeoutMs);
+    return Number.isFinite(override) && override > 0 ? override : ANALYSIS_TIMEOUT_MS;
+  }
+
+  analysisTimeoutLabel(timeoutMs = this.getAnalysisTimeoutMs()) {
+    return timeoutMs >= 60 * 1000
+      ? `${Math.ceil(timeoutMs / (60 * 1000))} 分钟`
+      : `${Math.max(1, Math.ceil(timeoutMs / 1000))} 秒`;
+  }
+
+  async withAnalysisTimeout(promise) {
+    const timeoutMs = this.getAnalysisTimeoutMs();
+    let timeoutId;
+    const timeout = new Promise((_, reject) => {
+      timeoutId = window.setTimeout(() => {
+        const error = new Error(`分析请求超过 ${this.analysisTimeoutLabel(timeoutMs)}未返回`);
+        error.code = "ANALYSIS_TIMEOUT";
+        error.status = 408;
+        error.changeModel = true;
+        reject(error);
+      }, timeoutMs);
+    });
+    try { return await Promise.race([Promise.resolve(promise), timeout]); }
+    finally { if (timeoutId !== undefined) window.clearTimeout(timeoutId); }
+  }
+
+  recoverStaleAnalysis(paths, documents) {
+    const project = documents?.project && typeof documents.project === "object" ? documents.project : {};
+    const draft = documents?.draft && typeof documents.draft === "object" ? documents.draft : {};
+    const status = paths.isV6 ? String(draft.analysisStatus || "") : String(project.status || "");
+    if (status !== "analyzing" || this.activeAnalyses?.has(paths.folder)) return documents;
+    const recordedAt = paths.isV6
+      ? String(draft.analysis?.startedAt || draft.analysis?.updatedAt || draft.updatedAt || "")
+      : String(project.analysisStartedAt || project.updatedAt || "");
+    const fallbackMtime = fs.statSync(paths.requestPath, { throwIfNoEntry: false })?.mtimeMs;
+    const startedAt = Date.parse(recordedAt);
+    const effectiveStartedAt = Number.isFinite(startedAt) ? startedAt : Number(fallbackMtime);
+    if (!Number.isFinite(effectiveStartedAt) || Date.now() - effectiveStartedAt < this.getAnalysisTimeoutMs()) return documents;
+    const statusText = `上次分析超过 ${this.analysisTimeoutLabel()}未完成，已停止等待。请更换分析模型后重试。`;
+    const failedAt = new Date().toISOString();
+    if (paths.isV6) {
+      const recoveredDraft = {
+        ...draft,
+        analysisStatus: "analysis_model_error",
+        analysisStatusText: statusText,
+        analysisErrorCode: "ANALYSIS_TIMEOUT",
+        analysisErrorStatus: 408,
+        analysisErrorAt: failedAt,
+      };
+      const savedProject = this.saveVersionSixDocuments(paths.folder, project, recoveredDraft);
+      return { ...documents, project: savedProject, draft: recoveredDraft };
+    }
+    const recoveredProject = {
+      ...project,
+      status: "analysis_model_error",
+      statusText,
+      analysisErrorCode: "ANALYSIS_TIMEOUT",
+      analysisErrorStatus: 408,
+      analysisErrorAt: failedAt,
+    };
+    this.saveProject(paths.folder, recoveredProject);
+    return { ...documents, project: recoveredProject };
+  }
+
   replicaOutputTarget(projectFolder, shotId, assetType, destinationPath) {
     const artifacts = projectStorage.shotArtifactPaths(projectFolder, shotId);
     return {
@@ -971,7 +1038,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       latestRun: null, generationState: {}, generationQueue: {}, readErrors: {},
     };
     try {
-      const documents = this.readProjectDocuments(paths.folder);
+      const documents = this.recoverStaleAnalysis(paths, this.readProjectDocuments(paths.folder));
       output.request = withWorkbenchShotIds(documents.draft);
       output.project = versionSixProjectView(documents.project, output.request);
       output.requestMtimeMs = fs.statSync(paths.requestPath).mtimeMs;
@@ -2395,6 +2462,8 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
 
   async analyzeProject(projectFolder) {
     const checkedFolder = this.checkedWorkbenchProjectFolder(projectFolder).folder;
+    if (!this.activeAnalyses) this.activeAnalyses = new Set();
+    if (this.activeAnalyses.has(checkedFolder)) throw new Error("当前项目正在分析，请等待本次分析完成。");
     const paths = this.workbenchProjectPaths(checkedFolder);
     let documents;
     try { documents = this.readProjectDocuments(checkedFolder); }
@@ -2426,11 +2495,12 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       return { name: path.basename(framePath), type: "image/jpeg", bytes: fs.readFileSync(framePath) };
     });
     if (paths.isV6) {
+      const startedAt = new Date().toISOString();
       const draft = {
         ...documents.draft,
         analysisStatus: "analyzing",
         analysisStatusText: "山竹智能体正在分析人物、场景和分镜",
-        analysis: { provider: "mangosteen-agent", group: selection.group, model: selection.model, updatedAt: new Date().toISOString() },
+        analysis: { provider: "mangosteen-agent", group: selection.group, model: selection.model, startedAt, updatedAt: startedAt },
       };
       delete draft.analysisErrorCode;
       delete draft.analysisErrorStatus;
@@ -2440,6 +2510,7 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     } else {
       project.status = "analyzing";
       project.statusText = "山竹智能体正在分析人物、场景和分镜";
+      project.analysisStartedAt = new Date().toISOString();
       project.analysisProvider = "mangosteen-agent";
       project.analysisGroup = selection.group;
       project.analysisModel = selection.model;
@@ -2448,15 +2519,16 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       delete project.analysisErrorAt;
       this.saveProject(projectFolder, project);
     }
+    this.activeAnalyses.add(checkedFolder);
     try {
-      const response = await agent.analyzeStructured({
+      const response = await this.withAnalysisTimeout(agent.analyzeStructured({
         group: selection.group,
         model: selection.model,
         prompt: workflow.analysisPrompt(project, transcriptText),
         images,
         schema: this.readJson(schemaPath),
         schemaName: "video_replica_analysis",
-      });
+      }));
       const analysis = response?.data ?? response;
       if (!paths.isV6) {
         const diagnosticPath = this.checkedProjectPath(checkedFolder, ".work/last-agent-response.json", { createParents: true });
@@ -2512,6 +2584,8 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       surfaced.status = project.analysisErrorStatus;
       surfaced.changeModel = true;
       throw surfaced;
+    } finally {
+      this.activeAnalyses.delete(checkedFolder);
     }
   }
 

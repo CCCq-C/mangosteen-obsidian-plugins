@@ -377,6 +377,34 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   assert.strictEqual(fs.existsSync(path.join(versionSixRoot, "project.json")), false);
   assert.strictEqual(fs.existsSync(path.join(versionSixRoot, "generation-request.json")), false);
 
+  const staleAnalysisFolder = "山竹视频复刻/超时分析恢复";
+  const staleAnalysisRoot = path.join(vault, ...staleAnalysisFolder.split("/"));
+  const staleAnalysisMetadata = path.join(staleAnalysisRoot, ".mangosteen");
+  fs.mkdirSync(staleAnalysisMetadata, { recursive: true });
+  fs.writeFileSync(path.join(staleAnalysisMetadata, "project.json"), JSON.stringify({
+    schemaVersion: 6,
+    projectId: "超时分析恢复",
+    folder: staleAnalysisFolder,
+    title: "超时分析恢复",
+    shots: [],
+  }));
+  fs.writeFileSync(path.join(staleAnalysisMetadata, "draft.json"), JSON.stringify({
+    ...versionSixDraft,
+    shots: [],
+    analysisStatus: "analyzing",
+    analysisStatusText: "正在分析",
+    analysis: { provider: "mangosteen-agent", group: "gpt_plus", model: "slow-model", startedAt: "2000-01-01T00:00:00.000Z" },
+  }));
+  const recoveredStaleAnalysis = await plugin.loadWorkbenchProject(staleAnalysisFolder);
+  assert.strictEqual(recoveredStaleAnalysis.request.analysisStatus, "analysis_model_error");
+  assert.strictEqual(recoveredStaleAnalysis.request.analysisErrorCode, "ANALYSIS_TIMEOUT");
+  assert.match(recoveredStaleAnalysis.request.analysisStatusText, /上次分析超过 8 分钟未完成/);
+  assert.strictEqual(
+    JSON.parse(fs.readFileSync(path.join(staleAnalysisMetadata, "draft.json"), "utf8")).analysisStatus,
+    "analysis_model_error",
+    "opening after a restart must persist recovery from a stale analyzing state",
+  );
+
   const editedVersionSix = replicaEditor.updateDraftField(
     loadedVersionSix.request,
     { section: "shot", index: 0, field: "title" },
@@ -1419,6 +1447,20 @@ process.exit(1);
   assert.strictEqual(modelErrorProject.status, "analysis_model_error");
   assert.strictEqual(modelErrorProject.analysisErrorCode, "REMOTE_REJECTED");
   assert.match(modelErrorProject.statusText, /gpt-5\.6-sol.*请更换分析模型/);
+  plugin.analysisRequestTimeoutMs = 25;
+  plugin.app.plugins = { getPlugin: (id) => id === "mangosteen-agent"
+    ? { getLanguageModelCatalog: agent.getLanguageModelCatalog, analyzeStructured: async () => new Promise(() => {}) }
+    : id === "mangosteen-video" ? { settings: { model: "MiniMax-H3", resolution: "768p" } } : null };
+  const timedAnalysis = plugin.analyzeProject(analysisFolder);
+  await new Promise((resolve) => setImmediate(resolve));
+  const timeoutEntry = [...timeoutCallbacks.entries()].find(([, entry]) => entry.delay === 25);
+  assert(timeoutEntry, "analysis must register a bounded provider timeout");
+  timeoutEntry[1].callback();
+  await assert.rejects(() => timedAnalysis, /分析请求超过 1 秒未返回.*请更换分析模型后重试/);
+  const timeoutProject = JSON.parse(fs.readFileSync(path.join(analysisRoot, "project.json"), "utf8"));
+  assert.strictEqual(timeoutProject.status, "analysis_model_error");
+  assert.strictEqual(timeoutProject.analysisErrorCode, "ANALYSIS_TIMEOUT");
+  delete plugin.analysisRequestTimeoutMs;
   plugin.app.plugins = { getPlugin: (id) => id === "mangosteen-agent" ? agent : id === "mangosteen-video" ? { settings: { model: "MiniMax-H3", resolution: "768p" } } : null };
 
   const latestProjectBeforeNavigationFailure = plugin.latestProject;
