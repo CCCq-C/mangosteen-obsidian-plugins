@@ -157,6 +157,14 @@ if (output.includes("%03d")) {
   assert.strictEqual(createdDraft.schemaVersion, 6);
   assert.strictEqual(createdDraft.confirmed, false);
   assert.strictEqual(createdDraft.transcriptSegments.length, 0);
+  assert.deepStrictEqual(
+    createdDraft.visualStyle,
+    {
+      category: "继承参考资产",
+      prompt: "保持现有人物、场景和产品参考图的既有视觉风格；媒介、写实度、材质、色彩、光线和镜头质感全片一致。",
+    },
+    "a locally prepared draft must remain valid when AI analysis fails before replacing the fallback style",
+  );
   assert.strictEqual(
     prepareResult({ ...created, transcriptSegments: [{ text: "wrong project location" }] }, {
       ...createdDraft,

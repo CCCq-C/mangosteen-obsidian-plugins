@@ -221,6 +221,43 @@ function mergeVersionSixDraftEnvelope(currentRequest, identifiedDraft, validated
   return merged;
 }
 
+function isIncompleteVersionSixAnalysisDraft(request) {
+  if (Number(request?.schemaVersion) !== 6 || (Array.isArray(request?.shots) && request.shots.length)) return false;
+  return new Set(["preparing", "prepared", "analysis_failed", "analysis_model_error"])
+    .has(String(request?.analysisStatus || ""));
+}
+
+function mergeIncompleteVersionSixDraft(currentRequest, identifiedDraft) {
+  assertVersionSixProtectedIdentities(currentRequest, identifiedDraft);
+  const clean = (value) => String(value ?? "").trim();
+  const mergePromptAssets = (key) => (Array.isArray(currentRequest[key]) ? currentRequest[key] : []).map((item, index) => ({
+    ...item,
+    prompt: clean(identifiedDraft[key]?.[index]?.prompt),
+  }));
+  return {
+    ...currentRequest,
+    schemaVersion: 6,
+    version: Number(currentRequest.version || 5),
+    confirmed: false,
+    visualStyle: visualStyle.normalizeVisualStyle(identifiedDraft.visualStyle),
+    character: {
+      ...(currentRequest.character || {}),
+      prompt: clean(identifiedDraft.character?.prompt),
+      voiceProfile: clean(identifiedDraft.character?.voiceProfile),
+    },
+    products: mergePromptAssets("products"),
+    scenes: mergePromptAssets("scenes"),
+    settings: {
+      ...(currentRequest.settings || {}),
+      imageModel: clean(identifiedDraft.settings?.imageModel),
+      videoModel: clean(identifiedDraft.settings?.videoModel),
+      ratio: clean(identifiedDraft.settings?.ratio),
+      resolution: clean(identifiedDraft.settings?.resolution),
+    },
+    shots: [],
+  };
+}
+
 class PrepareModal extends Modal {
   constructor(plugin) {
     super(plugin.app);
@@ -1757,24 +1794,33 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     const paths = this.workbenchProjectPaths(folder);
     if (this.confirmingProjects?.has(paths.folder)) throw new Error("项目正在确认，不能编辑草案。");
     const { request: currentRequest } = this.currentWorkbenchLock(paths);
-    const identifiedDraft = withWorkbenchShotIds(draft);
-    const validationInput = paths.isV6
-      ? versionSixValidationInput(currentRequest, identifiedDraft)
-      : identifiedDraft;
-    const validation = replicaEditor.validateDraft(validationInput, core.normalizeGenerationRequest);
-    if (!validation.ok) {
-      const details = validation.errors.map((error) => `${error.path}：${error.message}`).join("；");
-      throw new Error(`草案校验失败：${details}`);
+    if (paths.isV6 && String(currentRequest.analysisStatus || "") === "analyzing") {
+      throw new Error("AI 分析正在进行，完成前不能保存草案。");
     }
-    const savedRequest = paths.isV6
-      ? mergeVersionSixDraftEnvelope(currentRequest, identifiedDraft, validation.value)
-      : {
-        ...validation.value,
-        shots: validation.value.shots.map((shot, index) => ({
-          ...shot,
-          workbenchId: identifiedDraft.shots[index].workbenchId,
-        })),
-      };
+    const identifiedDraft = withWorkbenchShotIds(draft);
+    const incompleteAnalysisDraft = paths.isV6 && isIncompleteVersionSixAnalysisDraft(currentRequest);
+    let savedRequest;
+    if (incompleteAnalysisDraft) {
+      savedRequest = mergeIncompleteVersionSixDraft(currentRequest, identifiedDraft);
+    } else {
+      const validationInput = paths.isV6
+        ? versionSixValidationInput(currentRequest, identifiedDraft)
+        : identifiedDraft;
+      const validation = replicaEditor.validateDraft(validationInput, core.normalizeGenerationRequest);
+      if (!validation.ok) {
+        const details = validation.errors.map((error) => `${error.path}：${error.message}`).join("；");
+        throw new Error(`草案校验失败：${details}`);
+      }
+      savedRequest = paths.isV6
+        ? mergeVersionSixDraftEnvelope(currentRequest, identifiedDraft, validation.value)
+        : {
+          ...validation.value,
+          shots: validation.value.shots.map((shot, index) => ({
+            ...shot,
+            workbenchId: identifiedDraft.shots[index].workbenchId,
+          })),
+        };
+    }
     const queue = this.currentWorkbenchQueue(paths.folder);
     const api = this.workbenchQueueApi(paths.folder);
     const lockedIds = new Set(api.lockedShotIds(queue));

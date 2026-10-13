@@ -922,6 +922,44 @@ function createView(plugin) {
   assert(emptyView.contentEl.find((element) => element.textContent === "还没有视频复刻项目"));
   await emptyView.onClose();
 
+  const failedAnalysisSnapshot = {
+    project: {
+      folder: "山竹视频复刻/分析失败项目",
+      title: "分析失败项目",
+      status: "analysis_model_error",
+      statusText: "分析模型 gpt-5.6-sol 返回错误：openai_error。请更换分析模型后重试。",
+      shots: [],
+    },
+    request: {
+      schemaVersion: 6,
+      version: 5,
+      confirmed: false,
+      analysisStatus: "analysis_model_error",
+      analysisStatusText: "分析模型 gpt-5.6-sol 返回错误：openai_error。请更换分析模型后重试。",
+      visualStyle: { category: "", prompt: "" },
+      character: { id: "main-character", prompt: "", voiceProfile: "" },
+      products: [],
+      scenes: [],
+      settings: { imageModel: "", videoModel: "", ratio: "", resolution: "" },
+      shots: [],
+    },
+    generationState: {},
+    generationQueue: {},
+  };
+  const failedAnalysisPlugin = createPlugin(
+    failedAnalysisSnapshot,
+    [{ folder: failedAnalysisSnapshot.project.folder, title: failedAnalysisSnapshot.project.title }],
+  );
+  const failedAnalysisView = createView(failedAnalysisPlugin);
+  await failedAnalysisView.onOpen();
+  assert.strictEqual(failedAnalysisView.draft.visualStyle.category, "继承参考资产");
+  assert.strictEqual(failedAnalysisView.draft.visualStyle.prompt.includes("全片一致"), true);
+  assert(
+    failedAnalysisView.contentEl.find((element) => element.textContent === "当前项目记录：上次分析失败，尚未重新发起请求"),
+    "opening a saved failed project must label the message as history instead of a new startup failure",
+  );
+  await failedAnalysisView.onClose();
+
   const lockedPlugin = createPlugin({
     ...clone(readySnapshot),
     request: { ...clone(request), confirmed: true },

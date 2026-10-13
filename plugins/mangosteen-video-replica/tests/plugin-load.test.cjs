@@ -404,6 +404,62 @@ assert.strictEqual(typeof plugin.waitForVideo, "function");
   assert.deepStrictEqual(persistedEditedVersionSix.analysisConfidence, versionSixDraft.analysisConfidence);
   assert.deepStrictEqual(persistedEditedVersionSix.shots[0].analysisNotes, versionSixDraft.shots[0].analysisNotes);
 
+  const failedDraftFolder = "山竹视频复刻/分析失败可保存设置";
+  const failedDraftRoot = path.join(vault, ...failedDraftFolder.split("/"));
+  const failedDraftMetadata = path.join(failedDraftRoot, ".mangosteen");
+  fs.mkdirSync(failedDraftMetadata, { recursive: true });
+  fs.writeFileSync(path.join(failedDraftMetadata, "project.json"), JSON.stringify({
+    schemaVersion: 6,
+    layoutVersion: 6,
+    projectId: "分析失败可保存设置",
+    id: "分析失败可保存设置",
+    folder: failedDraftFolder,
+    title: "分析失败可保存设置",
+    shots: [],
+  }));
+  fs.writeFileSync(path.join(failedDraftMetadata, "draft.json"), JSON.stringify({
+    schemaVersion: 6,
+    version: 5,
+    confirmed: false,
+    analysisStatus: "analysis_model_error",
+    analysisStatusText: "上次分析失败",
+    visualStyle: { category: "", prompt: "" },
+    character: { id: "main-character", prompt: "", voiceProfile: "" },
+    products: [],
+    scenes: [],
+    settings: { imageModel: "", videoModel: "", ratio: "", resolution: "" },
+    shots: [],
+  }));
+  const savedFailedDraft = await plugin.saveWorkbenchDraft(failedDraftFolder, {
+    ...plugin.loadWorkbenchProject(failedDraftFolder).request,
+    visualStyle: { category: "", prompt: "" },
+    settings: { imageModel: "gpt-image-2-w", videoModel: "MiniMax-H3", ratio: "9:16", resolution: "768p" },
+  });
+  assert.strictEqual(savedFailedDraft.analysisStatus, "analysis_model_error");
+  assert.deepStrictEqual(savedFailedDraft.visualStyle, {
+    category: "继承参考资产",
+    prompt: "保持现有人物、场景和产品参考图的既有视觉风格；媒介、写实度、材质、色彩、光线和镜头质感全片一致。",
+  });
+  assert.deepStrictEqual(savedFailedDraft.settings, {
+    imageModel: "gpt-image-2-w",
+    videoModel: "MiniMax-H3",
+    ratio: "9:16",
+    resolution: "768p",
+  });
+  fs.writeFileSync(path.join(failedDraftMetadata, "draft.json"), JSON.stringify({
+    ...savedFailedDraft,
+    analysisStatus: "analyzing",
+    analysisStatusText: "正在分析",
+  }));
+  await assert.rejects(
+    () => plugin.saveWorkbenchDraft(failedDraftFolder, {
+      ...savedFailedDraft,
+      settings: { ...savedFailedDraft.settings, imageModel: "gpt-image-2.5" },
+    }),
+    /至少需要一个分镜|分析.*进行|不能保存/,
+    "an incomplete draft must not be saved while AI analysis can concurrently overwrite it",
+  );
+
   await assert.rejects(
     () => plugin.saveWorkbenchDraft(versionSixFolder, {
       ...savedEditedVersionSix,

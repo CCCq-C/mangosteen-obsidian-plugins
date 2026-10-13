@@ -4,6 +4,7 @@ const path = require("path");
 const { spawn, spawnSync } = require("child_process");
 const core = require("./replica-core.cjs");
 const projectStorage = require("./project-storage.cjs");
+const { DEFAULT_VISUAL_STYLE } = require("./visual-style.cjs");
 
 function executable(value) {
   if (!value) return "";
@@ -157,7 +158,7 @@ function initialVersionSixDraft() {
     analysisStatus: "preparing",
     analysisStatusText: "正在提取画面和台词",
     transcriptSegments: [],
-    visualStyle: { category: "", prompt: "" },
+    visualStyle: { ...DEFAULT_VISUAL_STYLE },
     character: { id: "main-character", prompt: "", voiceProfile: "" },
     products: [],
     scenes: [],

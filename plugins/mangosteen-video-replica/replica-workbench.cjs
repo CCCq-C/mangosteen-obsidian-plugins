@@ -85,12 +85,12 @@ function editableRequest(request) {
   if (version < 5) {
     next.version = 5;
     next.confirmed = false;
-    next.visualStyle = normalizeVisualStyle(next.visualStyle);
     next.shots = list(next.shots).map((shot) => ({
       ...shot,
       legacyFrameMode: false,
     }));
   }
+  next.visualStyle = normalizeVisualStyle(next.visualStyle);
   return next;
 }
 
@@ -100,6 +100,16 @@ function text(value, fallback = "") {
 
 function list(value) {
   return Array.isArray(value) ? value : [];
+}
+
+function storedProjectStatus(status, statusText, { compact = false } = {}) {
+  const value = text(status);
+  if (value === "analysis_model_error" || value === "analysis_failed") {
+    return compact
+      ? "当前项目记录：上次分析失败，尚未重新发起请求"
+      : `上次保存的项目状态：${text(statusText, "分析失败，请更换模型后重试。")}`;
+  }
+  return text(statusText, text(status, "未开始"));
 }
 
 function normalizeProjects(value) {
@@ -448,7 +458,9 @@ function createVideoReplicaWorkbenchView(ItemView) {
     this.createButton(actions, "新建", () => this.plugin.openPrepareModal(), "mod-cta");
     this.createButton(actions, "刷新", () => this.refreshWorkbench());
     const status = actions.createDiv({ cls: "mangosteen-replica-status-pill" });
-    status.createEl("span", { text: text(this.viewModel.statusText, text(this.viewModel.status, "未开始")) });
+    status.createEl("span", {
+      text: storedProjectStatus(this.viewModel.status, this.viewModel.statusText, { compact: true }),
+    });
     this.widthLabelEl = status.createEl("span", { cls: "mangosteen-replica-width-label", text: "" });
   }
 
@@ -485,7 +497,7 @@ function createVideoReplicaWorkbenchView(ItemView) {
     const heading = header.createDiv();
     heading.createEl("span", { cls: "mangosteen-replica-eyebrow", text: "视频复刻工作台" });
     heading.createEl("h2", { text: text(this.viewModel.title, "未命名项目") });
-    heading.createEl("p", { text: text(this.viewModel.statusText, "等待下一步") });
+    heading.createEl("p", { text: storedProjectStatus(this.viewModel.status, this.viewModel.statusText) });
     const actions = header.createDiv({ cls: "mangosteen-replica-inline-actions" });
     this.saveButtons.push(this.createButton(actions, "保存草案", () => this.saveDraft(), "mod-cta", this.editingLocked() || !this.dirty));
     this.createButton(actions, "选择分镜生成", () => {
