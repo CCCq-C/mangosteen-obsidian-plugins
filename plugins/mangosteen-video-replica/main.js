@@ -2533,6 +2533,12 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     new Notice("分镜草案已生成，等待确认付费生成。", 8000);
   }
 
+  async analyzeWorkbenchProject(projectFolder) {
+    const result = await this.analyzeProject(projectFolder);
+    this.requestWorkbenchRefresh();
+    return result;
+  }
+
   async confirmLatestGeneration() {
     const leaf = await this.activateWorkbench();
     if (leaf?.view) {

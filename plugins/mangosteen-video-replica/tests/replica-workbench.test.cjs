@@ -183,6 +183,7 @@ function createPlugin(snapshot = readySnapshot, projects = [{ folder: readySnaps
     stopCalls: [],
     generationCatalogCalls: 0,
     generationSelectionCalls: [],
+    analysisCalls: [],
     openedPaths: [],
     async listWorkbenchProjects() { return clone(this.projects); },
     async loadWorkbenchProject(folder) {
@@ -220,6 +221,14 @@ function createPlugin(snapshot = readySnapshot, projects = [{ folder: readySnaps
     },
     async setGenerationSelection(imageModel, videoModel) {
       this.generationSelectionCalls.push({ imageModel, videoModel });
+      return true;
+    },
+    async analyzeWorkbenchProject(folder) {
+      this.analysisCalls.push(folder);
+      this.snapshot.project.status = "analysis_ready";
+      this.snapshot.project.statusText = "分析完成，等待确认";
+      this.snapshot.request.analysisStatus = "analysis_ready";
+      this.snapshot.request.analysisStatusText = "分析完成，等待确认";
       return true;
     },
     async openVaultPath(vaultPath) { this.openedPaths.push(vaultPath); },
@@ -957,6 +966,17 @@ function createView(plugin) {
   assert(
     failedAnalysisView.contentEl.find((element) => element.textContent === "当前项目记录：上次分析失败，尚未重新发起请求"),
     "opening a saved failed project must label the message as history instead of a new startup failure",
+  );
+  const retryAnalysisButton = failedAnalysisView.contentEl.find((element) => (
+    element.tagName === "BUTTON" && element.textContent === "重新分析"
+  ));
+  assert(retryAnalysisButton, "a failed project must expose an inline retry without relying on Obsidian's command palette");
+  await retryAnalysisButton.dispatch("click");
+  assert.deepStrictEqual(failedAnalysisPlugin.analysisCalls, [failedAnalysisSnapshot.project.folder]);
+  assert.strictEqual(failedAnalysisView.analysisPending, false);
+  assert(
+    failedAnalysisView.contentEl.find((element) => element.textContent === "分析完成，等待确认"),
+    "a successful inline retry must refresh the project state",
   );
   await failedAnalysisView.onClose();
 

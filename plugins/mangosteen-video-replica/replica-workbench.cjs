@@ -163,6 +163,7 @@ function createVideoReplicaWorkbenchView(ItemView) {
     this.selectedShotIds = new Set();
     this.stopButtons = [];
     this.stopPending = false;
+    this.analysisPending = false;
     this.promptPreviewElements = new Map();
     this.generationModelCatalog = { imageModels: [], videoModels: [] };
     this.generationCatalogStatus = "idle";
@@ -456,6 +457,10 @@ function createVideoReplicaWorkbenchView(ItemView) {
 
     const actions = toolbar.createDiv({ cls: "mangosteen-replica-toolbar-actions" });
     this.createButton(actions, "新建", () => this.plugin.openPrepareModal(), "mod-cta");
+    if (["analysis_model_error", "analysis_failed"].includes(text(this.viewModel.status))) {
+      this.createButton(actions, this.analysisPending ? "正在重新分析…" : "重新分析", () => this.retryAnalysis(), "mod-cta", this.analysisPending);
+      this.createButton(actions, "更换分析模型", () => this.plugin.openAnalysisModelModal(), "", this.analysisPending);
+    }
     this.createButton(actions, "刷新", () => this.refreshWorkbench());
     const status = actions.createDiv({ cls: "mangosteen-replica-status-pill" });
     status.createEl("span", {
@@ -530,6 +535,28 @@ function createVideoReplicaWorkbenchView(ItemView) {
     this.renderMetric(summary, "已用时间", formatElapsed(this.viewModel.current.elapsedMs));
     this.renderMetric(summary, "分镜数量", String(this.viewModel.shots.length || list(this.draft?.shots).length));
     if (this.viewModel.error) parent.createDiv({ cls: "mangosteen-replica-error", text: this.viewModel.error });
+  }
+
+  async retryAnalysis() {
+    if (this.analysisPending || !this.selectedFolder) return false;
+    this.analysisPending = true;
+    this.feedback = "正在重新分析人物、场景和分镜，通常需要 2–8 分钟。";
+    this.render();
+    this.renderSignature = this.buildRenderSignature();
+    try {
+      await this.plugin.analyzeWorkbenchProject(this.selectedFolder);
+      this.feedback = "分析完成，已刷新项目草案。";
+      await this.refresh({ force: true });
+      return true;
+    } catch (error) {
+      this.feedback = `重新分析失败：${String(error?.message || error)}`;
+      await this.refresh({ force: true });
+      return false;
+    } finally {
+      this.analysisPending = false;
+      this.render();
+      this.renderSignature = this.buildRenderSignature();
+    }
   }
 
   renderMetric(parent, label, value) {
