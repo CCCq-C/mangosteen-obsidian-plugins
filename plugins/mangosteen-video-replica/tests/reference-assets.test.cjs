@@ -130,6 +130,12 @@ for (const unsafeId of ["", ".", "..", "../hero", "hero/side", "hero\\side", "CO
   assert.throws(() => assets.resolveCharacterAsset(vault, unsafeId), /资产 ID 不安全/, unsafeId);
 }
 
+const scopedHeroA = assets.projectScopedAssetId("山竹视频复刻/项目-A", "character", "female-lead");
+const scopedHeroB = assets.projectScopedAssetId("山竹视频复刻/项目-B", "character", "female-lead");
+assert.notStrictEqual(scopedHeroA, scopedHeroB, "same logical role ID must not share assets across projects");
+assert.strictEqual(scopedHeroA, assets.projectScopedAssetId("山竹视频复刻/项目-A", "character", "female-lead"));
+assert.doesNotThrow(() => assets.resolveCharacterAsset(vault, scopedHeroA));
+
 const escapedRootVault = fs.mkdtempSync(path.join(os.tmpdir(), "mangosteen-escaped-root-vault-"));
 const escapedRootOutside = fs.mkdtempSync(path.join(os.tmpdir(), "mangosteen-escaped-root-outside-"));
 const escapedRootAsset = path.join(escapedRootOutside, "人物", "escaped-root");

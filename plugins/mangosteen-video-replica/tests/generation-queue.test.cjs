@@ -122,6 +122,31 @@ const editedStyleRequest = timelineDraft();
 editedStyleRequest.visualStyle.prompt = "改成日系二维动画。";
 assert.throws(() => confirmGenerationPlan(timelinePlan, editedStyleRequest), /草案已变化.*重新确认/);
 
+const multiCharacterRequest = timelineDraft();
+multiCharacterRequest.version = 6;
+multiCharacterRequest.castConfirmed = true;
+multiCharacterRequest.characters = [
+  { id: "female-lead", role: "女主", prompt: "固定女主人物三视图，长发白色针织衫。", voiceProfile: "年轻女声，普通话。" },
+  { id: "male-lead", role: "男主", prompt: "固定男主人物三视图，短发深色夹克。", voiceProfile: "年轻男声，普通话。" },
+];
+multiCharacterRequest.character = { ...multiCharacterRequest.characters[0] };
+multiCharacterRequest.shots[0].characterIds = ["female-lead", "male-lead"];
+const multiCharacterPlan = prepareGenerationPlan(multiCharacterRequest, ["001"]);
+assert.strictEqual(multiCharacterPlan.primaryCharacterId, "female-lead");
+assert.deepStrictEqual(multiCharacterPlan.characters.map((item) => item.id), ["female-lead", "male-lead"]);
+assert.deepStrictEqual(multiCharacterPlan.shots[0].characterIds, ["female-lead", "male-lead"]);
+assert.match(multiCharacterPlan.shots[0].effectiveVideoPrompt, /女主.*年轻女声/);
+assert.match(multiCharacterPlan.shots[0].effectiveVideoPrompt, /男主.*年轻男声/);
+const unconfirmedCast = { ...multiCharacterRequest, castConfirmed: false };
+assert.throws(() => prepareGenerationPlan(unconfirmedCast, ["001"]), /先确认角色列表/);
+const fourCharacterRequest = JSON.parse(JSON.stringify(multiCharacterRequest));
+fourCharacterRequest.characters.push(
+  { id: "friend-a", role: "朋友甲", prompt: "朋友甲固定形象", voiceProfile: "年轻男声" },
+  { id: "friend-b", role: "朋友乙", prompt: "朋友乙固定形象", voiceProfile: "年轻女声" },
+);
+fourCharacterRequest.shots[0].characterIds = ["female-lead", "male-lead", "friend-a", "friend-b"];
+assert.throws(() => prepareGenerationPlan(fourCharacterRequest, ["001"]), /最多支持 3 个固定角色/);
+
 const tamperedPlan = JSON.parse(JSON.stringify(plan));
 tamperedPlan.shots[0].effectiveVideoPrompt = "没有经过用户确认的替换提示词";
 assert.throws(

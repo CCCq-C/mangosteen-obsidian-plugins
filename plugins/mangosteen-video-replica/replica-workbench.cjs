@@ -90,6 +90,32 @@ function editableRequest(request) {
       legacyFrameMode: false,
     }));
   }
+  const characters = list(next.characters).length
+    ? list(next.characters).map((character) => ({
+      id: text(character?.id),
+      role: text(character?.role, text(character?.id, "角色")),
+      prompt: text(character?.prompt),
+      voiceProfile: text(character?.voiceProfile),
+    }))
+    : next.character
+      ? [{
+        id: text(next.character.id, "main-character"),
+        role: text(next.character.role, text(next.character.id, "主角")),
+        prompt: text(next.character.prompt),
+        voiceProfile: text(next.character.voiceProfile),
+      }]
+      : [];
+  next.characters = characters;
+  if (characters[0]) next.character = { ...characters[0] };
+  next.shots = list(next.shots).map((shot) => ({
+    ...shot,
+    characterIds: Array.isArray(shot.characterIds)
+      ? shot.characterIds.map(String)
+      : characters[0]
+        ? [characters[0].id]
+        : [],
+  }));
+  if (version < 6) next.castConfirmed = true;
   next.visualStyle = normalizeVisualStyle(next.visualStyle);
   return next;
 }
@@ -584,6 +610,19 @@ function createVideoReplicaWorkbenchView(ItemView) {
     }
   }
 
+  async confirmCast() {
+    if (this.editingLocked()) return false;
+    const characters = list(this.draft?.characters);
+    if (!characters.length || characters.some((character) => !text(character?.id) || !text(character?.role) || !text(character?.prompt))) {
+      this.setFeedback("请先补全每个角色的名称和人物提示词。");
+      return false;
+    }
+    this.draft.castConfirmed = true;
+    this.draft.character = { ...characters[0] };
+    this.dirty = true;
+    return this.saveDraft();
+  }
+
   renderAssets(parent) {
     this.renderPageTitle(parent, "参考资产", "编辑人物、产品和场景提示词；本地修改保存前不会被轮询覆盖。");
     const projectStyleLocked = list(this.viewModel?.lockedShotIds).length > 0;
@@ -597,16 +636,25 @@ function createVideoReplicaWorkbenchView(ItemView) {
     }, { disabled: projectStyleLocked });
     styleCard.createEl("p", { cls: "mangosteen-replica-muted", text: "人物、产品、场景、首帧和视频都会自动继承这里的风格。" });
     const grid = parent.createDiv({ cls: "mangosteen-replica-asset-grid" });
-    const character = this.draft?.character || {};
-    const characterCard = grid.createDiv({ cls: "mangosteen-replica-card" });
-    characterCard.createEl("h3", { text: `人物 · ${text(character.id, "主角")}` });
-    this.createDraftControl(characterCard, "人物提示词", "textarea", character.prompt, {
-      section: "character", field: "prompt",
+    const characters = list(this.draft?.characters).length ? list(this.draft.characters) : [this.draft?.character].filter(Boolean);
+    const characterAssets = list(this.viewModel.assets?.characters).length
+      ? list(this.viewModel.assets.characters)
+      : [this.viewModel.assets?.character].filter(Boolean);
+    characters.forEach((character, index) => {
+      const characterCard = grid.createDiv({ cls: "mangosteen-replica-card" });
+      characterCard.createEl("h3", { text: `人物 · ${text(character.role, text(character.id, `角色 ${index + 1}`))}` });
+      characterCard.createEl("p", { cls: "mangosteen-replica-mono", text: text(character.id) });
+      this.createDraftControl(characterCard, "角色名称", "input", character.role, {
+        section: "character", index, field: "role",
+      }, { disabled: projectStyleLocked });
+      this.createDraftControl(characterCard, "人物提示词", "textarea", character.prompt, {
+        section: "character", index, field: "prompt",
+      }, { disabled: projectStyleLocked });
+      this.createDraftControl(characterCard, "固定声音设定（语言、口音、音色、年龄感）", "textarea", character.voiceProfile, {
+        section: "character", index, field: "voiceProfile",
+      }, { disabled: projectStyleLocked });
+      this.renderAssetPath(characterCard, characterAssets.find((asset) => String(asset.id) === String(character.id))?.imagePath);
     });
-    this.createDraftControl(characterCard, "固定声音设定（语言、口音、音色、年龄感）", "textarea", character.voiceProfile, {
-      section: "character", field: "voiceProfile",
-    });
-    this.renderAssetPath(characterCard, this.viewModel.assets.character?.imagePath);
 
     list(this.draft?.products).forEach((product, index) => {
       const card = grid.createDiv({ cls: "mangosteen-replica-card" });
@@ -627,6 +675,21 @@ function createVideoReplicaWorkbenchView(ItemView) {
       const asset = this.viewModel.assets.scenes.find((item) => item.id === scene.id);
       this.renderAssetPath(card, asset?.imagePath);
     });
+    if (Number(this.draft?.version) >= 6) {
+      const castRow = parent.createDiv({ cls: "mangosteen-replica-save-row mangosteen-replica-cast-confirmation" });
+      castRow.createEl("span", {
+        text: this.draft?.castConfirmed
+          ? "角色列表已确认；修改人物后需要重新确认。"
+          : "生成前请核对角色数量、外观和声音。",
+      });
+      this.createButton(
+        castRow,
+        this.draft?.castConfirmed ? "角色列表已确认" : "确认角色列表",
+        () => this.confirmCast(),
+        this.draft?.castConfirmed ? "" : "mod-cta",
+        this.editingLocked() || this.draft?.castConfirmed === true,
+      );
+    }
     this.renderSaveRow(parent);
   }
 
@@ -674,7 +737,15 @@ function createVideoReplicaWorkbenchView(ItemView) {
     const editorLocked = Boolean(cockpit.editor?.locked || this.shotLocked(shotId));
     const shotIndex = Math.max(0, list(this.draft?.shots).findIndex((item) => String(item.id) === shotId));
     const draftShot = this.draft?.shots?.[shotIndex] || shot;
-    const characterPath = text(this.viewModel.assets?.character?.imagePath);
+    const characterIds = new Set(list(draftShot.characterIds).map(String));
+    const characters = list(this.draft?.characters).filter((character) => characterIds.has(String(character.id)));
+    const characterAssets = list(this.viewModel.assets?.characters).length
+      ? list(this.viewModel.assets.characters)
+      : [this.viewModel.assets?.character].filter(Boolean);
+    const characterPaths = characterAssets
+      .filter((asset) => characterIds.has(String(asset.id)))
+      .map((asset) => text(asset.imagePath))
+      .filter(Boolean);
     const scenePath = text(list(this.viewModel.assets?.scenes).find((item) => String(item.id) === String(draftShot.sceneId))?.imagePath);
     const productIds = new Set(list(draftShot.productIds).map(String));
     const productPaths = list(this.viewModel.assets?.products)
@@ -682,7 +753,12 @@ function createVideoReplicaWorkbenchView(ItemView) {
       .map((item) => text(item.imagePath))
       .filter(Boolean);
     const referenceGroups = [
-      { id: "character", label: "人物参考", value: characterPath || "尚未生成", state: characterPath ? "已绑定" : "未绑定" },
+      {
+        id: "character",
+        label: "人物参考",
+        value: characters.length ? characterPaths.join("、") || "尚未生成" : "本镜头无固定角色",
+        state: characters.length ? characterPaths.length === characters.length ? "已绑定" : "未完整绑定" : "无需绑定",
+      },
       { id: "scene", label: "场景参考", value: scenePath || "尚未生成", state: scenePath ? "已绑定" : "未绑定" },
       {
         id: "product",
@@ -700,7 +776,9 @@ function createVideoReplicaWorkbenchView(ItemView) {
           videoPrompt: draftShot.videoPrompt,
           videoPromptOverride: draftShot.videoPromptOverride,
           dialogue: draftShot.dialogue,
-          voiceProfile: this.draft?.character?.voiceProfile,
+          voiceProfile: characters
+            .map((character) => `${character.role || character.id}：${character.voiceProfile || "声音自然，符合角色年龄与形象。"}`)
+            .join("\n"),
           voiceDirection: draftShot.voiceDirection,
           visualStyle: this.draft?.visualStyle,
         });
@@ -739,6 +817,10 @@ function createVideoReplicaWorkbenchView(ItemView) {
         durationRange: videoDurationRange(this.draft?.settings?.videoModel),
         settings: { ...(this.draft?.settings || {}) },
         sceneOptions: list(this.draft?.scenes).map((scene) => [scene.id, scene.id]),
+        characterOptions: list(this.draft?.characters).map((character) => ({
+          id: character.id,
+          label: character.role || character.id,
+        })),
         modelCatalogLoading: this.generationCatalogStatus === "loading",
         selectedArtifactPath: text(projectShot.videoPath),
         outputPath: text(this.viewModel.output?.finalVideoPath),
@@ -933,7 +1015,7 @@ function createVideoReplicaWorkbenchView(ItemView) {
       this.updateViewModel();
       this.syncSaveState();
       if (target.section === "timeline") this.refreshPromptPreview(target.shotIndex);
-      else if (target.section === "shot" && target.field === "duration") this.refreshPromptPreview(target.index);
+      else if (target.section === "shot" && ["duration", "characterIds"].includes(target.field)) this.refreshPromptPreview(target.index);
       else if ((target.section === "character" && target.field === "voiceProfile") || target.section === "visualStyle") this.refreshAllPromptPreviews();
       this.renderSignature = this.buildRenderSignature();
       if (typeof options.onChange === "function") await options.onChange(nextValue, control);
@@ -950,13 +1032,17 @@ function createVideoReplicaWorkbenchView(ItemView) {
     if (!preview || !shot) return;
     const timeline = list(shot.timeline).length ? list(shot.timeline) : legacyTimeline(shot);
     try {
+      const characterIds = new Set(list(shot.characterIds).map(String));
+      const characters = list(this.draft?.characters).filter((character) => characterIds.has(String(character.id)));
       preview.value = resolveVideoPrompt({
         timeline,
         duration: shot.duration,
         videoPrompt: shot.videoPrompt,
         videoPromptOverride: shot.videoPromptOverride,
         dialogue: shot.dialogue,
-        voiceProfile: this.draft?.character?.voiceProfile,
+        voiceProfile: characters
+          .map((character) => `${character.role || character.id}：${character.voiceProfile || "声音自然，符合角色年龄与形象。"}`)
+          .join("\n"),
         voiceDirection: shot.voiceDirection,
         visualStyle: this.draft?.visualStyle,
       });

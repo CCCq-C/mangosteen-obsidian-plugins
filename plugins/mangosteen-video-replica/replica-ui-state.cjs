@@ -52,7 +52,11 @@ function calculateStageProgress(options = {}) {
 
   const expectedScenes = Array.isArray(request.scenes) ? request.scenes.length : 0;
   const readyScenes = records(project.sceneAssets).filter((asset) => text(asset.imagePath)).length;
-  const assetsReady = Boolean(text(plainObject(project.characterAsset).imagePath))
+  const expectedCharacters = Array.isArray(request.characters) && request.characters.length ? request.characters.length : 1;
+  const readyCharacters = records(project.characterAssets).length
+    ? records(project.characterAssets).filter((asset) => text(asset.imagePath)).length
+    : Boolean(text(plainObject(project.characterAsset).imagePath)) ? 1 : 0;
+  const assetsReady = readyCharacters >= expectedCharacters
     && expectedScenes > 0
     && readyScenes >= expectedScenes;
   if (assetsReady) return { percent: 45, indeterminate: false, label: "参考资产" };
@@ -154,6 +158,7 @@ function deriveWorkbenchState(options = {}) {
     : "";
   const shotError = [...shots, ...queueShots].map((shot) => text(shot.error)).find(Boolean) || "";
   const characterAsset = plainObject(project.characterAsset);
+  const characterAssets = records(project.characterAssets);
   const authoritativeStatusText = text(generationState.statusText)
     || (["stopped", "failed"].includes(generationState.status) ? stateError : "");
   const progressProject = generationState.status ? { ...project, status: generationState.status } : project;
@@ -185,6 +190,7 @@ function deriveWorkbenchState(options = {}) {
     canGenerate: !locked
       && !stopRequested
       && request.confirmed !== true
+      && (Number(request.version || 1) < 6 || request.castConfirmed === true)
       && ["analysis_ready", "generating", "completed", "completed_with_errors"].includes(text(project.status)),
     canStop: (queueActive && !stopRequested)
       || (processing && !text(generationState.stopRequestedAt)),
@@ -199,6 +205,11 @@ function deriveWorkbenchState(options = {}) {
     },
     assets: {
       character: Object.keys(characterAsset).length ? { ...characterAsset } : null,
+      characters: characterAssets.length
+        ? characterAssets
+        : Object.keys(characterAsset).length
+          ? [{ ...characterAsset }]
+          : [],
       products: records(project.productAssets),
       scenes: records(project.sceneAssets),
     },

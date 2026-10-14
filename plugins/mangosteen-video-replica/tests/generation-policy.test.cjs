@@ -261,6 +261,52 @@ assert.deepStrictEqual(referenceRequirements("seedance-2.5", "人物停下"), {
   lastImage: true,
 });
 
+const multiCharacterFingerprint = createGenerationFingerprint({
+  ...fingerprintInput,
+  character: undefined,
+  characters: [
+    { id: "female-lead", prompt: "长发女主", voiceProfile: "年轻女声", contentHash: "sha256:female" },
+    { id: "male-lead", prompt: "短发男主", voiceProfile: "年轻男声", contentHash: "sha256:male" },
+  ],
+  shot: { ...fingerprintInput.shot, characterIds: ["female-lead", "male-lead"] },
+});
+assert.match(multiCharacterFingerprint, /^sha256:[a-f0-9]{64}$/);
+assert.notStrictEqual(
+  createGenerationFingerprint({
+    ...fingerprintInput,
+    character: undefined,
+    characters: [
+      { id: "female-lead", prompt: "长发女主", voiceProfile: "年轻女声", contentHash: "sha256:female" },
+      { id: "male-lead", prompt: "短发男主", voiceProfile: "年轻男声", contentHash: "sha256:male-v2" },
+    ],
+    shot: { ...fingerprintInput.shot, characterIds: ["female-lead", "male-lead"] },
+  }),
+  multiCharacterFingerprint,
+  "changing any selected character reference must invalidate the shot",
+);
+const emptyCastFingerprint = createGenerationFingerprint({
+  ...fingerprintInput,
+  character: undefined,
+  characters: [
+    { id: "female-lead", prompt: "长发女主", contentHash: "sha256:female" },
+    { id: "male-lead", prompt: "短发男主", contentHash: "sha256:male" },
+  ],
+  shot: { ...fingerprintInput.shot, characterIds: [] },
+});
+assert.strictEqual(
+  createGenerationFingerprint({
+    ...fingerprintInput,
+    character: undefined,
+    characters: [
+      { id: "female-lead", prompt: "长发女主", contentHash: "sha256:changed" },
+      { id: "male-lead", prompt: "短发男主", contentHash: "sha256:changed-too" },
+    ],
+    shot: { ...fingerprintInput.shot, characterIds: [] },
+  }),
+  emptyCastFingerprint,
+  "an explicit empty cast must remain a character-free shot",
+);
+
 assert.deepStrictEqual(
   Object.keys(require("../generation-policy.cjs")).sort(),
   ["buildVideoOptions", "classifyModel", "composeVideoPrompt", "createGenerationFingerprint", "eligibleModels", "normalizeVideoDuration", "referenceRequirements", "resolveVideoPrompt", "videoDurationRange"],

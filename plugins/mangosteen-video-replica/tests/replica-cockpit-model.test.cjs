@@ -406,6 +406,21 @@ const legacyProject = {
     referenceImagePaths: ["人物.png", "场景.png"],
   }],
 };
+const emptyCastModel = deriveCockpitModel({
+  project: {
+    title: "空镜项目",
+    characterAssets: [
+      { id: "female-lead", imagePath: "女主.png" },
+      { id: "male-lead", imagePath: "男主.png" },
+    ],
+    sceneAssets: [{ id: "room", imagePath: "客厅.png" }],
+    shots: [{ id: "001", title: "空镜", sceneId: "room", characterIds: [], productIds: [] }],
+  },
+  draft: { shots: [{ id: "001", title: "空镜", sceneId: "room", characterIds: [], productIds: [] }] },
+  selectedShotId: "001",
+  nowMs,
+});
+assert.deepStrictEqual(emptyCastModel.editor.references, ["客厅.png"], "empty shots must not inherit all character boards");
 const legacy = deriveCockpitModel({ project: legacyProject, selectedShotId: "1", nowMs });
 assert.strictEqual(legacy.rail.items[0].status, "processing");
 assert.strictEqual(legacy.editor.shot.id, "1");

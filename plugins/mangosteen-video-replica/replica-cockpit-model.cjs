@@ -111,8 +111,16 @@ function shotReferences(shot, project) {
   if (Array.isArray(shot.references)) return clone(shot.references);
   if (Array.isArray(shot.referenceImagePaths)) return clone(shot.referenceImagePaths);
   const references = [];
-  const characterPath = text(project.characterAsset?.imagePath);
-  if (characterPath) references.push(characterPath);
+  const hasExplicitCharacterSelection = Array.isArray(shot.characterIds);
+  const characterIds = new Set(hasExplicitCharacterSelection ? shot.characterIds.map(String) : []);
+  const characterAssets = Array.isArray(project.characterAssets) && project.characterAssets.length
+    ? project.characterAssets
+    : [project.characterAsset].filter(Boolean);
+  for (const asset of characterAssets) {
+    if (hasExplicitCharacterSelection && !characterIds.has(String(asset?.id))) continue;
+    const characterPath = text(asset?.imagePath);
+    if (characterPath) references.push(characterPath);
+  }
   const scene = (Array.isArray(project.sceneAssets) ? project.sceneAssets : [])
     .find((item) => text(item?.id) === text(shot.sceneId));
   if (text(scene?.imagePath)) references.push(text(scene.imagePath));

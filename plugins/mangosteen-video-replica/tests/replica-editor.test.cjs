@@ -116,4 +116,22 @@ const invalidTimeline = validateDraft({
 assert.strictEqual(invalidTimeline.ok, false);
 assert.match(invalidTimeline.errors[0].message, /存在空档/);
 
+const multiCharacterDraft = {
+  ...draft,
+  version: 6,
+  castConfirmed: true,
+  characters: [
+    { id: "female-lead", role: "女主", prompt: "女主人物参考", voiceProfile: "年轻女声" },
+    { id: "male-lead", role: "男主", prompt: "男主人物参考", voiceProfile: "年轻男声" },
+  ],
+  character: { id: "female-lead", role: "女主", prompt: "女主人物参考", voiceProfile: "年轻女声" },
+  shots: draft.shots.map((shot) => ({ ...shot, characterIds: ["female-lead", "male-lead"] })),
+};
+const editedRole = updateDraftField(multiCharacterDraft, { section: "character", index: 1, field: "role" }, "哥哥");
+assert.strictEqual(editedRole.characters[1].role, "哥哥");
+assert.strictEqual(editedRole.castConfirmed, false, "editing a role must require cast confirmation again");
+const editedCharacterIds = updateDraftField(multiCharacterDraft, { section: "shot", index: 0, field: "characterIds" }, ["male-lead"]);
+assert.deepStrictEqual(editedCharacterIds.shots[0].characterIds, ["male-lead"]);
+assert.deepStrictEqual(multiCharacterDraft.shots[0].characterIds, ["female-lead", "male-lead"]);
+
 console.log("replica-editor: ok");

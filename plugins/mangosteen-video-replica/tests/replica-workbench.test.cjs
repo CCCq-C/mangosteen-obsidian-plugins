@@ -1092,6 +1092,51 @@ function createView(plugin) {
   assert.strictEqual(invalidTimelinePlugin.queueCalls.length, 0);
   await invalidTimelineView.onClose();
 
+  const multiCharacterRequest = {
+    ...clone(request),
+    version: 6,
+    castConfirmed: false,
+    characters: [
+      { id: "female-lead", role: "女主", prompt: "长发女主固定三视图", voiceProfile: "年轻女声" },
+      { id: "male-lead", role: "男主", prompt: "短发男主固定三视图", voiceProfile: "年轻男声" },
+    ],
+    character: { id: "female-lead", role: "女主", prompt: "长发女主固定三视图", voiceProfile: "年轻女声" },
+    shots: [{ ...clone(request.shots[0]), characterIds: ["female-lead", "male-lead"] }],
+  };
+  const multiCharacterPlugin = createPlugin({
+    ...clone(readySnapshot),
+    request: multiCharacterRequest,
+    project: {
+      ...clone(readySnapshot.project),
+      characterAssets: [
+        { id: "female-lead", imagePath: "山竹视频资产库/人物/female-lead/人物参考板.png" },
+        { id: "male-lead", imagePath: "山竹视频资产库/人物/male-lead/人物参考板.png" },
+      ],
+    },
+  });
+  const multiCharacterView = createView(multiCharacterPlugin);
+  await multiCharacterView.onOpen();
+  await multiCharacterView.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "资产").dispatch("click");
+  assert.strictEqual(
+    multiCharacterView.contentEl.findAll((element) => element.tagName === "H3" && /^人物 ·/.test(element.textContent)).length,
+    2,
+    "the assets tab must render one editable card for each detected character",
+  );
+  const confirmCastButton = multiCharacterView.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "确认角色列表");
+  assert(confirmCastButton, "new multi-character drafts must require an explicit cast confirmation");
+  await confirmCastButton.dispatch("click");
+  assert.strictEqual(multiCharacterView.draft.castConfirmed, true);
+  assert.strictEqual(multiCharacterPlugin.saveCalls.at(-1).request.castConfirmed, true);
+  await multiCharacterView.contentEl.find((element) => element.tagName === "BUTTON" && element.textContent === "分镜").dispatch("click");
+  const maleCharacterCheckbox = multiCharacterView.contentEl.find((element) => (
+    element.tagName === "INPUT" && element.dataset.characterId === "male-lead"
+  ));
+  assert(maleCharacterCheckbox, "each shot must expose the detected cast as checkboxes");
+  maleCharacterCheckbox.checked = false;
+  await maleCharacterCheckbox.dispatch("change");
+  assert.deepStrictEqual(multiCharacterView.draft.shots[0].characterIds, ["female-lead"]);
+  await multiCharacterView.onClose();
+
   const css = fs.readFileSync(path.join(__dirname, "../styles.css"), "utf8");
   const fallbackStart = css.indexOf("@supports not (container-type: inline-size)");
   assert.notStrictEqual(fallbackStart, -1, "CSS must provide an explicit no-container-query fallback");

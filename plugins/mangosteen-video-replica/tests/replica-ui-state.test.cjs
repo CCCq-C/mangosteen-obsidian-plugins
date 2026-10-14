@@ -23,7 +23,7 @@ assert.deepStrictEqual(empty, {
   lockedShotIds: [],
   progress: { percent: 0, indeterminate: false, label: "等待开始" },
   current: { step: "", model: "", elapsedMs: 0 },
-  assets: { character: null, products: [], scenes: [] },
+  assets: { character: null, characters: [], products: [], scenes: [] },
   shots: [],
   output: { finalVideoPath: "", concatError: "" },
   error: null,
@@ -254,6 +254,7 @@ const assetsReady = deriveWorkbenchState({
 assert.deepStrictEqual(assetsReady.progress, { percent: 45, indeterminate: false, label: "参考资产" });
 assert.deepStrictEqual(assetsReady.assets, {
   character: { id: "hero", imagePath: "人物.png" },
+  characters: [{ id: "hero", imagePath: "人物.png" }],
   products: [{ id: "cup", imagePath: "杯子.png" }],
   scenes: [{ id: "room", imagePath: "房间.png" }],
 });

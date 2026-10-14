@@ -28,6 +28,13 @@ function runShots(run) {
   return run.queue.map((id) => run.shots[id]);
 }
 
+function fakeAssetHash(asset) {
+  const physicalId = String(asset?.id || "");
+  const scoped = physicalId.match(/^p-[a-f0-9]{12}-[csp]-[a-f0-9]{8}-(.+)$/);
+  const logicalId = scoped ? scoped[1] : physicalId;
+  return `${asset.kind}-${logicalId}-hash`;
+}
+
 function request() {
   return {
     version: 3,
@@ -332,7 +339,7 @@ function request() {
     ...asset,
     imagePath: `山竹视频资产库/${asset.kind}/${asset.id}.png`,
     metadataPath: `山竹视频资产库/${asset.kind}/${asset.id}.json`,
-    contentHash: `${asset.kind}-${asset.id}-hash`,
+    contentHash: fakeAssetHash(asset),
     reused: true,
   });
   plugin.generateImageMulti = async () => ({ kind: "base64", value: "eA==" });
@@ -438,6 +445,54 @@ function request() {
   assert(h3TimelineCalls.options.firstImageFile, "MiniMax-H3 must submit the automatic first frame");
   assert.strictEqual(Object.hasOwn(h3TimelineCalls.options, "lastImageFile"), false, "MiniMax-H3 must not invent a last frame");
   assert.strictEqual(Object.hasOwn(h3TimelineCalls.options, "referenceImageFiles"), false, "MiniMax-H3 cannot accept reference image arrays");
+
+  const capFolder = "山竹视频复刻/四图上限";
+  const capRoot = path.join(vault, ...capFolder.split("/"));
+  fs.mkdirSync(path.join(capRoot, ".work"), { recursive: true });
+  fs.writeFileSync(path.join(capRoot, "project.json"), JSON.stringify({ folder: capFolder, title: "四图上限", shots: [] }));
+  fs.writeFileSync(path.join(capRoot, ".work/generation-queue.json"), JSON.stringify({}));
+  let capturedFrameReferences = [];
+  let capturedFramePrompt = "";
+  plugin.resolveQueueGenerationRuntime = async () => ({
+    image: {},
+    video: { submitVideo: async () => ({ id: "task-four-reference-cap" }) },
+    imageModel: "gpt-image-2-w",
+    model: "MiniMax-H3",
+    resolution: "768p",
+  });
+  plugin.generateImageMulti = async (_image, prompt, referencePaths) => {
+    capturedFramePrompt = prompt;
+    capturedFrameReferences = [...referencePaths];
+    return { kind: "base64", value: "eA==" };
+  };
+  plugin.waitForVideo = async () => ({ localPath: "山竹视频资产库/generated.mp4" });
+  await plugin.runWorkbenchQueueShot(capFolder, {
+    id: "001",
+    title: "双人双产品",
+    sceneId: "room",
+    characterIds: ["female-lead", "male-lead"],
+    productIds: ["phone", "headphones"],
+    duration: 6,
+    timeline: [{ start: 0, end: 6, action: "两位主角展示两款产品", dialogue: "", performance: "自然", camera: "中景", environment: "客厅" }],
+    effectiveVideoPrompt: "已确认提示词",
+  }, {
+    queueId: "queue-four-reference-cap",
+    planId: "plan-four-reference-cap",
+    requestVersion: 6,
+    primaryCharacterId: "female-lead",
+    characters: [
+      { id: "female-lead", role: "女主", prompt: "固定女主形象" },
+      { id: "male-lead", role: "男主", prompt: "固定男主形象" },
+    ],
+    products: [
+      { id: "phone", prompt: "银色手机" },
+      { id: "headphones", prompt: "白色耳机" },
+    ],
+    scenes: [{ id: "room", prompt: "明亮客厅" }],
+    settings: { imageModel: "gpt-image-2-w", videoModel: "MiniMax-H3", ratio: "9:16", resolution: "768p" },
+  });
+  assert.strictEqual(capturedFrameReferences.length, 4, "first-frame generation must respect the image plugin's four-reference limit");
+  assert.match(capturedFramePrompt, /白色耳机/, "products beyond the image limit must remain in the text prompt");
 
   const seedanceTimelineCalls = await runTimelineReferenceCase("seedance-2.5", "720p");
   assert.strictEqual(seedanceTimelineCalls.frames, 0, "Seedance timeline shots must not generate per-shot frames");
@@ -564,7 +619,7 @@ function request() {
         ...asset,
         imagePath: `山竹视频资产库/${asset.kind}/${asset.id}.png`,
         metadataPath: `山竹视频资产库/${asset.kind}/${asset.id}.json`,
-        contentHash: `${asset.kind}-${asset.id}-hash`,
+        contentHash: fakeAssetHash(asset),
         reused: true,
       };
     };
@@ -829,7 +884,7 @@ function request() {
     ...asset,
     imagePath: `山竹视频资产库/${asset.kind}/${asset.id}.png`,
     metadataPath: `山竹视频资产库/${asset.kind}/${asset.id}.json`,
-    contentHash: `${asset.kind}-${asset.id}-hash`,
+    contentHash: fakeAssetHash(asset),
     reused: true,
   });
   plugin.generateImageMulti = ReplicaPlugin.prototype.generateImageMulti.bind(plugin);
@@ -1233,7 +1288,7 @@ function request() {
         ...asset,
         imagePath: `山竹视频资产库/${asset.kind}/${asset.id}.png`,
         metadataPath: `山竹视频资产库/${asset.kind}/${asset.id}.json`,
-        contentHash: `${asset.kind}-${asset.id}-hash`,
+        contentHash: fakeAssetHash(asset),
         reused: false,
       };
     };
@@ -1676,7 +1731,11 @@ function request() {
     ...asset,
     imagePath: `山竹视频资产库/${asset.kind}/${asset.id}.png`,
     metadataPath: `山竹视频资产库/${asset.kind}/${asset.id}.json`,
-    contentHash: `${asset.kind}-${asset.id}-hash`,
+    contentHash: asset.kind === "character"
+      ? "character-hero-hash"
+      : asset.kind === "product"
+        ? "product-phone-hash"
+        : "scene-room-hash",
     reused: true,
   });
   plugin.resolveQueueGenerationRuntime = async () => ({

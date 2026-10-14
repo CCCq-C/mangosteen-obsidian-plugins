@@ -166,6 +166,16 @@ function resolveReferenceAsset(vaultRoot, kind, id) {
   return resolveAsset(vaultRoot, kind, id);
 }
 
+function projectScopedAssetId(projectFolder, kind, value) {
+  if (!KIND_CONFIG[kind]) throw new Error(`不支持的资产类型：${String(kind || "未填写")}`);
+  const projectKey = String(projectFolder || "").trim().replace(/\\/g, "/");
+  if (!projectKey) throw new Error("缺少项目路径，无法隔离参考资产。");
+  const logicalId = assertAssetId(value);
+  const projectHash = crypto.createHash("sha256").update(projectKey).digest("hex").slice(0, 12);
+  const logicalHash = crypto.createHash("sha256").update(logicalId).digest("hex").slice(0, 8);
+  return assertAssetId(`p-${projectHash}-${kind.slice(0, 1)}-${logicalHash}-${logicalId.slice(0, 30)}`);
+}
+
 function writeAssetMetadata(vaultRoot, asset, metadata = {}) {
   const canonical = resolveReferenceAsset(vaultRoot, asset?.kind, asset?.id);
   const payload = {
@@ -200,6 +210,7 @@ module.exports = {
   checkedAssetPath,
   createGenerationSpec,
   hashAssetImage,
+  projectScopedAssetId,
   resolveCharacterAsset,
   resolveProductAsset,
   resolveReferenceAsset,

@@ -67,13 +67,18 @@ function resolveVideoPrompt({ videoPromptOverride, visualStyle, ...parts } = {})
   return override ? applyVisualStyle(override, visualStyle) : composeVideoPrompt({ ...parts, visualStyle });
 }
 
-function createGenerationFingerprint({ requestVersion = 1, visualStyle, character = {}, scene = {}, products = [], shot = {}, model, ratio, resolution } = {}) {
+function createGenerationFingerprint({ requestVersion = 1, visualStyle, character = {}, characters, scene = {}, products = [], shot = {}, model, ratio, resolution } = {}) {
   const structured = Number(requestVersion) >= 4 && Array.isArray(shot.timeline) && shot.timeline.length > 0;
   const requirements = referenceRequirements(model, shot.lastImagePrompt, { structured });
+  const hasExplicitCharacterSelection = Array.isArray(shot.characterIds);
+  const selectedIds = new Set(hasExplicitCharacterSelection ? shot.characterIds.map(String) : []);
+  const canonicalCharacters = (Array.isArray(characters) && characters.length ? characters : [character])
+    .filter((item) => item && (!hasExplicitCharacterSelection || selectedIds.has(String(item.id))))
+    .map((item) => ({ id: clean(item.id), prompt: clean(item.prompt), contentHash: clean(item.contentHash) }));
   const canonical = {
-    version: 4,
+    version: 5,
     visualStyle: normalizeVisualStyle(visualStyle),
-    character: { id: clean(character.id), prompt: clean(character.prompt), contentHash: clean(character.contentHash) },
+    characters: canonicalCharacters,
     scene: { id: clean(scene.id), prompt: clean(scene.prompt), contentHash: clean(scene.contentHash) },
     products: (Array.isArray(products) ? products : []).map((product) => ({
       id: clean(product?.id),
@@ -83,7 +88,7 @@ function createGenerationFingerprint({ requestVersion = 1, visualStyle, characte
     imagePrompt: clean(shot.imagePrompt),
     lastImagePrompt: structured ? "" : clean(shot.lastImagePrompt),
     legacyFrameMode: structured ? false : shot.legacyFrameMode === true,
-    effectiveVideoPrompt: resolveVideoPrompt({
+    effectiveVideoPrompt: clean(shot.effectiveVideoPrompt) || resolveVideoPrompt({
       timeline: shot.timeline,
       duration: shot.duration,
       videoPrompt: shot.videoPrompt,

@@ -34,9 +34,12 @@ assert.match(promptForVoiceAnalysis, /visualStyle/);
 assert.match(promptForVoiceAnalysis, /全项目统一视觉风格/);
 const analysisSchema = JSON.parse(fs.readFileSync(path.resolve(__dirname, "../video-analysis-schema.json"), "utf8"));
 assert(analysisSchema.required.includes("visualStyle"));
+assert(analysisSchema.required.includes("characters"));
+assert(!analysisSchema.required.includes("character"));
 assert.deepStrictEqual(analysisSchema.properties.visualStyle.required, ["category", "prompt"]);
 const shotSchema = analysisSchema.properties.shots.items;
 assert(shotSchema.required.includes("timeline"));
+assert(shotSchema.required.includes("characterIds"));
 assert(!shotSchema.required.includes("imagePrompt"));
 
 const whisperRoot = fs.mkdtempSync(path.join(os.tmpdir(), "mangosteen-whisper-priority-"));
@@ -233,7 +236,8 @@ if (output.includes("%03d")) {
   assert.strictEqual(analyzedV6.request.schemaVersion, 6);
   assert.strictEqual(analyzedV6Project.schemaVersion, 6);
   assert.strictEqual(analyzedV6Draft.schemaVersion, 6);
-  assert.strictEqual(analyzedV6Draft.version, 5);
+  assert.strictEqual(analyzedV6Draft.version, 6);
+  assert.strictEqual(analyzedV6Draft.castConfirmed, false);
   assert.strictEqual(analyzedV6Draft.shots[0].id, "001");
   assert.strictEqual(analyzedV6Draft.shots[0].timeline[0].performance, "亲切，语速中等，句尾上扬。");
   assert.deepStrictEqual(analyzedV6Project.shots, [{ id: "001", currentArtifacts: {} }]);
@@ -260,7 +264,7 @@ fs.writeFileSync(output, "joined-video");
   try {
     const analyzed = applyAnalysis({ projectFolder, vaultPath: vault, analysis, settings: { videoModel: "MiniMax-H3", resolution: "768p" } });
     assert.strictEqual(analyzed.request.confirmed, false);
-    assert.strictEqual(analyzed.request.version, 5);
+    assert.strictEqual(analyzed.request.version, 6);
     assert.strictEqual(analyzed.request.visualStyle.category, "真人写实");
     assert.strictEqual(analyzed.project.status, "analysis_ready");
     assert.strictEqual(analyzed.project.shots[0].status, "等待确认");

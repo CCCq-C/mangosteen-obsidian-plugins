@@ -32,7 +32,9 @@ function planSnapshot(plan) {
   return {
     version: Number(plan?.version),
     requestVersion: Number(plan?.requestVersion),
+    primaryCharacterId: String(plan?.primaryCharacterId || ""),
     visualStyle: clone(plan?.visualStyle),
+    characters: clone(plan?.characters || []),
     character: clone(plan?.character),
     products: clone(plan?.products || []),
     scenes: clone(plan?.scenes || []),
@@ -56,6 +58,9 @@ function normalizedSelection(selectedShotIds) {
 function prepareGenerationPlan(request, selectedShotIds) {
   const selected = normalizedSelection(selectedShotIds);
   const normalized = normalizeGenerationRequest({ ...clone(request), confirmed: true });
+  if (Number(normalized.version) >= 6 && normalized.castConfirmed !== true) {
+    throw new Error("请先确认角色列表（资产页），再提交付费生成。");
+  }
   const available = new Set(normalized.shots.map((shot) => shot.id));
   for (const id of selected) {
     if (!available.has(id)) throw new Error(`找不到镜头：${id}`);
@@ -70,18 +75,30 @@ function prepareGenerationPlan(request, selectedShotIds) {
       videoPrompt: shot.videoPrompt,
       videoPromptOverride: shot.videoPromptOverride,
       dialogue: shot.dialogue,
-      voiceProfile: normalized.character.voiceProfile,
+      voiceProfile: (normalized.characters || [])
+        .filter((character) => (shot.characterIds || []).includes(character.id))
+        .map((character) => `${character.role || character.id}：${character.voiceProfile || "声音自然，符合角色年龄与形象。"}`)
+        .join("\n"),
       voiceDirection: shot.voiceDirection,
       visualStyle: normalized.visualStyle,
     }),
   }));
+  for (const shot of shots) {
+    if ((shot.characterIds || []).length > 3) {
+      throw new Error(`镜头 ${shot.id} 最多支持 3 个固定角色；请拆分镜头后再生成。`);
+    }
+  }
   const sceneIds = new Set(shots.map((shot) => shot.sceneId));
   const productIds = new Set(shots.flatMap((shot) => shot.productIds || []));
+  const characterIds = new Set(shots.flatMap((shot) => shot.characterIds || []));
+  const characters = (normalized.characters || []).filter((character) => characterIds.has(character.id));
   const snapshot = {
     version: 1,
     requestVersion: normalized.version,
+    primaryCharacterId: String(normalized.characters?.[0]?.id || normalized.character?.id || ""),
     visualStyle: clone(normalized.visualStyle),
-    character: clone(normalized.character),
+    characters: clone(characters),
+    character: clone(characters[0] || normalized.character),
     products: clone((normalized.products || []).filter((product) => productIds.has(product.id))),
     scenes: clone((normalized.scenes || []).filter((scene) => sceneIds.has(scene.id))),
     settings: clone(normalized.settings),
@@ -124,7 +141,9 @@ function generationContext(plan) {
   return {
     planId: String(plan.planId),
     requestVersion: Number(plan.requestVersion),
+    primaryCharacterId: String(plan.primaryCharacterId || ""),
     visualStyle: clone(plan.visualStyle),
+    characters: clone(plan.characters || []),
     character: clone(plan.character),
     products: clone(plan.products || []),
     scenes: clone(plan.scenes || []),
@@ -189,7 +208,10 @@ function createGenerationQueue(confirmedPlan, { activeQueues = [], now = new Dat
   const runId = `run_${sha256({ planId: confirmedPlan.planId, createdAt }).slice("sha256:".length)}`;
   const queue = createActiveRun({ runId, plan: confirmedPlan, now: createdAt });
   Object.assign(queue, {
+    requestVersion: Number(confirmedPlan.requestVersion),
+    primaryCharacterId: String(confirmedPlan.primaryCharacterId || ""),
     character: clone(confirmedPlan.character),
+    characters: clone(confirmedPlan.characters || []),
     visualStyle: clone(confirmedPlan.visualStyle),
     products: clone(confirmedPlan.products || []),
     scenes: clone(confirmedPlan.scenes || []),
@@ -280,7 +302,10 @@ async function runGenerationQueue(queue, runShot, {
       verifyQueuedShot(shot);
       const shotContext = shot.generationContext || {
         planId: queue.planId,
+        requestVersion: queue.requestVersion,
+        primaryCharacterId: String(queue.primaryCharacterId || ""),
         visualStyle: queue.visualStyle,
+        characters: queue.characters || [],
         character: queue.character,
         products: queue.products || [],
         scenes: queue.scenes || [],

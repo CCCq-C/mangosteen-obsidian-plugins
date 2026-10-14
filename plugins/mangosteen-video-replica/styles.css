@@ -972,6 +972,30 @@
   margin-bottom: 14px;
 }
 
+.mangosteen-replica-field.is-characters {
+  grid-column: 1 / -1;
+}
+
+.mangosteen-replica-character-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.mangosteen-replica-character-choice {
+  align-items: center;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  display: inline-flex;
+  gap: 7px;
+  padding: 7px 10px;
+}
+
+.mangosteen-replica-character-choice input {
+  margin: 0;
+}
+
 .mangosteen-replica-reference-card {
   min-width: 0;
   padding: 10px;

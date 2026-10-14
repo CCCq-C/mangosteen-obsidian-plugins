@@ -148,7 +148,8 @@ const analysisDraft = core.buildGenerationDraft({ width: 1080, height: 1920 }, {
   }],
 }, { videoModel: "MiniMax-H3", resolution: "768p" });
 assert.strictEqual(analysisDraft.confirmed, false);
-assert.strictEqual(analysisDraft.version, 5);
+assert.strictEqual(analysisDraft.version, 6);
+assert.strictEqual(analysisDraft.castConfirmed, false);
 assert.deepStrictEqual(analysisDraft.visualStyle, {
   category: "真人写实",
   prompt: "真人电影质感，自然皮肤纹理，傍晚暖光，低饱和写实摄影。",
@@ -288,6 +289,84 @@ const versionSixAssets = core.referenceAssetsMarkdown(versionSixProject, version
 assert.match(versionSixAssets, /!\[\[山竹视频资产库\/人物\/hero\/人物参考板\.png\]\]/);
 assert.match(versionSixAssets, /!\[\[山竹视频资产库\/场景\/studio\/场景参考图\.png\]\]/);
 assert.match(versionSixAssets, /!\[\[山竹视频资产库\/产品\/headphones\/产品参考板\.png\]\]/);
+
+const multiCharacterAnalysis = {
+  visualStyle: { category: "真人写实", prompt: "真人电影质感，自然皮肤纹理，室内柔和暖光，统一写实摄影风格。" },
+  characters: [
+    { id: "female-lead", role: "女主", prompt: "年轻女性，黑色长发，米白针织衫，固定五官、发型、服装与正侧背三视图。", voiceProfile: "年轻女性普通话，清亮自然。" },
+    { id: "male-lead", role: "男主", prompt: "年轻男性，黑色短发，深色夹克，固定五官、发型、服装与正侧背三视图。", voiceProfile: "年轻男性普通话，沉稳自然。" },
+  ],
+  products: [],
+  scenes: [{ id: "living-room", prompt: "暖色客厅，米色沙发和木质茶几，固定空间布局与自然窗光。" }],
+  shots: [{
+    title: "两人对话",
+    sceneId: "living-room",
+    characterIds: ["female-lead", "male-lead"],
+    productIds: [],
+    startTime: 0,
+    endTime: 4,
+    timeline: [{ start: 0, end: 4, action: "女主看向男主并微笑", dialogue: "女主：准备好了吗？", performance: "女主轻松，男主自然回应", camera: "双人中景缓慢推进", environment: "同一暖色客厅" }],
+  }],
+};
+const multiCharacterDraft = core.buildGenerationDraft({ width: 1080, height: 1920 }, multiCharacterAnalysis, {
+  videoModel: "MiniMax-H3",
+  resolution: "768p",
+});
+assert.strictEqual(multiCharacterDraft.version, 6);
+assert.strictEqual(multiCharacterDraft.castConfirmed, false);
+assert.deepStrictEqual(multiCharacterDraft.characters.map(({ id, role }) => ({ id, role })), [
+  { id: "female-lead", role: "女主" },
+  { id: "male-lead", role: "男主" },
+]);
+assert.deepStrictEqual(multiCharacterDraft.character, multiCharacterDraft.characters[0], "legacy character mirror must follow the first canonical character");
+assert.deepStrictEqual(multiCharacterDraft.shots[0].characterIds, ["female-lead", "male-lead"]);
+assert.throws(
+  () => core.buildGenerationDraft({ width: 1080, height: 1920 }, {
+    ...multiCharacterAnalysis,
+    shots: [{ ...multiCharacterAnalysis.shots[0], characterIds: ["male-leaad"] }],
+  }, { videoModel: "MiniMax-H3", resolution: "768p" }),
+  /镜头 001.*不存在的人物 ID.*male-leaad/,
+  "analysis must reject misspelled role IDs instead of silently dropping them",
+);
+
+const normalizedMultiCharacter = core.normalizeGenerationRequest({
+  ...multiCharacterDraft,
+  confirmed: true,
+  castConfirmed: true,
+});
+assert.deepStrictEqual(normalizedMultiCharacter.shots[0].characterIds, ["female-lead", "male-lead"]);
+assert.throws(
+  () => core.normalizeGenerationRequest({
+    ...multiCharacterDraft,
+    confirmed: true,
+    castConfirmed: true,
+    shots: [{ ...multiCharacterDraft.shots[0], characterIds: ["missing-role"] }],
+  }),
+  /找不到人物 ID.*missing-role/,
+);
+
+const migratedSingleCharacter = core.normalizeGenerationRequest({
+  ...analysisDraft,
+  confirmed: true,
+});
+assert.strictEqual(migratedSingleCharacter.characters[0].id, migratedSingleCharacter.character.id);
+assert.strictEqual(migratedSingleCharacter.characters[0].prompt, migratedSingleCharacter.character.prompt);
+assert.deepStrictEqual(migratedSingleCharacter.shots[0].characterIds, [migratedSingleCharacter.character.id]);
+
+const multiCharacterAssets = core.referenceAssetsMarkdown({
+  ...versionSixProject,
+  characterAssets: [
+    { id: "female-lead", imagePath: "山竹视频资产库/人物/female-lead/人物参考板.png" },
+    { id: "male-lead", imagePath: "山竹视频资产库/人物/male-lead/人物参考板.png" },
+  ],
+}, multiCharacterDraft);
+assert.match(multiCharacterAssets, /人物\/female-lead\/人物参考板\.png/);
+assert.match(multiCharacterAssets, /人物\/male-lead\/人物参考板\.png/);
+
+const multiCharacterStoryboard = core.analysisStoryboardMarkdown({ title: "双人项目" }, multiCharacterDraft);
+assert.match(multiCharacterStoryboard, /女主/);
+assert.match(multiCharacterStoryboard, /男主/);
+assert.match(multiCharacterStoryboard, /本镜头角色.*female-lead.*male-lead/);
 
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log("replica-core: ok");

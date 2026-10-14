@@ -1,4 +1,5 @@
 const COLLECTIONS = {
+  character: { key: "characters", fields: new Set(["role", "prompt", "voiceProfile"]) },
   product: { key: "products", fields: new Set(["prompt"]) },
   scene: { key: "scenes", fields: new Set(["prompt"]) },
   shot: {
@@ -7,6 +8,7 @@ const COLLECTIONS = {
       "title",
       "duration",
       "sceneId",
+      "characterIds",
       "productIds",
       "dialogue",
       "voiceDirection",
@@ -71,10 +73,16 @@ function updateDraftField(request, target, value) {
     ? DIRECT_FIELDS[target.section]
     : null;
   if (directFields) {
-    if (target.index !== undefined || !directFields.has(target.field)
-        || !next[target.section] || typeof next[target.section] !== "object") unsupportedEdit();
-    next[target.section][target.field] = clone(value);
-    return next;
+    if (target.index === undefined) {
+      if (!directFields.has(target.field)
+          || !next[target.section] || typeof next[target.section] !== "object") unsupportedEdit();
+      next[target.section][target.field] = clone(value);
+      if (target.section === "character") {
+        next.castConfirmed = false;
+        if (Array.isArray(next.characters) && next.characters[0]) next.characters[0][target.field] = clone(value);
+      }
+      return next;
+    }
   }
 
   const collection = Object.prototype.hasOwnProperty.call(COLLECTIONS, target.section)
@@ -87,6 +95,10 @@ function updateDraftField(request, target, value) {
     unsupportedEdit();
   }
   next[collection.key][target.index][target.field] = clone(value);
+  if (target.section === "character") {
+    next.castConfirmed = false;
+    if (target.index === 0) next.character = clone(next.characters[0]);
+  }
   return next;
 }
 

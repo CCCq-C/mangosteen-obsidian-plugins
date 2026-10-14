@@ -81,12 +81,39 @@ function formatTime(seconds) {
   return hours ? `${String(hours).padStart(2, "0")}:${base}` : base;
 }
 
+function normalizeCharacters(input) {
+  const source = Array.isArray(input?.characters) && input.characters.length
+    ? input.characters
+    : input?.character && typeof input.character === "object"
+      ? [input.character]
+      : [];
+  if (!source.length) throw validationError("至少需要一个人物资产。", "characters");
+  if (source.length > 12) throw validationError("一个项目最多只能包含 12 个固定角色。", "characters");
+  const characters = source.map((character, index) => {
+    const id = withValidationPath(`characters.${index}.id`, () => assertAssetId(character?.id));
+    const prompt = cleanText(character?.prompt);
+    if (!prompt) throw validationError(`人物 ${id} 缺少参考图提示词。`, `characters.${index}.prompt`);
+    return {
+      id,
+      role: cleanText(character?.role) || id,
+      prompt,
+      voiceProfile: cleanText(character?.voiceProfile),
+    };
+  });
+  const ids = new Set();
+  for (const [index, character] of characters.entries()) {
+    if (ids.has(character.id)) throw validationError(`人物 ID 重复：${character.id}`, `characters.${index}.id`);
+    ids.add(character.id);
+  }
+  return characters;
+}
+
 function normalizeGenerationRequest(input) {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw validationError("生成任务格式错误。", "request");
   if (input.confirmed !== true) throw validationError("生成任务尚未确认，不会调用付费算力。", "confirmed");
   const version = input.version === undefined ? 1 : Number(input.version);
   const isVersionSix = Number(input.schemaVersion) === 6;
-  if (![1, 2, 3, 4, 5].includes(version)) throw validationError(`不支持生成任务版本：${String(input.version)}`, "version");
+  if (![1, 2, 3, 4, 5, 6].includes(version)) throw validationError(`不支持生成任务版本：${String(input.version)}`, "version");
   let visualStyle;
   try {
     visualStyle = normalizeVisualStyle(input.visualStyle, { required: version >= 5 });
@@ -94,14 +121,16 @@ function normalizeGenerationRequest(input) {
     throw validationError(String(error?.message || error), "visualStyle");
   }
   const characterPrompt = cleanText(input.character?.prompt);
-  if (!characterPrompt) throw validationError("缺少人物参考图提示词。", "character.prompt");
+  if (version === 1 && !characterPrompt) throw validationError("缺少人物参考图提示词。", "character.prompt");
   const inputShots = Array.isArray(input.shots) ? input.shots : [];
   if (version >= 2 && inputShots.length > 12) throw validationError("一个任务最多只能包含 12 个分镜。", "shots");
   const shots = version === 1 ? inputShots.slice(0, 12) : inputShots;
   if (!shots.length) throw validationError("至少需要一个分镜。", "shots");
 
   if (version >= 2) {
-    const characterId = withValidationPath("character.id", () => assertAssetId(input.character?.id));
+    const characters = normalizeCharacters(input);
+    const character = characters[0];
+    const characterIds = new Set(characters.map((item) => item.id));
     const model = cleanText(input.settings?.videoModel);
     if (!classifyModel(model)) throw validationError(`视频复刻不支持模型：${model || "未选择"}`, "settings.videoModel");
     const inputScenes = Array.isArray(input.scenes) ? input.scenes : [];
@@ -133,8 +162,12 @@ function normalizeGenerationRequest(input) {
       ...(isVersionSix ? { schemaVersion: 6 } : {}),
       version,
       confirmed: true,
+      ...(version >= 6 ? { castConfirmed: input.castConfirmed === true } : {}),
       visualStyle,
-      character: { id: characterId, prompt: characterPrompt, voiceProfile: cleanText(input.character?.voiceProfile) },
+      characters,
+      character: version >= 6
+        ? { ...character }
+        : { id: character.id, prompt: character.prompt, voiceProfile: character.voiceProfile },
       ...(version >= 3 ? { products } : {}),
       scenes,
       settings: {
@@ -170,6 +203,17 @@ function normalizeGenerationRequest(input) {
             throw validationError(`镜头 ${id} 找不到产品 ID：${productId}`, `shots.${index}.productIds.${productIndex}`);
           }
         }
+        const shotCharacterIds = (Array.isArray(shot?.characterIds) ? shot.characterIds : [character.id]).map((rawId, characterIndex) => (
+          withValidationPath(`shots.${index}.characterIds.${characterIndex}`, () => assertAssetId(rawId))
+        ));
+        if (new Set(shotCharacterIds).size !== shotCharacterIds.length) {
+          throw validationError(`镜头 ${id} 包含重复人物 ID。`, `shots.${index}.characterIds`);
+        }
+        for (const [characterIndex, shotCharacterId] of shotCharacterIds.entries()) {
+          if (!characterIds.has(shotCharacterId)) {
+            throw validationError(`镜头 ${id} 找不到人物 ID：${shotCharacterId}`, `shots.${index}.characterIds.${characterIndex}`);
+          }
+        }
         const title = safeSegment(shot?.title, `镜头-${id}`);
         const duration = normalizeVideoDuration(shot?.duration, model);
         if (version >= 4) {
@@ -181,6 +225,7 @@ function normalizeGenerationRequest(input) {
           return {
             id,
             title,
+            characterIds: shotCharacterIds,
             sceneId,
             productIds: shotProductIds,
             duration,
@@ -205,6 +250,7 @@ function normalizeGenerationRequest(input) {
         return {
           id,
           title,
+          characterIds: shotCharacterIds,
           sceneId,
           ...(version >= 3 ? { productIds: shotProductIds } : {}),
           duration,
@@ -266,7 +312,25 @@ function normalizeGenerationRequest(input) {
 
 function buildGenerationDraft(project, analysis, settings = {}) {
   if (!analysis || typeof analysis !== "object" || Array.isArray(analysis)) throw new Error("AI 分析结果格式错误。");
-  const characterId = assertAssetId(analysis.character?.id || "main-character");
+  const sourceCharacters = Array.isArray(analysis.characters) && analysis.characters.length
+    ? analysis.characters
+    : analysis.character
+      ? [analysis.character]
+      : [];
+  if (!sourceCharacters.length) throw new Error("AI 分析没有生成有效人物资产。");
+  const characters = sourceCharacters.map((character, index) => {
+    const id = assertAssetId(character?.id || (index === 0 ? "main-character" : `character-${index + 1}`));
+    const prompt = cleanText(character?.prompt);
+    if (!prompt) throw new Error(`AI 分析生成了无效人物资产：${id}`);
+    return {
+      id,
+      role: cleanText(character?.role) || id,
+      prompt,
+      voiceProfile: cleanText(character?.voiceProfile),
+    };
+  });
+  if (new Set(characters.map((character) => character.id)).size !== characters.length) throw new Error("AI 分析生成了重复人物 ID。");
+  const availableCharacterIds = new Set(characters.map((character) => character.id));
   const products = (Array.isArray(analysis.products) ? analysis.products : []).map((product) => ({
     id: assertAssetId(product?.id),
     prompt: cleanText(product?.prompt),
@@ -280,14 +344,12 @@ function buildGenerationDraft(project, analysis, settings = {}) {
   const rawShots = Array.isArray(analysis.shots) ? analysis.shots.slice(0, 12) : [];
   const videoModel = cleanText(settings.videoModel) || "MiniMax-H3";
   const draft = {
-    version: 5,
+    version: 6,
     confirmed: true,
+    castConfirmed: false,
     visualStyle: normalizeVisualStyle(analysis.visualStyle),
-    character: {
-      id: characterId,
-      prompt: cleanText(analysis.character?.prompt),
-      voiceProfile: cleanText(analysis.character?.voiceProfile),
-    },
+    characters,
+    character: { ...characters[0] },
     products,
     scenes,
     settings: {
@@ -296,14 +358,22 @@ function buildGenerationDraft(project, analysis, settings = {}) {
       ratio: cleanText(settings.ratio) || (Number(project?.height) > Number(project?.width) ? "9:16" : "16:9"),
       resolution: cleanText(settings.resolution) || "720p",
     },
-    shots: rawShots.map((shot) => {
+    shots: rawShots.map((shot, index) => {
       const rawDuration = Number(shot?.endTime) - Number(shot?.startTime) || Number(shot?.duration) || 4;
       const duration = normalizeVideoDuration(rawDuration, videoModel);
       let timeline = Array.isArray(shot?.timeline) ? shot.timeline.map((segment) => ({ ...segment })) : legacyTimeline({ ...shot, duration });
       timeline = fitTimelineDuration(timeline, duration);
       timeline = normalizeTimeline(timeline, duration);
+      const rawCharacterIds = Array.isArray(shot?.characterIds)
+        ? shot.characterIds.map((id) => cleanText(id))
+        : characters.map((character) => character.id);
+      const invalidCharacterId = rawCharacterIds.find((id) => !availableCharacterIds.has(id));
+      if (invalidCharacterId) {
+        throw new Error(`AI 分析镜头 ${String(index + 1).padStart(3, "0")} 引用了不存在的人物 ID：${invalidCharacterId}`);
+      }
       return {
         title: cleanText(shot?.title),
+        characterIds: rawCharacterIds,
         sceneId: cleanText(shot?.sceneId),
         productIds: Array.isArray(shot?.productIds) ? shot.productIds.map((id) => cleanText(id)).filter(Boolean) : [],
         duration,
@@ -330,7 +400,15 @@ function analysisStoryboardMarkdown(project, request) {
     }
   }
   lines.push("", "## 统一视觉风格", "", `**${request.visualStyle.category}**`, "", request.visualStyle.prompt, "");
-  lines.push("", "## 人物参考提示词", "", request.character.prompt, "", "## 人物声音设定", "", request.character.voiceProfile || "未指定，由视频模型根据人物和剧情自然生成。", "", "## 产品参考提示词", "");
+  lines.push("", "## 人物参考提示词", "");
+  const characters = Array.isArray(request.characters) && request.characters.length ? request.characters : [request.character].filter(Boolean);
+  for (const character of characters) {
+    lines.push(`### ${cleanText(character.role) || character.id}｜${character.id}`, "", character.prompt, "");
+  }
+  lines.push("## 人物声音设定", "");
+  for (const character of characters) lines.push(`- **${cleanText(character.role) || character.id}**：${character.voiceProfile || "未指定，由视频模型根据人物和剧情自然生成。"}`);
+  lines.push("");
+  lines.push("## 产品参考提示词", "");
   if (!(request.products || []).length) lines.push("本项目没有需要固定外观的核心产品。", "");
   for (const product of request.products || []) lines.push(`### ${product.id}`, "", product.prompt, "");
   lines.push("## 场景参考提示词", "");
@@ -338,6 +416,7 @@ function analysisStoryboardMarkdown(project, request) {
   lines.push("## 分镜时间轴", "");
   for (const shot of request.shots || []) {
     lines.push(`### ${shot.id}｜${safeSegment(shot.title)}`, "");
+    lines.push(`- **本镜头角色**：${(shot.characterIds || []).join("、") || "无固定角色"}`);
     for (const segment of shot.timeline || legacyTimeline(shot)) {
       lines.push(`- **${Number(segment.start)}～${Number(segment.end)} 秒**：${segment.action || "保持自然动作"}；台词：${segment.dialogue || "无"}；情绪与声音：${segment.performance || "自然"}；景别与运镜：${segment.camera || "稳定"}；环境：${segment.environment || "延续场景"}`);
     }
@@ -362,7 +441,9 @@ function expectedReferenceAssetPath(kind, id) {
 }
 
 function referenceAssetsMarkdown(project = {}, draft = {}) {
-  const characterAssets = [project.characterAsset].filter(Boolean);
+  const characterAssets = Array.isArray(project.characterAssets) && project.characterAssets.length
+    ? project.characterAssets
+    : [project.characterAsset].filter(Boolean);
   const sceneAssets = Array.isArray(project.sceneAssets) ? project.sceneAssets : [];
   const productAssets = Array.isArray(project.productAssets) ? project.productAssets : [];
   const byId = (assets) => new Map(assets.map((asset) => [cleanText(asset?.id), asset]));
@@ -377,11 +458,16 @@ function referenceAssetsMarkdown(project = {}, draft = {}) {
     "## 人物",
     "",
   ];
-  const characterId = cleanText(draft.character?.id || project.characterAsset?.id);
-  if (characterId) {
+  const characters = Array.isArray(draft.characters) && draft.characters.length
+    ? draft.characters
+    : [draft.character].filter(Boolean);
+  if (!characters.length) lines.push("等待分镜分析确定人物资产。", "");
+  for (const character of characters) {
+    const characterId = cleanText(character?.id);
+    if (!characterId) continue;
     const imagePath = cleanText(characterById.get(characterId)?.imagePath) || expectedReferenceAssetPath("character", characterId);
-    lines.push(`### ${safeSegment(characterId, "人物")}`, "", `![[${imagePath}]]`, "");
-  } else lines.push("等待分镜分析确定人物资产。", "");
+    lines.push(`### ${safeSegment(cleanText(character.role) || characterId, "人物")}｜${characterId}`, "", `![[${imagePath}]]`, "");
+  }
 
   lines.push("## 场景", "");
   const scenes = Array.isArray(draft.scenes) ? draft.scenes : [];

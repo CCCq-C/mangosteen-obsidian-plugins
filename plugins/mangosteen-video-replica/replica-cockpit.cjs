@@ -294,6 +294,29 @@ function renderShotEditor(parent, model, actions = {}) {
     className: "is-scene",
     options: controls.sceneOptions,
   }, actions);
+  const characterField = metadata.createDiv({ cls: "mangosteen-replica-field is-characters" });
+  characterField.createEl("span", { text: "本镜头角色" });
+  const characterChoices = characterField.createDiv({ cls: "mangosteen-replica-character-choices" });
+  const selectedCharacterIds = new Set(list(shot.characterIds).map(String));
+  for (const character of list(controls.characterOptions)) {
+    const id = text(character?.id);
+    if (!id) continue;
+    const choice = characterChoices.createEl("label", { cls: "mangosteen-replica-character-choice" });
+    const checkbox = choice.createEl("input", { attr: { type: "checkbox", "aria-label": `本镜头包含${text(character?.label, id)}` } });
+    checkbox.dataset.characterId = id;
+    checkbox.checked = selectedCharacterIds.has(id);
+    checkbox.disabled = locked;
+    checkbox.addEventListener("change", async () => {
+      if (checkbox.checked) selectedCharacterIds.add(id);
+      else selectedCharacterIds.delete(id);
+      await runAction(actions, () => actions.updateDraftField?.(
+        { section: "shot", index, shotIndex: index, field: "characterIds" },
+        [...selectedCharacterIds],
+      ));
+    });
+    choice.createEl("span", { text: text(character?.label, id) });
+  }
+  if (!characterChoices.children.length) characterChoices.createDiv({ cls: "mangosteen-replica-empty-inline", text: "尚未识别到固定角色。" });
 
   const timeline = list(editor.timeline);
   const timelineList = body.createDiv({ cls: "mangosteen-replica-timeline-list" });

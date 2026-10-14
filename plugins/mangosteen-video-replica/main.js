@@ -34,6 +34,7 @@ const WORKBENCH_SHOT_FIELDS = [
   "title",
   "duration",
   "sceneId",
+  "characterIds",
   "productIds",
   "timeline",
   "dialogue",
@@ -112,7 +113,7 @@ function stableVersionSixProject(project = {}) {
     "schemaVersion", "layoutVersion", "projectId", "id", "folder", "title",
     "source", "sourcePath", "sourceName", "createdAt", "updatedAt", "duration",
     "width", "height", "frames", "transcriptPath", "shots", "finalVideoPath",
-    "characterAsset", "sceneAssets", "productAssets", "analysis", "concatError",
+    "characterAsset", "characterAssets", "sceneAssets", "productAssets", "analysis", "concatError",
   ];
   const stable = {};
   for (const field of allowedProjectFields) {
@@ -137,7 +138,13 @@ function stableVersionSixProject(project = {}) {
 function assertVersionSixProtectedIdentities(currentRequest, nextRequest) {
   const current = withWorkbenchShotIds(currentRequest);
   const next = withWorkbenchShotIds(nextRequest);
-  if (String(next?.character?.id || "") !== String(current?.character?.id || "")) {
+  const characterList = (request) => Array.isArray(request?.characters) && request.characters.length
+    ? request.characters
+    : [request?.character].filter(Boolean);
+  const currentCharacters = characterList(current);
+  const nextCharacters = characterList(next);
+  if (currentCharacters.length !== nextCharacters.length
+      || currentCharacters.some((item, index) => String(item?.id || "") !== String(nextCharacters[index]?.id || ""))) {
     throw new Error("schema v6 人物资产 ID 不能通过草案编辑修改。");
   }
   for (const key of ["products", "scenes"]) {
@@ -173,7 +180,14 @@ function versionSixValidationInput(currentRequest, identifiedDraft) {
     schemaVersion: 6,
     version: currentRequest.version,
     confirmed: false,
-    character: { ...identifiedDraft.character, id: currentRequest.character?.id },
+    characters: (identifiedDraft.characters || []).map((item, index) => ({
+      ...item,
+      id: currentRequest.characters?.[index]?.id || (index === 0 ? currentRequest.character?.id : item.id),
+    })),
+    character: {
+      ...(identifiedDraft.characters?.[0] || identifiedDraft.character),
+      id: currentRequest.characters?.[0]?.id || currentRequest.character?.id,
+    },
     products: products.map((item, index) => ({
       ...item,
       id: currentRequest.products?.[index]?.id,
@@ -197,13 +211,13 @@ function mergeVersionSixDraftEnvelope(currentRequest, identifiedDraft, validated
     schemaVersion: 6,
     version: validatedDraft.version,
     confirmed: false,
+    castConfirmed: validatedDraft.castConfirmed === true,
     visualStyle: { ...(currentRequest.visualStyle || {}), ...validatedDraft.visualStyle },
-    character: {
-      ...(currentRequest.character || {}),
-      id: currentRequest.character?.id,
-      prompt: validatedDraft.character.prompt,
-      voiceProfile: validatedDraft.character.voiceProfile,
-    },
+    characters: validatedDraft.characters.map((item, index) => ({
+      ...(currentRequest.characters?.[index] || (index === 0 ? currentRequest.character : {}) || {}),
+      ...item,
+    })),
+    character: { ...validatedDraft.characters[0] },
     products: mergePromptAssets("products"),
     scenes: mergePromptAssets("scenes"),
     settings: { ...(currentRequest.settings || {}), ...validatedDraft.settings },
@@ -240,7 +254,16 @@ function mergeIncompleteVersionSixDraft(currentRequest, identifiedDraft) {
     schemaVersion: 6,
     version: Number(currentRequest.version || 5),
     confirmed: false,
+    castConfirmed: false,
     visualStyle: visualStyle.normalizeVisualStyle(identifiedDraft.visualStyle),
+    characters: (Array.isArray(currentRequest.characters) && currentRequest.characters.length
+      ? currentRequest.characters
+      : [currentRequest.character].filter(Boolean)).map((character, index) => ({
+      ...character,
+      role: clean(identifiedDraft.characters?.[index]?.role || character?.role || character?.id),
+      prompt: clean(identifiedDraft.characters?.[index]?.prompt || identifiedDraft.character?.prompt),
+      voiceProfile: clean(identifiedDraft.characters?.[index]?.voiceProfile || identifiedDraft.character?.voiceProfile),
+    })),
     character: {
       ...(currentRequest.character || {}),
       prompt: clean(identifiedDraft.character?.prompt),
@@ -1897,6 +1920,9 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       if (JSON.stringify(normalizedCurrent.visualStyle) !== JSON.stringify(normalizedSaved.visualStyle)) {
         throw new Error("项目统一视觉风格正在被生成队列使用，完成或停止后才能修改。");
       }
+      if (JSON.stringify(normalizedCurrent.characters) !== JSON.stringify(normalizedSaved.characters)) {
+        throw new Error("人物参考资产正在被生成队列使用，完成或停止后才能修改。");
+      }
       const currentById = new Map(normalizedCurrent.shots.map((shot) => [String(shot.id), shot]));
       const nextById = new Map(normalizedSaved.shots.map((shot) => [String(shot.id), shot]));
       for (const id of lockedIds) {
@@ -3487,6 +3513,51 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       throw error;
     }
     const { image, video, imageModel, model, resolution } = runtime;
+    const structuredTimeline = Number(context.requestVersion) >= 4
+      && Array.isArray(shot.timeline) && shot.timeline.length > 0;
+    const modelFamily = generationPolicy.classifyModel(model);
+    const directReferenceMode = structuredTimeline && modelFamily === "seedance";
+    const availableCharacters = Array.isArray(context.characters) && context.characters.length
+      ? context.characters
+      : [context.character].filter(Boolean);
+    const hasExplicitCharacterSelection = Array.isArray(shot.characterIds);
+    const selectedCharacterIds = new Set(hasExplicitCharacterSelection ? shot.characterIds.map(String) : []);
+    const characterSources = hasExplicitCharacterSelection
+      ? availableCharacters.filter((character) => selectedCharacterIds.has(String(character.id)))
+      : availableCharacters;
+    if (hasExplicitCharacterSelection && characterSources.length !== selectedCharacterIds.size) {
+      throw new Error("镜头 " + shot.id + " 找不到全部人物资产。");
+    }
+    if (characterSources.length > 3) {
+      throw new Error("镜头 " + shot.id + " 最多支持 3 个固定角色；请拆分镜头后再生成。");
+    }
+    const sceneSource = (context.scenes || []).find((item) => String(item.id) === String(shot.sceneId));
+    if (!sceneSource) throw new Error("镜头 " + shot.id + " 找不到场景资产：" + shot.sceneId);
+    const requestedProductSources = (shot.productIds || []).map((id) => {
+      const source = (context.products || []).find((item) => String(item.id) === String(id));
+      if (!source) throw new Error("镜头 " + shot.id + " 找不到产品资产：" + id);
+      return source;
+    });
+    const imageReferenceSlotsForProducts = Math.max(0, 4 - characterSources.length - 1);
+    const referencedProductSources = directReferenceMode
+      ? requestedProductSources
+      : requestedProductSources.slice(0, imageReferenceSlotsForProducts);
+    const storedAssets = (kind) => {
+      if (kind === "character") {
+        return Array.isArray(initialProject.characterAssets) && initialProject.characterAssets.length
+          ? initialProject.characterAssets
+          : [initialProject.characterAsset].filter(Boolean);
+      }
+      return Array.isArray(initialProject[kind === "scene" ? "sceneAssets" : "productAssets"])
+        ? initialProject[kind === "scene" ? "sceneAssets" : "productAssets"]
+        : [];
+    };
+    const storedAssetId = (asset) => {
+      if (String(asset?.storageId || "").trim()) return String(asset.storageId).trim();
+      const imagePath = String(asset?.imagePath || "").replace(/\\/g, "/");
+      const parts = imagePath.split("/").filter(Boolean);
+      return parts.length >= 2 ? parts[parts.length - 2] : String(asset?.id || "");
+    };
     const ensureAsset = async (kind, source) => {
       this.assertWorkbenchQueueRunnerLock(paths.folder, context.queueId);
       const label = kind === "character" ? "人物" : kind === "scene" ? "场景" : "产品";
@@ -3502,8 +3573,18 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
         : kind === "scene"
           ? referenceAssets.resolveSceneAsset
           : referenceAssets.resolveProductAsset;
+      const logicalId = String(source.id || "");
+      const existingStored = storedAssets(kind).find((asset) => String(asset?.id) === logicalId);
+      let target = resolver(this.vaultPath(), paths.isV6
+        ? referenceAssets.projectScopedAssetId(paths.folder, kind, logicalId)
+        : logicalId);
+      if (existingStored) {
+        const previous = resolver(this.vaultPath(), storedAssetId(existingStored));
+        const previousSpec = referenceAssets.createGenerationSpec(previous, source.prompt, context.visualStyle);
+        if (referenceAssets.assetMatchesGenerationSpec(previous, previousSpec)) target = previous;
+      }
       const resolved = await withPaidSubmissionGate({ kind: "reference-asset", assetKind: kind, assetId: String(source.id || "") }, async ({ resolve } = {}) => {
-        const accepted = await this.ensureReferenceAsset(image, resolver(this.vaultPath(), source.id), source.prompt, imageModel, context.visualStyle);
+        const accepted = await this.ensureReferenceAsset(image, target, source.prompt, imageModel, context.visualStyle);
         await (resolve || report)({
           status: "reference-processing",
           stage: "reference-assets",
@@ -3519,25 +3600,39 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       });
       this.updateProjectShot(paths.folder, shot.id, { status: `${label}参考图已就绪 · ${String(source.id || "")}` });
       return {
-        id: resolved.id,
+        id: logicalId,
+        storageId: resolved.id,
         imagePath: resolved.imagePath,
         metadataPath: resolved.metadataPath,
         contentHash: resolved.contentHash || referenceAssets.hashAssetImage(this.vaultPath(), resolved),
         reused: resolved.reused,
       };
     };
-    const characterAsset = await ensureAsset("character", context.character);
-    const sceneAssets = [];
-    for (const scene of context.scenes || []) sceneAssets.push(await ensureAsset("scene", scene));
+    const characterAssets = [];
+    for (const character of characterSources) characterAssets.push(await ensureAsset("character", character));
+    const sceneAssets = [await ensureAsset("scene", sceneSource)];
     const productAssets = [];
-    for (const product of context.products || []) productAssets.push(await ensureAsset("product", product));
+    for (const product of referencedProductSources) productAssets.push(await ensureAsset("product", product));
     const mergeAssets = (current, updates) => {
       const byId = new Map((Array.isArray(current) ? current : []).map((asset) => [String(asset.id), asset]));
       for (const asset of updates) byId.set(String(asset.id), asset);
       return [...byId.values()];
     };
     this.mutateProject(paths.folder, (project) => {
-      project.characterAsset = characterAsset;
+      const existingCharacterAssets = Array.isArray(project.characterAssets) && project.characterAssets.length
+        ? project.characterAssets
+        : [project.characterAsset].filter(Boolean);
+      project.characterAssets = mergeAssets(existingCharacterAssets, characterAssets);
+      const primaryCharacterId = String(context.primaryCharacterId || "");
+      const primaryCharacterAsset = project.characterAssets.find((asset) => String(asset.id) === primaryCharacterId);
+      if (primaryCharacterAsset) project.characterAsset = primaryCharacterAsset;
+      else if (project.characterAsset && (!primaryCharacterId || String(project.characterAsset.id) === primaryCharacterId)) {
+        project.characterAsset = { ...project.characterAsset };
+      } else if (!primaryCharacterId && Number(context.requestVersion) < 6) {
+        project.characterAsset = project.characterAssets[0] || null;
+      } else {
+        project.characterAsset = null;
+      }
       project.sceneAssets = mergeAssets(project.sceneAssets, sceneAssets);
       project.productAssets = mergeAssets(project.productAssets, productAssets);
       project.imageModel = imageModel;
@@ -3545,22 +3640,21 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
       project.status = "generating";
       project.statusText = "正在生成镜头 " + shot.id;
     });
-
-    const sceneSource = (context.scenes || []).find((item) => String(item.id) === String(shot.sceneId));
     const sceneAsset = sceneAssets.find((item) => String(item.id) === String(shot.sceneId));
-    if (!sceneSource || !sceneAsset) throw new Error("镜头 " + shot.id + " 找不到场景资产：" + shot.sceneId);
-    const productSources = (shot.productIds || []).map((id) => {
-      const source = (context.products || []).find((item) => String(item.id) === String(id));
-      const asset = productAssets.find((item) => String(item.id) === String(id));
-      if (!source || !asset) throw new Error("镜头 " + shot.id + " 找不到产品资产：" + id);
-      return { source, asset };
-    });
+    if (!sceneAsset) throw new Error("镜头 " + shot.id + " 找不到场景资产：" + shot.sceneId);
+    const productSources = requestedProductSources.map((source) => ({
+      source,
+      asset: productAssets.find((item) => String(item.id) === String(source.id)) || null,
+    }));
     const fingerprint = generationPolicy.createGenerationFingerprint({
       requestVersion: context.requestVersion,
       visualStyle: context.visualStyle,
-      character: { ...context.character, contentHash: characterAsset.contentHash },
+      characters: characterSources.map((source) => {
+        const asset = characterAssets.find((item) => String(item.id) === String(source.id));
+        return { ...source, contentHash: asset?.contentHash || "" };
+      }),
       scene: { ...sceneSource, contentHash: sceneAsset.contentHash },
-      products: productSources.map(({ source, asset }) => ({ ...source, contentHash: asset.contentHash })),
+      products: productSources.map(({ source, asset }) => ({ ...source, contentHash: asset?.contentHash || "" })),
       shot,
       model,
       ratio: context.settings.ratio,
@@ -3572,10 +3666,6 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     });
     const latestProject = this.readJson(paths.projectPath);
     const existing = (latestProject.shots || []).find((item) => String(item.id) === String(shot.id)) || {};
-    const structuredTimeline = Number(context.requestVersion) >= 4
-      && Array.isArray(shot.timeline) && shot.timeline.length > 0;
-    const modelFamily = generationPolicy.classifyModel(model);
-    const directReferenceMode = structuredTimeline && modelFamily === "seedance";
     const needsFirstFrame = !directReferenceMode;
     const needsLastFrame = !structuredTimeline && Boolean(shot.lastImagePrompt);
     const firstImagePath = needsFirstFrame
@@ -3636,14 +3726,18 @@ module.exports = class MangosteenVideoReplicaPlugin extends Plugin {
     let videoTaskId = resumableVideoTaskId;
     try {
       const referencePaths = [
-        characterAsset.imagePath,
+        ...characterAssets.map((asset) => asset.imagePath),
         sceneAsset.imagePath,
-        ...productSources.map(({ asset }) => asset.imagePath),
+        ...productSources.filter(({ asset }) => asset).map(({ asset }) => asset.imagePath),
       ];
+      const sceneReferenceIndex = characterAssets.length + 1;
+      const referencedProducts = productSources.filter(({ asset }) => asset);
+      const textOnlyProducts = productSources.filter(({ asset }) => !asset);
       const continuity = [
-        "参考图1是人物设定板：人物身份、脸部、发型、发色、年龄与服装必须严格一致。",
-        "参考图2是纯环境场景板：只参考空间、固定陈设、光线、天气与环境质感，不得从中创造人物或核心产品。",
-        ...productSources.map(({ asset }, index) => "参考图" + (index + 3) + "是产品设定板（" + asset.id + "）：产品外形、颜色、材质、比例、包装和标识位置必须严格一致。"),
+        ...characterSources.map((source, index) => `参考图${index + 1}是人物设定板（${source.role || source.id}）：人物身份、脸部、发型、发色、年龄与服装必须严格一致，不得与其他角色混淆。`),
+        `参考图${sceneReferenceIndex}是纯环境场景板：只参考空间、固定陈设、光线、天气与环境质感，不得从中创造人物或核心产品。`,
+        ...referencedProducts.map(({ asset }, index) => "参考图" + (sceneReferenceIndex + index + 1) + "是产品设定板（" + asset.id + "）：产品外形、颜色、材质、比例、包装和标识位置必须严格一致。"),
+        ...textOnlyProducts.map(({ source }) => `产品要求（本镜头受 4 张参考图上限约束，使用文字固定）：${source.prompt}`),
       ].join("\n");
       if (!videoTaskId && needsFirstFrame && !currentFirstImagePath) {
         this.assertWorkbenchQueueRunnerLock(paths.folder, context.queueId);

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["visualStyle", "character", "products", "scenes", "shots"],
+  "required": ["visualStyle", "characters", "products", "scenes", "shots"],
   "properties": {
     "visualStyle": {
       "type": "object",
@@ -13,14 +13,20 @@
         "prompt": { "type": "string", "minLength": 20 }
       }
     },
-    "character": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["id", "prompt", "voiceProfile"],
-      "properties": {
-        "id": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$" },
-        "prompt": { "type": "string", "minLength": 20 },
-        "voiceProfile": { "type": "string" }
+    "characters": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 12,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "role", "prompt", "voiceProfile"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$" },
+          "role": { "type": "string", "minLength": 1, "maxLength": 32 },
+          "prompt": { "type": "string", "minLength": 20 },
+          "voiceProfile": { "type": "string" }
+        }
       }
     },
     "products": {
@@ -57,9 +63,14 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["title", "sceneId", "productIds", "startTime", "endTime", "timeline"],
+        "required": ["title", "characterIds", "sceneId", "productIds", "startTime", "endTime", "timeline"],
         "properties": {
           "title": { "type": "string", "minLength": 1 },
+          "characterIds": {
+            "type": "array",
+            "maxItems": 3,
+            "items": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$" }
+          },
           "sceneId": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$" },
           "productIds": {
             "type": "array",

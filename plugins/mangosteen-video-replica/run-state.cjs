@@ -93,7 +93,9 @@ function createActiveRun({ runId, plan, now } = {}) {
   const generationContext = {
     planId: String(plan.planId || ""),
     requestVersion: Number(plan.requestVersion),
+    primaryCharacterId: String(plan.primaryCharacterId || ""),
     visualStyle: clone(plan.visualStyle),
+    characters: clone(plan.characters || []),
     character: clone(plan.character),
     products: clone(plan.products || []),
     scenes: clone(plan.scenes || []),
