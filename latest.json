@@ -1,19 +1,18 @@
 {
   "schemaVersion": 1,
-  "version": "5.3.26",
-  "package": "mangosteen-obsidian-plugins-5.3.26.zip",
-  "sha256": "3d79606e685e4f00df96e7635477d5c8545ccf6093694972a374237850ca3aef",
+  "version": "5.3.28",
+  "package": "mangosteen-obsidian-plugins-5.3.28.zip",
+  "sha256": "24cd5db1db21fcc76c1a124def835b0dc856d3a6066e4b3de87252e1306faeb1",
   "compatibilityFix": "mangosteen-update-unlock-5.3.17.zip",
   "compatibilityFixSha256": "2b39537de41242daa13ca4dd086f6a00da7e9ff9f37c5442989d20c260e65b6d",
   "notes": [
-    "修复：切换语言模型分组后，当前模型会立即同步到该分组",
-    "优化：启动时预加载模型目录，重复打开账号中心不再重新等待",
-    "修复：文生图选择 2–7 张时拆分为独立任务，部分失败也会保留成功图片"
+    "修复：上游视频分组中的模型标识全部原样透传，不再被本地白名单拦截",
+    "支持：seedance-2.5_v1 可选择 30 秒、720P；未知新模型的时长和分辨率改由上游平台校验"
   ],
   "components": {
     "mangosteen-agent": "5.3.26",
-    "mangosteen-image": "5.3.26",
-    "mangosteen-video": "5.3.24",
+    "mangosteen-image": "5.3.27",
+    "mangosteen-video": "5.3.28",
     "mangosteen-workbench": "2.0.0"
   }
 }
