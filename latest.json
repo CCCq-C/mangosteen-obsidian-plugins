@@ -1,18 +1,18 @@
 {
   "schemaVersion": 1,
-  "version": "5.3.28",
-  "package": "mangosteen-obsidian-plugins-5.3.28.zip",
-  "sha256": "24cd5db1db21fcc76c1a124def835b0dc856d3a6066e4b3de87252e1306faeb1",
+  "version": "5.3.29",
+  "package": "mangosteen-obsidian-plugins-5.3.29.zip",
+  "sha256": "eae7dea0900a80ae14d6d3d3730053cd83c2128d52ef90e3878c119a9c56a118",
   "compatibilityFix": "mangosteen-update-unlock-5.3.17.zip",
   "compatibilityFixSha256": "2b39537de41242daa13ca4dd086f6a00da7e9ff9f37c5442989d20c260e65b6d",
   "notes": [
-    "修复：上游视频分组中的模型标识全部原样透传，不再被本地白名单拦截",
-    "支持：seedance-2.5_v1 可选择 30 秒、720P；未知新模型的时长和分辨率改由上游平台校验"
+    "修复：山竹生图、视频、智能体和工作台版本号统一，更新完成后不再重复提示",
+    "支持：上游视频模型标识继续原样透传，seedance-2.5_v1 支持 30 秒、720P"
   ],
   "components": {
-    "mangosteen-agent": "5.3.26",
-    "mangosteen-image": "5.3.27",
-    "mangosteen-video": "5.3.28",
-    "mangosteen-workbench": "2.0.0"
+    "mangosteen-agent": "5.3.29",
+    "mangosteen-image": "5.3.29",
+    "mangosteen-video": "5.3.29",
+    "mangosteen-workbench": "5.3.29"
   }
 }
