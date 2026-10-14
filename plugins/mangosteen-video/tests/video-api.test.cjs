@@ -41,6 +41,12 @@ assert.throws(() => api.createVideoPayload({
   referenceImages: imageUrls(31)
 }), /最多填写 30 个/);
 
+assert.deepStrictEqual(api.createVideoPayload({
+  model: "seedance-2.5_v1", prompt: "move", duration: 30, ratio: "9:16", resolution: "720p"
+}), {
+  model: "seedance-2.5_v1", prompt: "move", duration: 30, ratio: "9:16", resolution: "720p"
+});
+
 for (const [field, label] of [
   ["referenceImages", "参考图片"],
   ["referenceVideos", "参考视频"],
@@ -55,6 +61,7 @@ for (const [field, label] of [
 assert.strictEqual(api.resolveVideoModelFamily(" MiniMax-H3 "), "minimax-h3");
 assert.strictEqual(api.resolveVideoModelFamily("sd-2.0-stable"), "seedance-2.0");
 assert.strictEqual(api.resolveVideoModelFamily("seedance-2.5_k1"), "seedance-2.5");
+assert.strictEqual(api.resolveVideoModelFamily("seedance-2.5_v1"), "seedance-2.5");
 assert.strictEqual(api.resolveVideoModelFamily("wan3.0-video-prime"), "generic");
 assert.strictEqual(api.VIDEO_INPUT_CAPABILITIES["minimax-h3"].mode, "frame");
 assert.strictEqual(api.VIDEO_INPUT_CAPABILITIES["seedance-2.0"].maxReferenceImages, 9);
@@ -107,10 +114,24 @@ assert.throws(() => api.createVideoPayload({
 assert.throws(() => api.createVideoPayload({
   model: "MiniMax-H3", prompt: "move", duration: 13.5, resolution: "768p"
 }), /4 到 15 的整数秒/);
-assert.throws(() => api.createVideoPayload({
-  model: "vendor-seedance-preview", prompt: "move", duration: 4, ratio: "9:16", resolution: "720p"
-}), /不支持的 Seedance/);
-assert.strictEqual(api.resolveVideoModelFamily("vendor-seedance-preview"), "unsupported-seedance");
+
+for (const model of [
+  "sd-2.0", "sd-2.0-720p", "sd-2.0-z", "sd-2.5",
+  "sd-2.5-720p", "sd-2.5-chaofen", "sd-2.5-z",
+]) {
+  assert.deepStrictEqual(api.createVideoPayload({
+    model, prompt: "move", duration: 4, ratio: "9:16", resolution: "720p"
+  }), { model, prompt: "move", duration: 4, ratio: "9:16", resolution: "720p" });
+}
+
+assert.deepStrictEqual(api.createVideoPayload({
+  model: "vendor-seedance-preview", prompt: "move", duration: 30, ratio: "9:16", resolution: "4k"
+}), {
+  model: "vendor-seedance-preview", prompt: "move", duration: 30, ratio: "9:16", resolution: "4k"
+});
+assert.strictEqual(api.resolveVideoModelFamily("vendor-seedance-preview"), "generic");
+assert.strictEqual(api.videoCapabilitiesForModel("vendor-seedance-preview").maxDuration, null);
+assert.match(api.videoDurationHint(api.videoCapabilitiesForModel("vendor-seedance-preview")), /上游平台/);
 
 const submissionFingerprint = api.createSubmissionFingerprint({
   model: "MiniMax-H3", prompt: "move", frame: Buffer.from("first-frame"),

@@ -16,6 +16,7 @@ const MODEL_PROFILES = {
   "sd-2.0-stable": { resolutions: ["480p", "720p", "1080p"], maxDuration: 15, maxImages: 9, maxVideos: 3, maxAudios: 3, prices: { "480p": 0.42, "720p": 0.62, "1080p": 1.42 } },
   "seedance-2.5": { resolutions: ["480p", "720p", "1080p"], maxDuration: 30, maxPrompt: 5000, maxImages: 30, maxVideos: 10, maxAudios: 10, prices: { "480p": 0.5, "720p": 1.07, "1080p": 1.63 } },
   "seedance-2.5_k1": { resolutions: ["480p", "720p"], maxDuration: 30, maxPrompt: 5000, maxImages: 30, maxVideos: 10, maxAudios: 10, prices: { "480p": 0.36, "720p": 0.65 }, referenceVideoPrices: { "480p": 0.43, "720p": 0.75 } },
+  "seedance-2.5_v1": { resolutions: ["720p"], maxDuration: 30, maxPrompt: 5000, maxImages: 30, maxVideos: 10, maxAudios: 10 },
   "seedance-2.5_y2": { resolutions: ["480p", "720p", "1080p"], maxDuration: 30, maxPrompt: 5000, maxImages: 30, maxVideos: 10, maxAudios: 10, prices: { "480p": 0.43, "720p": 0.65, "1080p": 1.43 } },
   "wan3.0-r2v-k1": { resolutions: ["480p", "720p", "1080p"], maxDuration: 30, maxImages: 10, maxVideos: 5, maxAudios: 5, prices: { "480p": 0.26, "720p": 0.35, "1080p": 0.53 } },
   "wan3.0-video-prime": { resolutions: ["480p", "720p", "1080p"], maxDuration: 30, maxImages: 10, maxVideos: 5, maxAudios: 5, prices: { "480p": 0.27, "720p": 0.54, "1080p": 1.08 } },
@@ -82,8 +83,7 @@ function resolveVideoModelFamily(model) {
   const id = clean(model).toLowerCase();
   if (id === "minimax-h3") return "minimax-h3";
   if (["seedance-2.0", "sd-2.0-fast", "sd-2.0-mini", "sd-2.0-stable"].includes(id)) return "seedance-2.0";
-  if (["seedance-2.5", "seedance-2.5_k1", "seedance-2.5_y2"].includes(id)) return "seedance-2.5";
-  if (id.includes("seedance") || /^sd-2(?:\.|-|_)/.test(id)) return "unsupported-seedance";
+  if (["seedance-2.5", "seedance-2.5_k1", "seedance-2.5_v1", "seedance-2.5_y2"].includes(id)) return "seedance-2.5";
   return "generic";
 }
 
@@ -96,13 +96,17 @@ function createVideoPayload(options = {}) {
   if (!model) throw new Error("请选择视频模型");
   const capabilities = videoCapabilitiesForModel(model, options.allowedResolutions);
   const modelFamily = resolveVideoModelFamily(model);
-  if (modelFamily === "unsupported-seedance") throw new Error(`不支持的 Seedance 模型标识：${model}`);
   const inputCapabilities = VIDEO_INPUT_CAPABILITIES[modelFamily];
   if (!prompt) throw new Error("请先描述想生成的视频");
   if (capabilities.maxPrompt && prompt.length > capabilities.maxPrompt) throw new Error(`${model} 的视频描述不能超过 ${capabilities.maxPrompt} 个字符`);
-  if (!Number.isInteger(duration) || duration < capabilities.minDuration || duration > capabilities.maxDuration) throw new Error(`视频时长必须是 ${capabilities.minDuration} 到 ${capabilities.maxDuration} 的整数秒`);
+  const hasDurationLimit = capabilities.maxDuration !== null && capabilities.maxDuration !== undefined && Number.isFinite(Number(capabilities.maxDuration));
+  if (!Number.isInteger(duration) || duration < capabilities.minDuration || (hasDurationLimit && duration > capabilities.maxDuration)) {
+    throw new Error(hasDurationLimit
+      ? `视频时长必须是 ${capabilities.minDuration} 到 ${capabilities.maxDuration} 的整数秒`
+      : `视频时长必须是不少于 ${capabilities.minDuration} 的整数秒`);
+  }
   if (!["16:9", "9:16", "1:1"].includes(ratio)) throw new Error("视频比例仅支持 16:9、9:16 或 1:1");
-  if (!capabilities.resolutions.includes(resolution)) throw new Error(`${model} 的分辨率仅支持 ${capabilities.resolutions.join("、")}`);
+  if (capabilities.enforceResolutions && !capabilities.resolutions.includes(resolution)) throw new Error(`${model} 的分辨率仅支持 ${capabilities.resolutions.join("、")}`);
   const firstImage = clean(options.firstImage);
   const lastImage = clean(options.lastImage);
   const usedReferenceLabels = [
@@ -178,12 +182,14 @@ function videoCapabilitiesForModel(model, learned = []) {
   const id = clean(model).toLowerCase();
   const profile = MODEL_PROFILES[id] || {};
   let resolutions = saved.length ? saved : profile.resolutions;
-  if (!resolutions && /sd-fast-480p/i.test(id)) resolutions = ["480p"];
-  if (!resolutions && /sd-fast-720p/i.test(id)) resolutions = ["720p"];
+  let inferredResolution = false;
+  if (!resolutions && /sd-fast-480p/i.test(id)) { resolutions = ["480p"]; inferredResolution = true; }
+  if (!resolutions && /sd-fast-720p/i.test(id)) { resolutions = ["720p"]; inferredResolution = true; }
   return {
     resolutions: resolutions || ["480p", "720p", "768p", "1080p", "2k"],
+    enforceResolutions: saved.length > 0 || Array.isArray(profile.resolutions) || inferredResolution,
     minDuration: 4,
-    maxDuration: profile.maxDuration || 15,
+    maxDuration: Number.isFinite(Number(profile.maxDuration)) ? Number(profile.maxDuration) : null,
     maxPrompt: profile.maxPrompt || null,
     maxImages: Number.isInteger(profile.maxImages) ? profile.maxImages : 9,
     maxVideos: Number.isInteger(profile.maxVideos) ? profile.maxVideos : 3,
@@ -192,9 +198,10 @@ function videoCapabilitiesForModel(model, learned = []) {
 }
 
 function videoDurationHint(capabilities = {}) {
-  const maxDuration = Math.max(0, Number(capabilities.maxDuration) || 0);
+  if (capabilities.maxDuration === null || capabilities.maxDuration === undefined || !Number.isFinite(Number(capabilities.maxDuration))) return "当前模型参数由上游平台校验，山竹不会在本地拦截模型。";
+  const maxDuration = Math.max(0, Number(capabilities.maxDuration));
   if (maxDuration >= 30) return `当前模型最长 ${maxDuration} 秒。`;
-  return `当前模型最多 ${maxDuration || 15} 秒；需要更长视频时，请切换到支持 30 秒的 Seedance 2.5 或 Wan 3.0 模型。`;
+  return `当前模型最多 ${maxDuration} 秒；需要更长视频时，请切换到支持 30 秒的 Seedance 2.5 或 Wan 3.0 模型。`;
 }
 
 function videoPriceForSelection(model, resolution, duration, hasReferenceVideo = false) {

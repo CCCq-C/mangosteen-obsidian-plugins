@@ -190,12 +190,16 @@ class VideoStudioModal extends Modal {
     const capabilities = this.plugin.getVideoCapabilities(model.value);
     if (capabilities.maxPrompt) prompt.maxLength = capabilities.maxPrompt;
     const grid = section.createDiv({ cls: "mangosteen-video-grid" });
-    const duration = addField(grid, `时长（${capabilities.minDuration}–${capabilities.maxDuration}秒）`, "input", { type: "number" });
+    const hasDurationLimit = capabilities.maxDuration !== null && capabilities.maxDuration !== undefined && Number.isFinite(Number(capabilities.maxDuration));
+    const durationLabel = hasDurationLimit
+      ? `时长（${capabilities.minDuration}–${capabilities.maxDuration}秒）`
+      : `时长（至少${capabilities.minDuration}秒，以平台为准）`;
+    const duration = addField(grid, durationLabel, "input", { type: "number" });
     duration.min = String(capabilities.minDuration);
-    duration.max = String(capabilities.maxDuration);
-    if (this.plugin.settings.duration < capabilities.minDuration || this.plugin.settings.duration > capabilities.maxDuration) this.plugin.settings.duration = capabilities.minDuration;
+    if (hasDurationLimit) duration.max = String(capabilities.maxDuration);
+    if (this.plugin.settings.duration < capabilities.minDuration || (hasDurationLimit && this.plugin.settings.duration > capabilities.maxDuration)) this.plugin.settings.duration = capabilities.minDuration;
     const draftDuration = Number(this.draftDuration ?? this.plugin.settings.duration);
-    duration.value = String(draftDuration >= capabilities.minDuration && draftDuration <= capabilities.maxDuration ? draftDuration : capabilities.minDuration);
+    duration.value = String(draftDuration >= capabilities.minDuration && (!hasDurationLimit || draftDuration <= capabilities.maxDuration) ? draftDuration : capabilities.minDuration);
     duration.addEventListener("input", () => { this.draftDuration = duration.value; this.refreshPrice?.(); });
     grid.createEl("p", { cls: "mangosteen-video-help", text: this.plugin.api.videoDurationHint(capabilities) });
     const ratio = addField(grid, "画面比例", "select");
