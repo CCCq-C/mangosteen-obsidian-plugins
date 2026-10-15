@@ -1,7 +1,7 @@
 {
   "id": "mangosteen-video",
   "name": "山竹视频",
-  "version": "5.3.30",
+  "version": "5.3.31",
   "minAppVersion": "1.4.0",
   "description": "使用山竹账号中心生成、恢复和保存 AI 视频。",
   "author": "山竹智能体",
