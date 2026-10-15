@@ -169,11 +169,11 @@ copy_plugin_files() {
 }
 
 copy_plugin_files mangosteen-image \
-  main.js image-api.cjs output-storage.cjs history-migration.cjs manifest.json styles.css \
+  main.js image-api.cjs output-storage.cjs history-migration.cjs migration-safe-fs.cjs manifest.json styles.css \
   tests/image-api.test.cjs tests/image-plugin.test.cjs tests/output-storage.test.cjs tests/history-migration.test.cjs
 
 copy_plugin_files mangosteen-video \
-  main.js video-api.cjs output-storage.cjs history-migration.cjs manifest.json styles.css \
+  main.js video-api.cjs output-storage.cjs history-migration.cjs migration-safe-fs.cjs manifest.json styles.css \
   tests/video-api.test.cjs tests/video-plugin.test.cjs tests/output-storage.test.cjs tests/history-migration.test.cjs
 
 copy_plugin_files mangosteen-video-replica \

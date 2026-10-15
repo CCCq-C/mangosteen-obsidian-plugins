@@ -313,7 +313,7 @@ module.exports = class MangosteenVideoPlugin extends Plugin {
     this.historyMigration = require(path.join(pluginRoot, "history-migration.cjs"));
     this.outputStorage = require(path.join(pluginRoot, "output-storage.cjs"));
     this.api = require(path.join(pluginRoot, "video-api.cjs"));
-    this.migrationRuntime = require(path.join(path.dirname(pluginRoot), "migration-safe-fs.cjs"));
+    this.migrationRuntime = require(path.join(pluginRoot, "migration-safe-fs.cjs"));
     this.createSafeMigrationFs = this.migrationRuntime.createSafeMigrationFs;
     this.migrationSafeFsUnavailable = this.migrationRuntime.MIGRATION_SAFE_FS_UNAVAILABLE;
     if (typeof this.createSafeMigrationFs !== "function") throw new Error("山竹视频迁移安全运行时无效");

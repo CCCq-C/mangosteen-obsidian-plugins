@@ -61,6 +61,11 @@ try {
   const sharedRuntime = path.join(pluginRoot, "migration-safe-fs.cjs");
   assert(fs.lstatSync(sharedRuntime).isFile() && !fs.lstatSync(sharedRuntime).isSymbolicLink(), "missing regular shared migration runtime");
   assert.strictEqual(fs.readFileSync(sharedRuntime, "utf8"), fs.readFileSync(path.join(repoRoot, "plugins/migration-safe-fs.cjs"), "utf8"));
+  for (const pluginId of ["mangosteen-image", "mangosteen-video"]) {
+    const bundledRuntime = path.join(pluginRoot, pluginId, "migration-safe-fs.cjs");
+    assert(fs.lstatSync(bundledRuntime).isFile() && !fs.lstatSync(bundledRuntime).isSymbolicLink(), `${pluginId} must carry a regular migration runtime inside its own install directory`);
+    assert.strictEqual(fs.readFileSync(bundledRuntime, "utf8"), fs.readFileSync(path.join(repoRoot, "plugins/migration-safe-fs.cjs"), "utf8"));
+  }
   for (const file of [
     "main.js", "replica-core.cjs", "replica-cli.cjs", "replica-editor.cjs", "replica-ui-state.cjs",
     "replica-workbench.cjs", "shot-timeline.cjs", "visual-style.cjs", "tests/plugin-load.test.cjs",

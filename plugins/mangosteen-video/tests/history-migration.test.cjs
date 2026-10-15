@@ -279,7 +279,7 @@ function adapters(initial, options = {}) {
     path.join(pluginRoot, "history-migration.cjs"),
     path.join(pluginRoot, "output-storage.cjs"),
     path.join(pluginRoot, "video-api.cjs"),
-    path.resolve(pluginRoot, "../migration-safe-fs.cjs"),
+    path.join(pluginRoot, "migration-safe-fs.cjs"),
   ];
   const absoluteModuleLoads = new Map(absoluteModulePaths.map((modulePath) => [modulePath, 0]));
   Module._load = function patchedLoad(request, parent, isMain) {
