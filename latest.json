@@ -1,18 +1,18 @@
 {
   "schemaVersion": 1,
-  "version": "5.3.30",
-  "package": "mangosteen-obsidian-plugins-5.3.30.zip",
-  "sha256": "7dc29fc72f755bd8c5a6ae50d770f3f86ba3d4754cf4b25444504baa5554153c",
+  "version": "5.3.31",
+  "package": "mangosteen-obsidian-plugins-5.3.31.zip",
+  "sha256": "5a114a3e5d5b46c88d5b6edc6f4dcc38f026de6baee3dc681f4129c8439861e9",
   "compatibilityFix": "mangosteen-update-unlock-5.3.17.zip",
   "compatibilityFixSha256": "2b39537de41242daa13ca4dd086f6a00da7e9ff9f37c5442989d20c260e65b6d",
   "notes": [
     "修复：山竹生图、山竹视频内置迁移运行时，更新后可正常加载",
-    "兼容：旧版更新器可直接安装本次修复，无需重新安装软件"
+    "版本：全部业务插件与内置更新器统一升级到 5.3.31"
   ],
   "components": {
-    "mangosteen-agent": "5.3.30",
-    "mangosteen-image": "5.3.30",
-    "mangosteen-video": "5.3.30",
-    "mangosteen-workbench": "5.3.30"
+    "mangosteen-agent": "5.3.31",
+    "mangosteen-image": "5.3.31",
+    "mangosteen-video": "5.3.31",
+    "mangosteen-workbench": "5.3.31"
   }
 }
