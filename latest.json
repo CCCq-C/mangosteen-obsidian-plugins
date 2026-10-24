@@ -1,18 +1,19 @@
 {
   "schemaVersion": 1,
-  "version": "5.3.31",
-  "package": "mangosteen-obsidian-plugins-5.3.31.zip",
-  "sha256": "5a114a3e5d5b46c88d5b6edc6f4dcc38f026de6baee3dc681f4129c8439861e9",
+  "version": "5.3.32",
+  "package": "mangosteen-obsidian-plugins-5.3.32.zip",
+  "sha256": "abaabcf9f3670be02f7324bd14c9bf6396b4b403d7a90447cc43bb1127fac0f2",
   "compatibilityFix": "mangosteen-update-unlock-5.3.17.zip",
   "compatibilityFixSha256": "2b39537de41242daa13ca4dd086f6a00da7e9ff9f37c5442989d20c260e65b6d",
   "notes": [
-    "修复：山竹生图、山竹视频内置迁移运行时，更新后可正常加载",
-    "版本：全部业务插件与内置更新器统一升级到 5.3.31"
+    "优化：长任务显示真实等待时长，超过两分钟可停止后拆分任务",
+    "修复：继续、下一步等指令保留原对话的工具和上下文流程",
+    "修复：快速对话支持取消，并拦截未实际执行的工具指令"
   ],
   "components": {
-    "mangosteen-agent": "5.3.31",
-    "mangosteen-image": "5.3.31",
-    "mangosteen-video": "5.3.31",
-    "mangosteen-workbench": "5.3.31"
+    "mangosteen-agent": "5.3.32",
+    "mangosteen-image": "5.3.32",
+    "mangosteen-video": "5.3.32",
+    "mangosteen-workbench": "5.3.32"
   }
 }
