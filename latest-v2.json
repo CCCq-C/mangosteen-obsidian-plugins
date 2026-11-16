@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 2,
+  "version": "5.4.15",
+  "package": "mangosteen-obsidian-plugins-5.4.15.zip",
+  "sha256": "9576cd348ad7b6a26da56b7a1112bb26b73520edfab3a7cc18ac96cce9af11db",
+  "claudianVersion": "2.4.0",
+  "notes": [
+    "修复 Mac 更新后 Obsidian 关闭但没有重新启动",
+    "Mac 更新脚本统一为 LF，并移除 Python 3 依赖",
+    "后台更新失败时保留或重新打开 Obsidian",
+    "包含 5.4.14 的视频高级参考材料与重复提交保护"
+  ],
+  "components": {
+    "mangosteen-media-core": "5.4.8",
+    "mangosteen-image": "5.4.8",
+    "mangosteen-video": "5.4.14",
+    "mangosteen-workbench": "5.4.8",
+    "mangosteen-updater": "5.4.15"
+  }
+}
