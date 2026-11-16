@@ -1,0 +1,9 @@
+{
+  "id": "mangosteen-updater",
+  "name": "山竹插件更新器",
+  "version": "5.4.16",
+  "minAppVersion": "1.8.0",
+  "description": "安全检查、更新和修复山竹系列插件。",
+  "author": "山竹智能体",
+  "isDesktopOnly": true
+}

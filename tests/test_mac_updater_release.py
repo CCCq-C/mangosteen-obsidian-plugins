@@ -121,6 +121,7 @@ class MacUpdaterReleaseTests(unittest.TestCase):
             write(
                 harness,
                 "const Module = require('module');\n"
+                "Object.defineProperty(process, 'platform', { value: 'darwin' });\n"
                 "const originalLoad = Module._load;\n"
                 "class Empty {}\n"
                 "class Notice { hide() {} setMessage() {} }\n"

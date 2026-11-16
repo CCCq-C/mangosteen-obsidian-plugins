@@ -1,13 +1,14 @@
 {
   "schemaVersion": 2,
-  "version": "5.4.15",
-  "package": "mangosteen-obsidian-plugins-5.4.15.zip",
-  "sha256": "9576cd348ad7b6a26da56b7a1112bb26b73520edfab3a7cc18ac96cce9af11db",
+  "version": "5.4.16",
+  "package": "mangosteen-obsidian-plugins-5.4.16.zip",
+  "sha256": "7f4b827353996329200c833cf37f10810b86f7fcd21d6eb8fb0061eda47ca2c2",
   "claudianVersion": "2.4.0",
   "notes": [
-    "修复 Mac 更新后 Obsidian 关闭但没有重新启动",
-    "Mac 更新脚本统一为 LF，并移除 Python 3 依赖",
-    "后台更新失败时保留或重新打开 Obsidian",
+    "修复 Windows 自定义安装路径无法重新启动 Obsidian",
+    "Windows 更新器使用当前正在运行的 Obsidian 可执行文件路径",
+    "继承 Mac 5.4.15 重启修复，并移除 Python 3 依赖",
+    "Windows 5.4.15 如未自动关闭 Obsidian，请手动退出一次完成升级",
     "包含 5.4.14 的视频高级参考材料与重复提交保护"
   ],
   "components": {
@@ -15,6 +16,6 @@
     "mangosteen-image": "5.4.8",
     "mangosteen-video": "5.4.14",
     "mangosteen-workbench": "5.4.8",
-    "mangosteen-updater": "5.4.15"
+    "mangosteen-updater": "5.4.16"
   }
 }
